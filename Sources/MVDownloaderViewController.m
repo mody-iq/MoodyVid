@@ -620,6 +620,7 @@
     [[MVDownloadEngine shared] downloadURL:url quality:quality completion:^(NSString *filePath, NSString *error) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
+        [self_ stopWatching];
         [self_ setBusy:NO];
         self_.progressView.hidden = YES;
         if (filePath.length) {
@@ -647,6 +648,9 @@
 /// Follows the shared store so the bar shows real progress, speed and ETA.
 - (void)beginWatching {
     if (!self.watchedIdentifier) return;
+    // One observer per job: a second download would otherwise leave the first
+    // block running against a stale identifier.
+    [self stopWatching];
     __weak typeof(self) weakSelf = self;
     self.storeObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVDownloadStoreDidChangeNotification
                                                                        object:nil queue:NSOperationQueue.mainQueue
@@ -669,6 +673,13 @@
     }];
 }
 
+- (void)stopWatching {
+    if (self.storeObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.storeObserver];
+        self.storeObserver = nil;
+    }
+}
+
 - (MVDownloadRecord *)recordFor:(NSString *)identifier {
     if (!identifier) return nil;
     for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
@@ -680,6 +691,7 @@
 - (void)cancelDownload {
     if (!self.watchedIdentifier) return;
     [[MVDownloadEngine shared] cancelDownload:self.watchedIdentifier];
+    [self stopWatching];
     [self setBusy:NO];
     self.progressView.hidden = YES;
     [self showStatus:[MVLang t:@"Cancel"] color:[MVTheme warning]];
