@@ -72,6 +72,7 @@ static NSString *const kMessageHandler = @"moodyvid";
 @property (nonatomic, strong) UILabel *foundLabel;
 @property (nonatomic, copy, nullable) NSString *foundURL;
 @property (nonatomic, copy, nullable) NSString *foundTitle;
+@property (nonatomic, strong) NSLayoutConstraint *webBottom;
 @end
 
 @interface MVBrowserViewController ()
@@ -166,10 +167,14 @@ static NSString *const kMessageHandler = @"moodyvid";
     self.loadBar.progressTintColor = [MVTheme accent];
     [self.view addSubview:self.loadBar];
 
+    // The web view has no intrinsic size, so it needs a height: pin it top-to-
+    // bottom here, and buildToolbar re-pins its bottom above the address row.
+    self.webBottom = [self.web.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor];
     [NSLayoutConstraint activateConstraints:@[
         [self.web.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [self.web.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.web.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        self.webBottom,
         [self.loadBar.topAnchor constraintEqualToAnchor:self.web.bottomAnchor],
         [self.loadBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.loadBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
@@ -230,7 +235,13 @@ static NSString *const kMessageHandler = @"moodyvid";
     [self.foundBar addArrangedSubview:grab];
     [self.view addSubview:self.foundBar];
 
+    // The address row is a sibling of the web view, so the web view must stop
+    // above it. Replacing the constraint here avoids two competing bottoms.
+    [NSLayoutConstraint deactivateConstraints:@[self.webBottom]];
+    self.webBottom = [self.web.bottomAnchor constraintEqualToAnchor:row.topAnchor constant:-8];
+
     [NSLayoutConstraint activateConstraints:@[
+        self.webBottom,
         [row.topAnchor constraintEqualToAnchor:self.loadBar.bottomAnchor constant:8],
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
