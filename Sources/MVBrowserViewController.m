@@ -72,13 +72,15 @@ static NSString *const kMessageHandler = @"moodyvid";
 @property (nonatomic, strong) UILabel *foundLabel;
 @property (nonatomic, copy, nullable) NSString *foundURL;
 @property (nonatomic, copy, nullable) NSString *foundTitle;
-@property (nonatomic, strong) NSLayoutConstraint *webBottom;
+@property (nonatomic, strong) NSLayoutConstraint *foundHeight;
 @end
 
 @interface MVBrowserViewController ()
 /// The address to open once the view exists. Set by the presentation
 /// helpers before the view is loaded, so it cannot live in the header.
 @property (nonatomic, copy, nullable) NSString *initialURL;
+/// YES when this instance is a popup opened by a page, which gets a Close button.
+@property (nonatomic) BOOL isPopup;
 @end
 
 @implementation MVBrowserViewController
@@ -91,8 +93,7 @@ static NSString *const kMessageHandler = @"moodyvid";
         @{@"name": @"TikTok",     @"symbol": @"music.note",            @"color": @"#25F4EE", @"url": @"https://www.tiktok.com"},
         @{@"name": @"Instagram",  @"symbol": @"camera.fill",           @"color": @"#E1306C", @"url": @"https://www.instagram.com"},
         @{@"name": @"Facebook",   @"symbol": @"f.circle.fill",         @"color": @"#1877F2", @"url": @"https://m.facebook.com"},
-        @{@"name": @"X",          @"symbol": @"xmark",                 @"color": @"#8E8E93", @"url": @"https://mobile.twitter.com"},
-        @{@"name": @"Twitter",    @"symbol": @"bird.fill",             @"color": @"#1DA1F2", @"url": @"https://mobile.twitter.com"},
+        @{@"name": @"X",          @"symbol": @"xmark",                 @"color": @"#8E8E93", @"url": @"https://x.com"},
         @{@"name": @"Twitch",     @"symbol": @"gamecontroller.fill",   @"color": @"#9146FF", @"url": @"https://m.twitch.tv"},
         @{@"name": @"Reddit",     @"symbol": @"bubble.left.fill",      @"color": @"#FF4500", @"url": @"https://www.reddit.com"},
         @{@"name": @"Vimeo",      @"symbol": @"v.circle.fill",         @"color": @"#1AB7EA", @"url": @"https://vimeo.com"},
@@ -100,6 +101,18 @@ static NSString *const kMessageHandler = @"moodyvid";
         @{@"name": @"SoundCloud", @"symbol": @"waveform",              @"color": @"#FF5500", @"url": @"https://m.soundcloud.com"},
         @{@"name": @"Pinterest",  @"symbol": @"p.circle.fill",         @"color": @"#E60023", @"url": @"https://www.pinterest.com"},
     ];
+}
+
+/// A current mobile Safari identity. Presenting this as the user agent is what
+/// makes the official sign-in flows treat the app as a real browser.
++ (NSString *)safariUserAgent {
+    static NSString *ua;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ua = @"Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15"
+              " (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+    });
+    return ua;
 }
 
 #pragma mark - Presentation
@@ -127,6 +140,12 @@ static NSString *const kMessageHandler = @"moodyvid";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                      target:self action:@selector(close)];
+    if (self.isPopup) {
+        self.navigationItem.leftBarButtonItem =
+            [[UIBarButtonItem alloc] initWithTitle:[MVLang t:@"Close"]
+                                            style:UIBarButtonItemStylePlain
+                                           target:self action:@selector(close)];
+    }
 
     if (self.initialURL.length) [self loadAddress:self.initialURL];
     [self refreshText];
@@ -139,13 +158,30 @@ static NSString *const kMessageHandler = @"moodyvid";
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
+/// The store every browser instance shares, so a sign-in made in one place is
+/// still there in the next. `defaultDataStore` is persistent and is the only
+/// choice on iOS 15; `dataStoreForIdentifier:` (iOS 17+) would give us a named
+/// one, but calling it on an older system raises, so it is guarded.
++ (WKWebsiteDataStore *)sharedDataStore {
+    static WKWebsiteDataStore *store;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        store = WKWebsiteDataStore.defaultDataStore;
+    });
+    return store;
+}
+
 - (void)buildWebView {
     WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    config.websiteDataStore = [MVBrowserViewController sharedDataStore];
     config.allowsInlineMediaPlayback = YES;
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
 
-    // The site sees a normal mobile Safari, so it serves its mobile pages.
-    config.applicationNameForUserAgent = @"Version/17.0 Mobile/15E148 Safari/604.1";
+    // Google and others refuse to sign a user in when the browser looks embedded.
+    // Reporting plain "Safari" with a current version is what lets the official
+    // sign-in pages load instead of a "this browser is not secure" wall.
+    config.applicationNameForUserAgent = @"Version/18.0 Mobile/15E148 Safari/604.1";
+    config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
 
     WKUserContentController *ucc = [WKUserContentController new];
     [ucc addScriptMessageHandler:self name:kMessageHandler];
@@ -159,6 +195,7 @@ static NSString *const kMessageHandler = @"moodyvid";
     config.userContentController = ucc;
 
     self.web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
+    self.web.customUserAgent = [MVBrowserViewController safariUserAgent];
     self.web.translatesAutoresizingMaskIntoConstraints = NO;
     self.web.navigationDelegate = self;
     self.web.UIDelegate = self;
@@ -171,17 +208,17 @@ static NSString *const kMessageHandler = @"moodyvid";
     self.loadBar.progressTintColor = [MVTheme accent];
     [self.view addSubview:self.loadBar];
 
-    // The web view has no intrinsic size, so it needs a height: pin it top-to-
-    // bottom here, and buildToolbar re-pins its bottom above the address row.
-    self.webBottom = [self.web.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor];
+    // A web view has no intrinsic size, so its height must come from constraints.
+    // This is the chain that gives it one: web -> progress bar -> address row.
     [NSLayoutConstraint activateConstraints:@[
         [self.web.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [self.web.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.web.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        self.webBottom,
-        [self.loadBar.topAnchor constraintEqualToAnchor:self.web.bottomAnchor],
+        [self.web.bottomAnchor constraintEqualToAnchor:self.loadBar.topAnchor],
         [self.loadBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.loadBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        // The progress bar has no intrinsic height either, so give it one.
+        [self.loadBar.heightAnchor constraintEqualToConstant:2],
     ]];
 }
 
@@ -223,6 +260,9 @@ static NSString *const kMessageHandler = @"moodyvid";
     self.foundBar.layoutMarginsRelativeArrangement = YES;
     self.foundBar.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(8, 12, 8, 12);
     self.foundBar.hidden = YES;
+    // It sits in the layout chain, so an empty bar must take no space at all.
+    self.foundHeight = [self.foundBar.heightAnchor constraintEqualToConstant:0];
+    self.foundHeight.active = YES;
 
     self.foundLabel = [UILabel new];
     self.foundLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
@@ -239,20 +279,16 @@ static NSString *const kMessageHandler = @"moodyvid";
     [self.foundBar addArrangedSubview:grab];
     [self.view addSubview:self.foundBar];
 
-    // The address row is a sibling of the web view, so the web view must stop
-    // above it. Replacing the constraint here avoids two competing bottoms.
-    [NSLayoutConstraint deactivateConstraints:@[self.webBottom]];
-    self.webBottom = [self.web.bottomAnchor constraintEqualToAnchor:row.topAnchor constant:-8];
-
     [NSLayoutConstraint activateConstraints:@[
-        self.webBottom,
         [row.topAnchor constraintEqualToAnchor:self.loadBar.bottomAnchor constant:8],
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
         [self.foundBar.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:8],
         [self.foundBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
         [self.foundBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
-        [self.foundBar.bottomAnchor constraintLessThanOrEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8],
+        // Anchors the whole chain: web view, bar, address row and found bar all
+        // derive their height from this one relationship to the safe area.
+        [self.foundBar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8],
         [self.addressField.heightAnchor constraintEqualToConstant:36],
         [self.backButton.widthAnchor constraintEqualToConstant:32],
         [self.forwardButton.widthAnchor constraintEqualToConstant:32],
@@ -335,14 +371,23 @@ static NSString *const kMessageHandler = @"moodyvid";
     decisionHandler(WKNavigationActionPolicyAllow);
 }
 
-/// target="_blank" links open in the same web view rather than doing nothing.
+/// Popups (sign-in windows, target="_blank" links) open as a real child web view
+/// sharing the session, so the flow continues instead of silently doing nothing.
 - (WKWebView *)webView:(WKWebView *)webView
     createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
                forNavigationAction:(WKNavigationAction *)action
                     windowFeatures:(WKWindowFeatures *)features {
-    if (action.targetFrame == nil && action.request.URL) {
-        [webView loadRequest:action.request];
-    }
+    if (!action.request.URL) return nil;
+
+    // Keep the popup on our own store, otherwise the login would land in a
+    // different cookie jar and the sign-in would not stick.
+    configuration.websiteDataStore = [MVBrowserViewController sharedDataStore];
+
+    MVBrowserViewController *popup = [MVBrowserViewController new];
+    popup.initialURL = action.request.URL.absoluteString;
+    popup.isPopup = YES;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:popup];
+    [self presentViewController:nav animated:YES completion:nil];
     return nil;
 }
 
@@ -370,6 +415,7 @@ static NSString *const kMessageHandler = @"moodyvid";
 - (void)showFoundBar {
     if (self.foundBar.hidden) {
         self.foundBar.hidden = NO;
+        self.foundHeight.constant = 46;
         [UIView animateWithDuration:0.2 animations:^{ self.foundBar.alpha = 1; }];
     }
     NSString *name = self.foundTitle.length ? self.foundTitle : [MVLang t:@"Media found"];
