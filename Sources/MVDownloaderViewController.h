@@ -2,10 +2,11 @@
 
 @interface MVDownloaderViewController : UIViewController
 
-@property (weak, nonatomic) IBOutlet UITextField *urlField;
-@property (weak, nonatomic) IBOutlet UILabel *statusLabel;
-@property (weak, nonatomic) IBOutlet UIButton *downloadButton;
-@property (weak, nonatomic) IBOutlet UIProgressView *progressView;
-@property (copy, nonatomic) NSString *selectedQuality;
+@property (strong, nonatomic) UITextField *urlField;
+@property (strong, nonatomic) UILabel *statusLabel;
+@property (strong, nonatomic) UIProgressView *progressView;
+@property (strong, nonatomic) UIButton *downloadButton;
+@property (strong, nonatomic) UIButton *qualityButton;
+@property (strong, nonatomic) NSString *selectedQuality;
 
 @end
