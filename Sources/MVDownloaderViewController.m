@@ -134,18 +134,18 @@
             self.downloadButton.alpha = 1.0f;
             self.progressView.hidden = YES;
             if (error) {
-                self.statusLabel.text = @"فشل: " + (error ?: @"خطأ غير معروف");
+                self.statusLabel.text = [@"فشل: " stringByAppendingString:(error ?: @"خطأ غير معروف")];
                 self.statusLabel.textColor = UIColor.systemRedColor;
                 return;
             }
             self.statusLabel.text = @"تم التحميل، جاري الحفظ في الصور...";
             self.statusLabel.textColor = UIColor.systemBlueColor;
-            [[MVDownloadEngine shared] saveToPhotos:filePath completion:^(BOOL success, NSString *err) {
+            [[MVDownloadEngine shared] saveToPhotos:filePath presentingViewController:self completion:^(BOOL success, NSString *err) {
                 if (success) {
                     self.statusLabel.text = @"تم الحفظ في الصور بنجاح ✅";
                     self.statusLabel.textColor = UIColor.systemGreenColor;
                 } else {
-                    self.statusLabel.text = @"فشل الحفظ: " + (err ?: @"خطأ غير معروف");
+                    self.statusLabel.text = [@"فشل الحفظ: " stringByAppendingString:(err ?: @"خطأ غير معروف")];
                     self.statusLabel.textColor = UIColor.systemRedColor;
                 }
             }];
