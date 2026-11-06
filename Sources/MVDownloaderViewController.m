@@ -3,22 +3,21 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface MVDownloaderViewController : UIViewController
+@interface MVDownloaderViewController : UIViewController <UITextFieldDelegate>
+@property (weak, nonatomic) IBOutlet UITextField *urlField;
+@property (weak, nonatomic) IBOutlet UILabel *statusLabel;
+@property (weak, nonatomic) IBOutlet UIProgressView *progressView;
+@property (weak, nonatomic) IBOutlet UIButton *downloadButton;
+@property (weak, nonatomic) IBOutlet UIButton *qualityButton;
+@property (strong, nonatomic) NSString *selectedQuality;
 @end
 
-@implementation MVDownloaderViewController {
-    UITextField *_urlField;
-    UILabel *_statusLabel;
-    UIProgressView *_progressView;
-    UIButton *_downloadButton;
-    UIButton *_qualityButton;
-    NSString *_selectedQuality;
-}
+@implementation MVDownloaderViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.systemBackgroundColor;
-    _selectedQuality = @"1080p";
+    self.selectedQuality = @"1080p";
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -34,44 +33,43 @@ NS_ASSUME_NONNULL_BEGIN
     title.textColor = UIColor.labelColor;
     title.textAlignment = NSTextAlignmentCenter;
 
-    _urlField = [[UITextField alloc] init];
-    _urlField.placeholder = @"لصق رابط الفيديو هنا";
-    _urlField.borderStyle = UITextBorderStyleRoundedRect;
-    _urlField.font = [UIFont systemFontOfSize:17];
-    _urlField.autocorrectionType = UITextAutocorrectionTypeNo;
-    _urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    _urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    _urlField.returnKeyType = UIReturnKeyDone;
-    _urlField.delegate = self;
+    self.urlField = [[UITextField alloc] init];
+    self.urlField.placeholder = @"لصق رابط الفيديو هنا";
+    self.urlField.borderStyle = UITextBorderStyleRoundedRect;
+    self.urlField.font = [UIFont systemFontOfSize:17];
+    self.urlField.autocorrectionType = UITextAutocorrectionTypeNo;
+    self.urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    self.urlField.returnKeyType = UIReturnKeyDone;
+    self.urlField.delegate = self;
 
-    _qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_qualityButton setTitle:@"الجودة: 1080p" forState:UIControlStateNormal];
-    [_qualityButton titleLabel].font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    [_qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
+    self.qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.qualityButton setTitle:@"الجودة: 1080p" forState:UIControlStateNormal];
+    self.qualityButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [self.qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
 
-    _downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_downloadButton setTitle:@"تحميل" forState:UIControlStateNormal];
-    [_downloadButton titleLabel].font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    _downloadButton.backgroundColor = UIColor.systemBlueColor;
-    _downloadButton.layer.cornerRadius = 12;
-    [_downloadButton addTarget:self action:@selector(startDownload) forControlEvents:UIControlEventTouchUpInside];
+    self.downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.downloadButton setTitle:@"تحميل" forState:UIControlStateNormal];
+    self.downloadButton.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+    self.downloadButton.backgroundColor = UIColor.systemBlueColor;
+    self.downloadButton.layer.cornerRadius = 12;
+    [self.downloadButton addTarget:self action:@selector(startDownload) forControlEvents:UIControlEventTouchUpInside];
 
-    _statusLabel = [[UILabel alloc] init];
-    _statusLabel.text = @"هل await الرابط";
-    _statusLabel.font = [UIFont systemFontOfSize:15];
-    _statusLabel.textColor = UIColor.secondaryLabelColor;
-    _statusLabel.textAlignment = NSTextAlignmentCenter;
-    _statusLabel.numberOfLines = 0;
+    self.statusLabel = [[UILabel alloc] init];
+    self.statusLabel.text = @"هل await الرابط";
+    self.statusLabel.font = [UIFont systemFontOfSize:15];
+    self.statusLabel.textColor = UIColor.secondaryLabelColor;
+    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.numberOfLines = 0;
 
-    _progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-    _progressView.progress = 0.0f;
-    _progressView.hidden = YES;
+    self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.progressView.progress = 0.0f;
+    self.progressView.hidden = YES;
 
-    CGFloat spacing = 16;
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, _urlField, _qualityButton, _downloadButton, _statusLabel, _progressView]];
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, self.urlField, self.qualityButton, self.downloadButton, self.statusLabel, self.progressView]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.alignment = UIStackViewAlignmentFill;
-    stack.spacing = spacing;
+    stack.spacing = 16;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [content addSubview:stack];
 
@@ -90,10 +88,10 @@ NS_ASSUME_NONNULL_BEGIN
         [stack.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-48],
         [stack.topAnchor constraintEqualToAnchor:content.topAnchor constant:24],
         [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-24],
-        [_urlField.heightAnchor constraintEqualToConstant:44],
-        [_qualityButton.heightAnchor constraintEqualToConstant:44],
-        [_downloadButton.heightAnchor constraintEqualToConstant:52],
-        [_progressView.heightAnchor constraintEqualToConstant:4]
+        [self.urlField.heightAnchor constraintEqualToConstant:44],
+        [self.qualityButton.heightAnchor constraintEqualToConstant:44],
+        [self.downloadButton.heightAnchor constraintEqualToConstant:52],
+        [self.progressView.heightAnchor constraintEqualToConstant:4]
     ]];
 }
 
@@ -102,35 +100,35 @@ NS_ASSUME_NONNULL_BEGIN
                                                                    message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     [alert addAction:[UIAlertAction actionWithTitle:@"1080p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        _selectedQuality = @"1080p";
-        [_qualityButton setTitle:@"الجودة: 1080p" forState:UIControlStateNormal];
+        self.selectedQuality = @"1080p";
+        [self.qualityButton setTitle:@"الجودة: 1080p" forState:UIControlStateNormal];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"720p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        _selectedQuality = @"720p";
-        [_qualityButton setTitle:@"الجودة: 720p" forState:UIControlStateNormal];
+        self.selectedQuality = @"720p";
+        [self.qualityButton setTitle:@"الجودة: 720p" forState:UIControlStateNormal];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"صوت فقط (MP3)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        _selectedQuality = @"audio";
-        [_qualityButton setTitle:@"الجودة: صوت فقط" forState:UIControlStateNormal];
+        self.selectedQuality = @"audio";
+        [self.qualityButton setTitle:@"الجودة: صوت فقط" forState:UIControlStateNormal];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)startDownload {
-    NSString *url = _urlField.text;
+    NSString *url = self.urlField.text;
     if (!url.length) {
-        _statusLabel.text = @"الرجاء لصق رابط أولاً";
-        _statusLabel.textColor = UIColor.systemRedColor;
+        self.statusLabel.text = @"الرجاء لصق رابط أولاً";
+        self.statusLabel.textColor = UIColor.systemRedColor;
         return;
     }
 
-    _downloadButton.enabled = NO;
-    _downloadButton.alpha = 0.6f;
-    _progressView.hidden = NO;
-    _progressView.progress = 0.0f;
-    _statusLabel.text = @"جاري التحضير...";
-    _statusLabel.textColor = UIColor.secondaryLabelColor;
+    self.downloadButton.enabled = NO;
+    self.downloadButton.alpha = 0.6f;
+    self.progressView.hidden = NO;
+    self.progressView.progress = 0.0f;
+    self.statusLabel.text = @"جاري التحضير...";
+    self.statusLabel.textColor = UIColor.secondaryLabelColor;
 
     __weak MVDownloaderViewController *weakSelf = self;
     [[MVPython shared] call:@"mvboot" function:@"info" args:@[]
@@ -138,24 +136,24 @@ NS_ASSUME_NONNULL_BEGIN
         MVDownloaderViewController *strongSelf = weakSelf;
         if (!strongSelf) return;
         if (error) {
-            strongSelf._statusLabel.text = @"المحرك غير جاهز: " + (error ?: @"خطأ غير معروف");
-            strongSelf._statusLabel.textColor = UIColor.systemRedColor;
-            strongSelf._downloadButton.enabled = YES;
-            strongSelf._downloadButton.alpha = 1.0f;
-            strongSelf._progressView.hidden = YES;
+            strongSelf.statusLabel.text = [@"المحرك غير جاهز: " stringByAppendingString:(error ?: @"خطأ غير معروف")];
+            strongSelf.statusLabel.textColor = UIColor.systemRedColor;
+            strongSelf.downloadButton.enabled = YES;
+            strongSelf.downloadButton.alpha = 1.0f;
+            strongSelf.progressView.hidden = YES;
             return;
         }
-        strongSelf._statusLabel.text = @"جاري التحليل...";
-        // لاحقًا هنا سنستدعي دالة التحميل الفعلية من yt-dlp عبر Python
-        strongSelf._statusLabel.text = @"تم 준비 الرابط (سيبدأ التحميل في الخطوة التالية)";
-        strongSelf._statusLabel.textColor = UIColor.systemGreenColor;
-        strongSelf._downloadButton.enabled = YES;
-        strongSelf._downloadButton.alpha = 1.0f;
-        strongSelf._progressView.hidden = YES;
+        strongSelf.statusLabel.text = @"جاري التحليل...";
+        strongSelf.statusLabel.textColor = UIColor.secondaryLabelColor;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            strongSelf.statusLabel.text = @"تم 준비 الرابط (سيبدأ التحميل الفعلي في الخطوة التالية)";
+            strongSelf.statusLabel.textColor = UIColor.systemGreenColor;
+            strongSelf.downloadButton.enabled = YES;
+            strongSelf.downloadButton.alpha = 1.0f;
+            strongSelf.progressView.hidden = YES;
+        });
     }];
 }
-
-#pragma mark - UITextFieldDelegate
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
     [textField resignFirstResponder];
