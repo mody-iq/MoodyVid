@@ -1,6 +1,65 @@
 #import "MVPython.h"
 #import <UIKit/UIKit.h>
+#import <JavaScriptCore/JavaScriptCore.h>
 #include <Python/Python.h>
+
+// ---------------------------------------------------------------------------
+// The `mvnative` module: the one thing Python cannot do on iOS is run
+// JavaScript, and yt-dlp needs that to solve YouTube's player challenges.
+// Apple's JavaScriptCore is already on the device, so we expose it here as a
+// plain function. Registering the module before Py_Initialize makes it
+// importable as `import mvnative`.
+// ---------------------------------------------------------------------------
+
+static PyObject *mv_run_js(PyObject *self, PyObject *args) {
+    const char *code = NULL;
+    Py_ssize_t len = 0;
+    if (!PyArg_ParseTuple(args, "s#", &code, &len)) return NULL;
+    NSString *src = [[NSString alloc] initWithBytes:code length:(NSUInteger)len encoding:NSUTF8StringEncoding];
+    if (!src) return Py_BuildValue("(Os)", Py_False, "the script was not valid UTF-8");
+
+    __block NSString *output = @"";
+    __block NSString *error = nil;
+    // Long scripts block, and the interpreter must stay responsive: drop the GIL.
+    Py_BEGIN_ALLOW_THREADS
+    @autoreleasepool {
+        JSContext *ctx = [JSContext new];
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+        ctx.exceptionHandler = ^(JSContext *c, JSValue *exception) {
+            if (!error) error = [exception toString] ?: @"unknown JavaScript error";
+        };
+        // yt-dlp's solver prints its answer with console.log, so collect those.
+        JSValue *console = [JSValue valueWithNewObjectInContext:ctx];
+        console[@"log"] = ^{
+            NSMutableArray *parts = [NSMutableArray array];
+            for (JSValue *v in [JSContext currentArguments]) [parts addObject:[v toString] ?: @""];
+            [lines addObject:[parts componentsJoinedByString:@" "]];
+        };
+        void (^ignore)(void) = ^{};
+        console[@"warn"] = ignore;
+        console[@"error"] = ignore;
+        console[@"info"] = ignore;
+        console[@"debug"] = ignore;
+        ctx[@"console"] = console;
+        [ctx evaluateScript:src];
+        output = [lines componentsJoinedByString:@"\n"];
+    }
+    Py_END_ALLOW_THREADS
+
+    if (error) return Py_BuildValue("(Os)", Py_False, error.UTF8String);
+    return Py_BuildValue("(Os)", Py_True, output.UTF8String);
+}
+
+static PyMethodDef MVMethods[] = {
+    {"run_js", mv_run_js, METH_VARARGS, "Runs JavaScript in JavaScriptCore; returns (ok, output or error)."},
+    {NULL, NULL, 0, NULL},
+};
+
+static struct PyModuleDef MVNativeModule = {
+    PyModuleDef_HEAD_INIT, "mvnative", "Native helpers for the MoodyVid engine.", -1, MVMethods,
+};
+
+static PyObject *PyInit_mvnative(void) { return PyModule_Create(&MVNativeModule); }
 
 @interface MVPython ()
 @property (nonatomic) dispatch_queue_t queue;
@@ -72,10 +131,21 @@ static NSString *pyErrorString(void) {
     setenv("PYTHON_COLORS", "0", 1);
     setenv("PYTHONIOENCODING", "utf-8", 1);
     setenv("TMPDIR", NSTemporaryDirectory().fileSystemRepresentation, 1);
+    // Where downloads are kept: Documents, so they survive and show up in the
+    // Files app (Info.plist enables file sharing). TMPDIR is purged by iOS.
+    setenv("MV_DOCUMENTS",
+           NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject.fileSystemRepresentation,
+           1);
     // Used by mvboot when Python can't read the iOS version itself (see _ctypes_guard).
     setenv("MV_IOS_NAME", UIDevice.currentDevice.systemName.UTF8String ?: "iOS", 1);
     setenv("MV_IOS_VERSION", UIDevice.currentDevice.systemVersion.UTF8String ?: "", 1);
     setenv("MV_IOS_MODEL", UIDevice.currentDevice.model.UTF8String ?: "iPhone", 1);
+
+    // Must happen before the interpreter starts, or the import would fail.
+    if (PyImport_AppendInittab("mvnative", &PyInit_mvnative) < 0) {
+        self.startError = @"Couldn't register the JavaScript helper.";
+        return;
+    }
 
     PyPreConfig pre;
     PyPreConfig_InitIsolatedConfig(&pre);

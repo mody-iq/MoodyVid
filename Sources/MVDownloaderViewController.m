@@ -9,7 +9,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.systemBackgroundColor;
-    self.selectedQuality = @"1080p";
+    self.selectedQuality = @"best";
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -36,7 +36,7 @@
     self.urlField.delegate = self;
 
     self.qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.qualityButton setTitle:@"الجودة: 1080p" forState:UIControlStateNormal];
+    [self.qualityButton setTitle:@"الجودة: أفضل جودة" forState:UIControlStateNormal];
     self.qualityButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
     [self.qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
 
@@ -95,15 +95,20 @@
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"اختر الجودة"
                                                                    message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"1080p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        self.selectedQuality = @"1080p";
-        [self.qualityButton setTitle:@"الجودة: 1080p" forState:UIControlStateNormal];
+    [alert addAction:[UIAlertAction actionWithTitle:@"أفضل جودة متاحة" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        self.selectedQuality = @"best";
+        [self.qualityButton setTitle:@"الجودة: أفضل جودة" forState:UIControlStateNormal];
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"720p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"حتى 720p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         self.selectedQuality = @"720p";
-        [self.qualityButton setTitle:@"الجودة: 720p" forState:UIControlStateNormal];
+        [self.qualityButton setTitle:@"الجودة: حتى 720p" forState:UIControlStateNormal];
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"صوت فقط (MP3)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"حتى 480p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        self.selectedQuality = @"480p";
+        [self.qualityButton setTitle:@"الجودة: حتى 480p" forState:UIControlStateNormal];
+    }]];
+    // The file keeps its original sound container (usually M4A); we do not transcode.
+    [alert addAction:[UIAlertAction actionWithTitle:@"صوت فقط (M4A)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         self.selectedQuality = @"audio";
         [self.qualityButton setTitle:@"الجودة: صوت فقط" forState:UIControlStateNormal];
     }]];

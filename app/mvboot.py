@@ -69,4 +69,9 @@ def info():
         out['ejs'] = True
     except BaseException as e:
         out['ejs_error'] = _err(e)
+    try:
+        from downloader import _HAS_JAVASCRIPTCORE
+        out['javascriptcore'] = _HAS_JAVASCRIPTCORE
+    except BaseException as e:
+        out['javascriptcore_error'] = _err(e)
     return json.dumps(out)
