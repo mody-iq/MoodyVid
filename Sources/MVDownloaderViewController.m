@@ -1,14 +1,12 @@
 #import <UIKit/UIKit.h>
 #import "MVPython.h"
 
-NS_ASSUME_NONNULL_BEGIN
-
 @interface MVDownloaderViewController : UIViewController <UITextFieldDelegate>
-@property (weak, nonatomic) IBOutlet UITextField *urlField;
-@property (weak, nonatomic) IBOutlet UILabel *statusLabel;
-@property (weak, nonatomic) IBOutlet UIProgressView *progressView;
-@property (weak, nonatomic) IBOutlet UIButton *downloadButton;
-@property (weak, nonatomic) IBOutlet UIButton *qualityButton;
+@property (strong, nonatomic) UITextField *urlField;
+@property (strong, nonatomic) UILabel *statusLabel;
+@property (strong, nonatomic) UIProgressView *progressView;
+@property (strong, nonatomic) UIButton *downloadButton;
+@property (strong, nonatomic) UIButton *qualityButton;
 @property (strong, nonatomic) NSString *selectedQuality;
 @end
 
@@ -161,5 +159,3 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 @end
-
-NS_ASSUME_NONNULL_END
