@@ -26,7 +26,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)call:(NSString *)module
     function:(NSString *)function
         args:(NSArray<NSString *> *)args
-        task:(NSString *)task
+        task:(nullable NSString *)task
   completion:(void (^)(NSDictionary *_Nullable result, NSString *_Nullable error))completion;
 
 /// Engine self-test results (yt-dlp version, JavaScriptCore status, ...). Filled in

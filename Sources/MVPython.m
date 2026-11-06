@@ -254,7 +254,7 @@ static NSString *pyErrorString(void) {
 - (void)call:(NSString *)module
     function:(NSString *)function
         args:(NSArray<NSString *> *)args
-        task:(NSString *)task
+        task:(nullable NSString *)task
   completion:(void (^)(NSDictionary *_Nullable, NSString *_Nullable))completion {
     [self start];
     dispatch_group_notify(self.ready, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{

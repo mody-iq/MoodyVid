@@ -241,9 +241,10 @@ static NSString *const kDoneCell = @"MVDoneCell";
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
 
-    // Required on iPad, and harmless on iPhone.
+    // Required on iPad, and harmless on iPhone. CGRect is a struct, so it needs
+    // a ternary rather than `?:`.
     sheet.popoverPresentationController.sourceView = source ?: self.view;
-    sheet.popoverPresentationController.sourceRect = source.bounds ?: self.view.bounds;
+    sheet.popoverPresentationController.sourceRect = source ? source.bounds : self.view.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
