@@ -1,13 +1,7 @@
-#import <UIKit/UIKit.h>
+#import "MVDownloaderViewController.h"
 #import "MVDownloadEngine.h"
 
-@interface MVDownloaderViewController : UIViewController <UITextFieldDelegate>
-@property (strong, nonatomic) UITextField *urlField;
-@property (strong, nonatomic) UILabel *statusLabel;
-@property (strong, nonatomic) UIProgressView *progressView;
-@property (strong, nonatomic) UIButton *downloadButton;
-@property (strong, nonatomic) UIButton *qualityButton;
-@property (strong, nonatomic) NSString *selectedQuality;
+@interface MVDownloaderViewController () <UITextFieldDelegate>
 @end
 
 @implementation MVDownloaderViewController
@@ -48,6 +42,10 @@
 
     self.downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.downloadButton setTitle:@"تحميل" forState:UIControlStateNormal];
+    // UIButtonTypeSystem tints its title with the system accent colour, which is
+    // unreadable on the blue background we set below.
+    [self.downloadButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [self.downloadButton setTitleColor:[UIColor.whiteColor colorWithAlphaComponent:0.6] forState:UIControlStateDisabled];
     self.downloadButton.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
     self.downloadButton.backgroundColor = UIColor.systemBlueColor;
     self.downloadButton.layer.cornerRadius = 12;
@@ -133,13 +131,15 @@
             self.downloadButton.enabled = YES;
             self.downloadButton.alpha = 1.0f;
             self.progressView.hidden = YES;
-            if (error) {
-                self.statusLabel.text = [@"فشل: " stringByAppendingString:(error ?: @"خطأ غير معروف")];
-                self.statusLabel.textColor = UIColor.systemRedColor;
+            // A file path means the download itself worked; a non-nil error is then
+            // only a warning about saving it to the photo library.
+            if (filePath.length) {
+                self.statusLabel.text = error ?: @"تم التحميل بنجاح";
+                self.statusLabel.textColor = error ? UIColor.systemOrangeColor : UIColor.systemGreenColor;
                 return;
             }
-            self.statusLabel.text = @"تم التحميل بنجاح";
-            self.statusLabel.textColor = UIColor.systemGreenColor;
+            self.statusLabel.text = [@"فشل: " stringByAppendingString:(error ?: @"خطأ غير معروف")];
+            self.statusLabel.textColor = UIColor.systemRedColor;
         });
     }];
 }

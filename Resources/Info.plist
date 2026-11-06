@@ -42,5 +42,9 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>يحتاج MoodyVid إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>يحتاج MoodyVid إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها.</string>
 </dict>
 </plist>
