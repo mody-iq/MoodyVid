@@ -52,7 +52,7 @@ xcrun --sdk iphoneos clang \
   -O2 \
   -Wall -Wno-deprecated-declarations \
   -F "$SLICE" \
-  -framework UIKit -framework Foundation -framework JavaScriptCore -framework Python \
+  -framework UIKit -framework Foundation -framework JavaScriptCore -framework Python -framework Photos \
   -Wl,-rpath,@executable_path/Frameworks \
   Sources/*.m \
   -o "$APP_DIR/$APP_NAME"
