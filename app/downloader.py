@@ -15,6 +15,23 @@ FORMATS = {
     "audio": "bestaudio[ext=m4a]/bestaudio/best[ext=mp4]/best",
 }
 
+
+def _selector(quality):
+    """The yt-dlp format string for a quality the UI asked for.
+
+    The download panel offers the real heights a video has, so the request can be
+    any number of pixels ("1080"), not just the named presets. Every branch still
+    resolves to one combined file: there is no ffmpeg on iOS to merge two.
+    """
+    if quality in FORMATS:
+        return FORMATS[quality]
+    if isinstance(quality, str) and quality.isdigit():
+        height = int(quality)
+        if height > 0:
+            return (f"best[height<={height}][ext=mp4]/best[height<={height}]"
+                    f"/best[ext=mp4]/best")
+    return FORMATS["best"]
+
 # YouTube blocks a connection style without warning, and the default clients now
 # hand out DASH-only streams (video and sound apart) for most videos. Try the
 # styles that still expose a combined file, in order, and remember the one that
@@ -121,6 +138,75 @@ def _client_order():
     return order
 
 
+def probe(url, _task=""):
+    """Reports what is at `url` without downloading it.
+
+    The UI shows this in the download sheet, so the user sees the real title,
+    channel and available heights before committing to a download instead of
+    picking a blind quality. Never raises: an error string comes back instead.
+    """
+    try:
+        import yt_dlp
+    except Exception as e:
+        return _error(f"yt-dlp not available: {e}")
+
+    _use_bundled_certificates()
+    native = _native()
+    last_error = None
+
+    for client in _client_order():
+        if _is_cancelled(native, _task):
+            return _error("cancelled")
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "skip_download": True,
+            "socket_timeout": 15,
+        }
+        if client:
+            opts["extractor_args"] = {"youtube": {"player_client": client}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            last_error = e
+            continue
+
+        if info is None:
+            last_error = last_error or "no information returned"
+            continue
+        if info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if e]
+            if not entries:
+                last_error = last_error or "the playlist is empty"
+                continue
+            info = entries[0]
+
+        # ffmpeg is absent on iOS, so only combined formats are downloadable.
+        # A height is offered only when a single file carries both streams.
+        heights = set()
+        for f in info.get("formats") or []:
+            height = f.get("height")
+            has_video = f.get("vcodec") not in (None, "none")
+            has_audio = f.get("acodec") not in (None, "none")
+            if height and has_video and has_audio:
+                heights.add(int(height))
+
+        _good_client[0], _good_client[1] = client, time.time()
+        return json.dumps({
+            "title": info.get("title") or "",
+            "uploader": info.get("uploader") or info.get("channel") or "",
+            "duration": info.get("duration") or 0,
+            "thumbnail": info.get("thumbnail") or "",
+            "webpage": info.get("webpage_url") or url,
+            "extractor": info.get("extractor_key") or info.get("extractor") or "",
+            "heights": sorted(heights, reverse=True)[:6],
+        }, ensure_ascii=False)
+
+    return _error(last_error or "could not read this link")
+
+
 def download(url, quality="best", _task=""):
     try:
         import yt_dlp
@@ -135,7 +221,7 @@ def download(url, quality="best", _task=""):
     except OSError as e:
         return _error(f"cannot create the download folder: {e}")
 
-    fmt = FORMATS.get(quality, FORMATS["best"])
+    fmt = _selector(quality)
     native = _native()
     last_error = None
     for client in _client_order():

@@ -32,7 +32,7 @@ static NSString *const kInjectedScript = @""
 "    var v=best(); if(!v) return;\n"
 "    if (v.__moodyvidBtn && v.__moodyvidBtn.parentNode) return;\n"
 "    var b=document.createElement('div');\n"
-"    b.textContent='⬇ Download';\n"
+"    b.textContent='⬇ __MV_DOWNLOAD__';\n"
 "    b.style.cssText='position:absolute;z-index:2147483647;top:12px;right:12px;padding:8px 14px;'\n"
 "      +'border-radius:999px;background:#0FA0B0;color:#fff;font:600 14px -apple-system,sans-serif;'\n"
 "      +'box-shadow:0 4px 14px rgba(0,0,0,.45);cursor:pointer';\n"
@@ -149,7 +149,11 @@ static NSString *const kMessageHandler = @"moodyvid";
 
     WKUserContentController *ucc = [WKUserContentController new];
     [ucc addScriptMessageHandler:self name:kMessageHandler];
-    [ucc addUserScript:[[WKUserScript alloc] initWithSource:kInjectedScript
+    // The page's Download button has to speak the app's language, so the label is
+    // substituted here rather than baked into the script.
+    NSString *script = [kInjectedScript stringByReplacingOccurrencesOfString:@"__MV_DOWNLOAD__"
+                                                                 withString:[MVLang t:@"Download"]];
+    [ucc addUserScript:[[WKUserScript alloc] initWithSource:script
                                                injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
                                             forMainFrameOnly:NO]];
     config.userContentController = ucc;
@@ -379,27 +383,84 @@ static NSString *const kMessageHandler = @"moodyvid";
 /// Downloads `url` as media when it is a direct stream, otherwise hands the page
 /// address to the engine, which knows how to extract a page's video.
 - (void)startDownloadOf:(NSString *)url title:(NSString *)title {
-    NSString *target = url;
-    BOOL looksLikeMedia = [self looksLikeMedia:url];
-    if (!looksLikeMedia) {
-        NSString *page = self.web.URL.absoluteString;
-        if (!page.length) return;
-        target = page;
+    NSString *target = [self looksLikeMedia:url] ? url : self.web.URL.absoluteString;
+    if (!target.length) return;
+    [self showDownloadSheetFor:target title:title];
+}
+
+/// The download panel: it reads the link first, then shows the real title,
+/// channel and the qualities that actually exist. Offering a blind list of
+/// heights is how a user picks 1080p for a video that only has 720p.
+- (void)showDownloadSheetFor:(NSString *)url title:(NSString *)title {
+    UIAlertController *wait = [UIAlertController alertControllerWithTitle:[MVLang t:@"Reading link..."]
+                                                                 message:nil
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:wait animated:YES completion:nil];
+
+    __weak typeof(self) weakSelf = self;
+    [[MVPython shared] call:@"downloader" function:@"probe" args:@[url] completion:^(NSDictionary *result, NSString *error) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        [wait dismissViewControllerAnimated:YES completion:^{
+            if (error || !result.count) {
+                [self_ showDownloadSheetFor:url title:title info:nil];
+                return;
+            }
+            [self_ showDownloadSheetFor:url title:title info:result];
+        }];
+    }];
+}
+
+/// The second half of the panel, built once the metadata is known (or skipped
+/// when the link could not be read).
+- (void)showDownloadSheetFor:(NSString *)url title:(NSString *)title info:(NSDictionary *)info {
+    NSString *shown = info[@"title"] ?: title ?: [MVLang t:@"Download"];
+    NSString *channel = info[@"uploader"];
+    NSString *duration = [self formatDuration:[info[@"duration"] doubleValue]];
+
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    if (channel.length) [lines addObject:channel];
+    if (duration.length) [lines addObject:duration];
+    if (!info) [lines addObject:[MVLang t:@"Could not read the details; pick a quality."]];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:shown
+                                                                  message:[lines componentsJoinedByString:@"  ·  "]
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+
+    // Only heights that yt-dlp reported as a single combined file are offered;
+    // anything else would need ffmpeg, which iOS does not ship.
+    NSArray<NSNumber *> *heights = info[@"heights"];
+    if (heights.count) {
+        for (NSNumber *h in heights) {
+            NSInteger value = h.integerValue;
+            NSString *label = value >= 2160 ? [MVLang t:@"4K"]
+                             : value >= 1440 ? [MVLang t:@"1440p"]
+                             : [NSString stringWithFormat:@"%ldp", (long)value];
+            [sheet addAction:[UIAlertAction actionWithTitle:label style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                [self queueDownload:url quality:[NSString stringWithFormat:@"%ld", (long)value]];
+            }]];
+        }
     }
 
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:title.length ? title : [MVLang t:@"Download"]
-                                                                  message:target
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray *qualities = @[@[@"Best", @"best"], @[@"1080p", @"1080p"], @[@"720p", @"720p"], @[@"480p", @"480p"], @[@"MP3", @"audio"]];
-    for (NSArray *q in qualities) {
-        [sheet addAction:[UIAlertAction actionWithTitle:q[0] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self queueDownload:target quality:q[1]];
-        }]];
-    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Best available"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self queueDownload:url quality:@"best"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Audio only (M4A)"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self queueDownload:url quality:@"audio"];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+
     sheet.popoverPresentationController.sourceView = self.view;
     sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (NSString *)formatDuration:(double)seconds {
+    if (seconds <= 0) return @"";
+    NSInteger total = (NSInteger)seconds;
+    NSInteger h = total / 3600, m = (total % 3600) / 60, sec = total % 60;
+    if (h > 0) return [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)h, (long)m, (long)sec];
+    return [NSString stringWithFormat:@"%ld:%02ld", (long)m, (long)sec];
 }
 
 - (BOOL)looksLikeMedia:(NSString *)url {

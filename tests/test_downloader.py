@@ -116,5 +116,36 @@ class FormatSelectorTests(unittest.TestCase):
         self.assertTrue(self.downloader.FORMATS["audio"].startswith("bestaudio[ext=m4a]"))
 
 
+class DownloadPanelTests(unittest.TestCase):
+    """The panel offers the heights a video really has, so any number is valid."""
+
+    def setUp(self):
+        import downloader
+        self.downloader = downloader
+
+    def test_accepts_a_real_height(self):
+        fmt = self.downloader._selector("1080")
+        self.assertIn("height<=1080", fmt)
+        self.assertIn("best[ext=mp4]", fmt)
+
+    def test_falls_back_for_unknown_quality(self):
+        best = self.downloader.FORMATS["best"]
+        for bad in ["nonsense", "", "0", None, "-5"]:
+            with self.subTest(quality=bad):
+                self.assertEqual(self.downloader._selector(bad), best)
+
+    def test_keeps_the_named_presets(self):
+        self.assertEqual(self.downloader._selector("audio"), self.downloader.FORMATS["audio"])
+        self.assertEqual(self.downloader._selector("720p"), self.downloader.FORMATS["720p"])
+
+    def test_never_asks_for_a_merge(self):
+        for quality in ["best", "720p", "480p", "audio", "1080", "2160"]:
+            with self.subTest(quality=quality):
+                self.assertNotIn("+", self.downloader._selector(quality))
+
+    def test_probe_is_exposed_for_the_ui(self):
+        self.assertTrue(callable(self.downloader.probe))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

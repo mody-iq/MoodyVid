@@ -35,6 +35,12 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
     dispatch_once(&once, ^{
         table = @{
             // Tabs
+            // Browser download panel
+            @"Reading link...": @"جارٍ قراءة الرابط...",
+            @"Could not read the details; pick a quality.": @"تعذّرت قراءة التفاصيل، اختر جودة.",
+            @"4K": @"4K",
+            @"1440p": @"1440p",
+            @"Reading": @"قراءة",
             @"Home": @"الرئيسية",
             @"Downloads": @"التنزيلات",
             @"Files": @"الملفات",
