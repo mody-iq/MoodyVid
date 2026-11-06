@@ -108,6 +108,8 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @property (nonatomic, strong) UILabel *emptyLabel;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
+@property (nonatomic, strong) UISegmentedControl *segments;
+@property (nonatomic, assign) NSInteger segmentIndex;
 @end
 
 @implementation MVDownloadsViewController
@@ -135,6 +137,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.emptyLabel];
 
+    // Active | Downloaded, as in the design.
+    self.segments = [[UISegmentedControl alloc] initWithItems:@[[MVLang t:@"Active"], [MVLang t:@"Completed"]]];
+    self.segments.translatesAutoresizingMaskIntoConstraints = NO;
+    self.segments.selectedSegmentIndex = 0;
+    self.segmentIndex = 0;
+    self.segments.selectedSegmentTintColor = [MVTheme accent];
+    [self.segments addTarget:self action:@selector(segmentChanged) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:self.segments];
+
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
     self.search.obscuresBackgroundDuringPresentation = NO;
@@ -144,7 +155,11 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.definesPresentationContext = YES;
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.tableView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.segments.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
+        [self.segments.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.segments.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+
+        [self.tableView.topAnchor constraintEqualToAnchor:self.segments.bottomAnchor constant:8],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
@@ -157,15 +172,25 @@ static NSString *const kDoneCell = @"MVDoneCell";
     }
 }
 
+- (void)segmentChanged {
+    self.segmentIndex = self.segments.selectedSegmentIndex;
+    [self.tableView reloadData];
+}
+
 - (void)refresh {
     self.title = [MVLang t:@"Downloads"];
-    self.emptyLabel.text = [MVLang t:@"No downloads yet"];
+    [self.segments setTitle:[MVLang t:@"Active"] forSegmentAtIndex:0];
+    [self.segments setTitle:[MVLang t:@"Completed"] forSegmentAtIndex:1];
+    self.emptyLabel.text = self.segmentIndex == 0 ? [MVLang t:@"No active downloads"] : [MVLang t:@"No completed downloads"];
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
     [self.tableView reloadData];
 }
 
 - (NSArray<MVDownloadRecord *> *)records {
-    NSArray *all = MVDownloadStore.shared.records;
+    // The two segments partition the list: in-flight jobs versus finished ones.
+    NSArray *all = self.segmentIndex == 0
+        ? MVDownloadStore.shared.activeRecords
+        : MVDownloadStore.shared.finishedRecords;
     if (!self.filter.length) return all;
     NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(MVDownloadRecord *r, NSDictionary *b) {
         NSString *hay = [NSString stringWithFormat:@"%@ %@", r.title ?: @"", r.url ?: @""];
@@ -182,6 +207,8 @@ static NSString *const kDoneCell = @"MVDoneCell";
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSArray *records = [self records];
     self.emptyLabel.hidden = records.count > 0;
+    self.emptyLabel.text = self.segmentIndex == 0
+        ? [MVLang t:@"No active downloads"] : [MVLang t:@"No completed downloads"];
     return records.count;
 }
 
@@ -198,13 +225,16 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     MVDownloadRecord *record = [self records][indexPath.row];
-    UIContextualAction *cancel = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
-                                                                        title:[MVLang t:@"Cancel"]
-                                                                      handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-        [[MVDownloadEngine shared] cancelDownload:record.identifier];
-        done(YES);
-    }];
-    cancel.backgroundColor = [MVTheme danger];
+    if (record.isActive) {
+        UIContextualAction *cancel = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+                                                                            title:[MVLang t:@"Cancel"]
+                                                                          handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+            done(YES);
+        }];
+        cancel.backgroundColor = [MVTheme danger];
+        return [UISwipeActionsConfiguration configurationWithActions:@[cancel]];
+    }
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                      title:[MVLang t:@"Delete"]
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
@@ -212,7 +242,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
         done(YES);
     }];
     del.backgroundColor = [MVTheme warning];
-    return [UISwipeActionsConfiguration configurationWithActions:@[cancel, del]];
+    return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
 - (void)showMenuForRecord:(MVDownloadRecord *)record sourceView:(UIView *)source {

@@ -41,6 +41,8 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Settings": @"الإعدادات",
             @"More": @"المزيد",
             @"Clipboard is empty": @"الحافظة فارغة",
+            @"Remove ads and unlock more": @"أزل الإعلانات وافتح المزيد",
+            @"No favorites yet": @"لا توجد مفضلة بعد",
             @"Music": @"موسيقى",
             @"Movies": @"أفلام",
             @"Sports": @"رياضة",
