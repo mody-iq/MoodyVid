@@ -1,6 +1,9 @@
 #import <UIKit/UIKit.h>
+#import "MVPython.h"
 
 @interface MVRootViewController : UIViewController
+@property (strong, nonatomic) UITextView *statusView;
+@property (strong, nonatomic) UILabel *badge;
 @end
 
 @implementation MVRootViewController
@@ -29,19 +32,71 @@
     info.textAlignment = NSTextAlignmentCenter;
     info.numberOfLines = 0;
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, info]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.alignment = UIStackViewAlignmentCenter;
-    stack.spacing = 12;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:stack];
+    self.badge = [[UILabel alloc] init];
+    self.badge.text = @"Engine: starting…";
+    self.badge.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    self.badge.textColor = UIColor.secondaryLabelColor;
+    self.badge.textAlignment = NSTextAlignmentCenter;
 
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[title, info, self.badge]];
+    header.axis = UILayoutConstraintAxisVertical;
+    header.alignment = UIStackViewAlignmentCenter;
+    header.spacing = 8;
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:header];
+
+    self.statusView = [[UITextView alloc] init];
+    self.statusView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusView.editable = NO;
+    self.statusView.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    self.statusView.layer.cornerRadius = 12;
+    self.statusView.textContainerInset = UIEdgeInsetsMake(12, 10, 12, 10);
+    self.statusView.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    self.statusView.textColor = UIColor.labelColor;
+    self.statusView.text = @"Starting the Python engine…";
+    [self.view addSubview:self.statusView];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:24],
-        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-24]
+        [header.topAnchor constraintEqualToAnchor:safe.topAnchor constant:32],
+        [header.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [header.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:24],
+        [header.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-24],
+        [self.statusView.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:24],
+        [self.statusView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
+        [self.statusView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
+        [self.statusView.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-16]
     ]];
+
+    [self runEngineTest];
+}
+
+- (void)runEngineTest {
+    __weak MVRootViewController *weakSelf = self;
+    [[MVPython shared] call:@"mvboot" function:@"info" args:@[]
+                 completion:^(NSDictionary *result, NSString *error) {
+        MVRootViewController *strongSelf = weakSelf;
+        if (!strongSelf) return;
+
+        if (error) {
+            strongSelf.badge.text = @"Engine: ERROR";
+            strongSelf.badge.textColor = UIColor.systemRedColor;
+            strongSelf.statusView.text = error;
+            return;
+        }
+
+        BOOL hasProblem = NO;
+        NSMutableString *text = [NSMutableString string];
+        for (NSString *key in [result.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            if ([key hasSuffix:@"_error"]) hasProblem = YES;
+            [text appendFormat:@"%@: %@\n", key, result[key]];
+        }
+        if (!result[@"yt_dlp"]) hasProblem = YES;
+
+        strongSelf.badge.text = hasProblem ? @"Engine: PARTIAL" : @"Engine: OK";
+        strongSelf.badge.textColor = hasProblem ? UIColor.systemOrangeColor : UIColor.systemGreenColor;
+        strongSelf.statusView.text = text;
+    }];
 }
 
 @end
