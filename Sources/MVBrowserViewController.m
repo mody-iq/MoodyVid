@@ -4,7 +4,6 @@
 #import "MVTheme.h"
 #import "MVPaths.h"
 #import "MVDownloadEngine.h"
-#import "MVPython.h"
 #import <WebKit/WebKit.h>
 
 /// Injected into every page. It finds the most promising playing video and adds
@@ -449,62 +448,26 @@ static NSString *const kMessageHandler = @"moodyvid";
     [self showDownloadSheetFor:target title:title];
 }
 
-/// The download panel: it reads the link first, then shows the real title,
-/// channel and the qualities that actually exist. Offering a blind list of
-/// heights is how a user picks 1080p for a video that only has 720p.
+/// The quality sheet. Shown immediately, with no network round trip first: a
+/// sheet that waits on yt-dlp leaves the user staring at a spinner when the
+/// probe stalls.
 - (void)showDownloadSheetFor:(NSString *)url title:(NSString *)title {
-    UIAlertController *wait = [UIAlertController alertControllerWithTitle:[MVLang t:@"Reading link..."]
-                                                                 message:nil
-                                                          preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:wait animated:YES completion:nil];
-
-    __weak typeof(self) weakSelf = self;
-    [[MVPython shared] call:@"downloader" function:@"probe" args:@[url] completion:^(NSDictionary *result, NSString *error) {
-        typeof(self) self_ = weakSelf;
-        if (!self_) return;
-        [wait dismissViewControllerAnimated:YES completion:^{
-            if (error || !result.count) {
-                [self_ showDownloadSheetFor:url title:title info:nil];
-                return;
-            }
-            [self_ showDownloadSheetFor:url title:title info:result];
-        }];
-    }];
-}
-
-/// The second half of the panel, built once the metadata is known (or skipped
-/// when the link could not be read).
-- (void)showDownloadSheetFor:(NSString *)url title:(NSString *)title info:(NSDictionary *)info {
-    NSString *shown = info[@"title"] ?: title ?: [MVLang t:@"Download"];
-    NSString *channel = info[@"uploader"];
-    NSString *duration = [self formatDuration:[info[@"duration"] doubleValue]];
-
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    if (channel.length) [lines addObject:channel];
-    if (duration.length) [lines addObject:duration];
-    if (!info) [lines addObject:[MVLang t:@"Could not read the details; pick a quality."]];
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:shown
-                                                                  message:[lines componentsJoinedByString:@"  ·  "]
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-
-    // Only heights that yt-dlp reported as a single combined file are offered;
-    // anything else would need ffmpeg, which iOS does not ship.
-    NSArray<NSNumber *> *heights = info[@"heights"];
-    if (heights.count) {
-        for (NSNumber *h in heights) {
-            NSInteger value = h.integerValue;
-            NSString *label = value >= 2160 ? [MVLang t:@"4K"]
-                             : value >= 1440 ? [MVLang t:@"1440p"]
-                             : [NSString stringWithFormat:@"%ldp", (long)value];
-            [sheet addAction:[UIAlertAction actionWithTitle:label style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                [self queueDownload:url quality:[NSString stringWithFormat:@"%ld", (long)value]];
-            }]];
-        }
-    }
+    UIAlertController *sheet =
+        [UIAlertController alertControllerWithTitle:(title.length ? title : [MVLang t:@"Download"])
+                                            message:nil
+                                     preferredStyle:UIAlertControllerStyleActionSheet];
 
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Best available"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [self queueDownload:url quality:@"best"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"1080p" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self queueDownload:url quality:@"1080"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"720p" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self queueDownload:url quality:@"720p"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"480p" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self queueDownload:url quality:@"480p"];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Audio only (M4A)"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [self queueDownload:url quality:@"audio"];
@@ -516,13 +479,7 @@ static NSString *const kMessageHandler = @"moodyvid";
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (NSString *)formatDuration:(double)seconds {
-    if (seconds <= 0) return @"";
-    NSInteger total = (NSInteger)seconds;
-    NSInteger h = total / 3600, m = (total % 3600) / 60, sec = total % 60;
-    if (h > 0) return [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)h, (long)m, (long)sec];
-    return [NSString stringWithFormat:@"%ld:%02ld", (long)m, (long)sec];
-}
+
 
 - (BOOL)looksLikeMedia:(NSString *)url {
     static NSArray *needles;

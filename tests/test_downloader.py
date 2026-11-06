@@ -143,9 +143,6 @@ class DownloadPanelTests(unittest.TestCase):
             with self.subTest(quality=quality):
                 self.assertNotIn("+", self.downloader._selector(quality))
 
-    def test_probe_is_exposed_for_the_ui(self):
-        self.assertTrue(callable(self.downloader.probe))
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
