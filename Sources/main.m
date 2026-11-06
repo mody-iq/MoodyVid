@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
 #import "MVPython.h"
-#import "MVDownloaderViewController.h"
+
+@interface MVDownloaderViewController : UIViewController
+@end
 
 @interface MVRootViewController : UIViewController
 @end
