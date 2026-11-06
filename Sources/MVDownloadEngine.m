@@ -37,21 +37,30 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (void)saveToPhotos:(NSString *)filePath presentingViewController:(UIViewController *)vc completion:(void (^)(BOOL, NSString *))completion {
-    PHPhotoLibrary.requestAuthorization { [weak vc] (PHAuthorizationStatus status) in
-        if (status != PHAuthorizationStatusAuthorized) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(NO, @"مطلوب إذن الوصول إلى الصور");
-            });
-            return;
-        }
-        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-            [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:[NSURL fileURLWithPath:filePath]];
-        } completion:^(BOOL success, NSError *error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(success, error ? error.localizedDescription : nil);
-            });
+    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+    if (status != PHAuthorizationStatusAuthorized) {
+        [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus newStatus) {
+            if (newStatus != PHAuthorizationStatusAuthorized) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(NO, @"مطلوب إذن الوصول إلى الصور");
+                });
+                return;
+            }
+            [self performSave:filePath completion:completion];
         }];
-    };
+    } else {
+        [self performSave:filePath completion:completion];
+    }
+}
+
+- (void)performSave:(NSString *)filePath completion:(void (^)(BOOL, NSString *))completion {
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:[NSURL fileURLWithPath:filePath]];
+    } completion:^(BOOL success, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(success, error ? error.localizedDescription : nil);
+        });
+    }];
 }
 
 @end
