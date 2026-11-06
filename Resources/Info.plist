@@ -42,6 +42,10 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>يحتاج MoodyVid إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
