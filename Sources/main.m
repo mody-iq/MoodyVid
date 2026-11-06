@@ -1,10 +1,11 @@
 #import <UIKit/UIKit.h>
+#import <UserNotifications/UserNotifications.h>
 #import "MVTabBarController.h"
 #import "MVTheme.h"
 #import "MVLang.h"
 #import "MVPython.h"
 
-@interface MVAppDelegate : UIResponder <UIApplicationDelegate>
+@interface MVAppDelegate : UIResponder <UIApplicationDelegate, UNUserNotificationCenterDelegate>
 @property (strong, nonatomic) UIWindow *window;
 @end
 
@@ -20,7 +21,23 @@
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         [[MVPython shared] start];
     });
+
+    // Downloads finish while the user is elsewhere, so a banner is the only way
+    // they find out. Without a delegate, banners are suppressed in foreground.
+    UNUserNotificationCenter.currentNotificationCenter.delegate = self;
+    [UNUserNotificationCenter.currentNotificationCenter requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+                                                                    completionHandler:nil];
     return YES;
+}
+
+#pragma mark - Notifications
+
+/// Shows the banner even when the app is in the foreground, which is where the
+/// user usually is when a queued download finishes.
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
 }
 
 @end

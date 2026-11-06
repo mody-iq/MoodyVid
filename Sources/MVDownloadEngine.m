@@ -4,6 +4,7 @@
 #import "MVLang.h"
 #import <Photos/Photos.h>
 #import <UIKit/UIKit.h>
+#import <UserNotifications/UserNotifications.h>
 
 /// Two at a time keeps the CPU and the network busy without starving the UI
 /// thread, which the Python bridge shares during the extractor phase.
@@ -149,6 +150,7 @@ static const NSUInteger kMaxConcurrent = 2;
     record.state = MVDownloadStateCompleted;
     [MVDownloadStore.shared update:record];
     [[MVPython shared] forgetTask:job.identifier];
+    [self notifyFinished:record];
 
     // The slot is free as soon as the bytes are on disk; saving to Photos is
     // slow and should not hold the queue up.
@@ -263,6 +265,22 @@ static const NSUInteger kMaxConcurrent = 2;
     return [attrs[NSFileSize] longLongValue];
 }
 
+#pragma mark - Notifications
+
+/// A banner is the only signal the user gets when a download finishes while they
+/// are on another tab or in another app.
+- (void)notifyFinished:(MVDownloadRecord *)record {
+    UNMutableNotificationContent *content = [UNMutableNotificationContent new];
+    content.title = [MVLang t:@"Downloaded successfully"];
+    content.body = record.title.length ? record.title : record.url;
+    content.sound = nil;   // Downloading is not urgent enough to interrupt audio.
+
+    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:record.identifier
+                                                                         content:content
+                                                                         trigger:nil];
+    [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
+}
+
 #pragma mark - Photos
 
 - (BOOL)isVideoFile:(NSString *)path {
@@ -282,7 +300,7 @@ static const NSUInteger kMaxConcurrent = 2;
                 [self saveToPhotos:filePath completion:completion];
             } else if (completion) {
                 // The file is on disk, so the download itself succeeded.
-                completion(filePath, @"تم التحميل لكن لم يتم حفظه في الصور: الإذن مرفوض");
+                completion(filePath, [MVLang t:@"Saved to Files but not to Photos: permission denied"]);
             }
         }];
         return;
@@ -292,8 +310,9 @@ static const NSUInteger kMaxConcurrent = 2;
     } completionHandler:^(BOOL success, NSError *err) {
         if (!completion) return;
         if (success) completion(filePath, nil);
-        else completion(filePath, [NSString stringWithFormat:@"تم التحميل لكن فشل الحفظ في الصور: %@",
-                                  err.localizedDescription ?: @"خطأ غير معروف"]);
+        else completion(filePath, [NSString stringWithFormat:@"%@: %@",
+                                  [MVLang t:@"Saved to Files but not to Photos"],
+                                  err.localizedDescription ?: [MVLang t:@"Unknown error"]]);
     }];
 }
 

@@ -62,6 +62,11 @@ xcrun --sdk iphoneos clang \
 
 echo "== Bundle"
 cp Resources/Info.plist "$APP_DIR/Info.plist"
+
+# The icon is drawn, not committed, so the repository carries no binary and the
+# icon stays sharp at any size. 1024 is the App Store size; iOS downsamples it.
+echo "== App icon"
+python3 scripts/make_icon.py "$APP_DIR/AppIcon.png" 1024
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER:-1}" "$APP_DIR/Info.plist"
 printf 'APPL????' > "$APP_DIR/PkgInfo"
 

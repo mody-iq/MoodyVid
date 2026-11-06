@@ -42,6 +42,8 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"More": @"المزيد",
             @"Clipboard is empty": @"الحافظة فارغة",
             @"Remove ads and unlock more": @"أزل الإعلانات وافتح المزيد",
+            @"Saved to Files but not to Photos": @"تم الحفظ في الملفات لكن ليس في الصور",
+            @"Saved to Files but not to Photos: permission denied": @"تم الحفظ في الملفات لكن ليس في الصور: الإذن مرفوض",
             @"No favorites yet": @"لا توجد مفضلة بعد",
             @"Music": @"موسيقى",
             @"Movies": @"أفلام",
