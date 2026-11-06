@@ -54,6 +54,7 @@ xcrun --sdk iphoneos clang \
   -F "$SLICE" \
   -framework UIKit -framework Foundation -framework JavaScriptCore -framework Python -framework Photos \
   -framework AVKit -framework AVFoundation -framework CoreMedia \
+  -framework CoreGraphics -framework QuartzCore \
   -Wl,-rpath,@executable_path/Frameworks \
   Sources/*.m \
   -o "$APP_DIR/$APP_NAME"
