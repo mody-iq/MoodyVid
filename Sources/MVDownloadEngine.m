@@ -9,6 +9,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)downloadURL:(NSString *)url
          quality:(NSString *)quality
     completion:(void (^)(NSString *filePath, NSString *error))completion;
+- (void)saveToPhotos:(NSString *)filePath
+   presentingViewController:(UIViewController *)vc
+              completion:(void (^)(BOOL success, NSString *error))completion;
 @end
 
 @implementation MVDownloadEngine
@@ -21,7 +24,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)downloadURL:(NSString *)url quality:(NSString *)quality completion:(void (^)(NSString *, NSString *))completion {
     NSMutableArray *args = [NSMutableArray arrayWithObjects:url, quality, nil];
-    [[MVPython shared] call:@"downloader" function:"download" args:args completion:^(NSDictionary *result, NSString *error) {
+    [[MVPython shared] call:@"downloader" function:@"download" args:args completion:^(NSDictionary *result, NSString *error) {
         if (error) { completion(nil, error); return; }
         NSString *path = result[@"filepath"];
         NSString *err = result[@"error"];
@@ -33,10 +36,12 @@ NS_ASSUME_NONNULL_BEGIN
     }];
 }
 
-- (void)saveToPhotos:(NSString *)filePath completion:(void (^)(BOOL success, NSString *error))completion {
-    PHPhotoLibrary.requestAuthorization:^(PHAuthorizationStatus status) {
+- (void)saveToPhotos:(NSString *)filePath presentingViewController:(UIViewController *)vc completion:(void (^)(BOOL, NSString *))completion {
+    PHPhotoLibrary.requestAuthorization { [weak vc] (PHAuthorizationStatus status) in
         if (status != PHAuthorizationStatusAuthorized) {
-            completion(NO, @"مطلوب إذن الوصول إلى الصور");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(NO, @"مطلوب إذن الوصول إلى الصور");
+            });
             return;
         }
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
