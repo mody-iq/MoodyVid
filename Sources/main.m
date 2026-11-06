@@ -1,23 +1,5 @@
 #import <UIKit/UIKit.h>
-#import "MVPython.h"
-
-@interface MVDownloaderViewController : UIViewController
-@end
-
-@interface MVRootViewController : UIViewController
-@end
-
-@implementation MVRootViewController
-
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    [[MVPython shared] start];
-    MVDownloaderViewController *dl = [[MVDownloaderViewController alloc] init];
-    dl.modalPresentationStyle = UIModalPresentationFullScreen;
-    [self presentViewController:dl animated:NO completion:nil];
-}
-
-@end
+#import "MVDownloaderViewController.h"
 
 @interface MVAppDelegate : UIResponder <UIApplicationDelegate>
 @property (strong, nonatomic) UIWindow *window;
@@ -27,7 +9,11 @@
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    MVRootViewController *root = [[MVRootViewController alloc] init];
+    UIStoryboard *sb = [UIStoryboard storyboardWithName:@"Main" bundle:nil];
+    UIViewController *root = [sb instantiateInitialViewController];
+    if (!root) {
+        root = [[MVDownloaderViewController alloc] init];
+    }
     self.window.rootViewController = root;
     [self.window makeKeyAndVisible];
     return YES;
