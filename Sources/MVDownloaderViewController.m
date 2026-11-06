@@ -1,4 +1,6 @@
 #import "MVDownloaderViewController.h"
+#import "MVBrowserViewController.h"
+#import "MVBrowserHistory.h"
 #import "MVLang.h"
 #import "MVTheme.h"
 #import "MVPaths.h"
@@ -11,13 +13,16 @@
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *symbol;
 @property (nonatomic, strong) UIColor *tint;
-+ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint;
+/// The site the tile opens in the in-app browser; nil for the trailing "More"
+/// tile, which opens the history instead.
+@property (nonatomic, copy, nullable) NSString *url;
++ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint url:(nullable NSString *)url;
 @end
 
 @implementation MVPlatform
-+ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint {
++ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint url:(NSString *)url {
     MVPlatform *p = [MVPlatform new];
-    p.name = name; p.symbol = symbol; p.tint = tint;
+    p.name = name; p.symbol = symbol; p.tint = tint; p.url = url;
     return p;
 }
 @end
@@ -48,16 +53,17 @@
     self.view.backgroundColor = [MVTheme background];
     self.selectedQuality = @"best";
 
-    self.platforms = @[
-        [MVPlatform name:@"YouTube" symbol:@"play.rectangle.fill" tint:UIColor.systemRedColor],
-        [MVPlatform name:@"TikTok" symbol:@"music.note" tint:UIColor.systemPinkColor],
-        [MVPlatform name:@"Instagram" symbol:@"camera.fill" tint:UIColor.systemPurpleColor],
-        [MVPlatform name:@"X" symbol:@"bird.fill" tint:UIColor.labelColor],
-        [MVPlatform name:@"Facebook" symbol:@"f.circle.fill" tint:UIColor.systemBlueColor],
-        [MVPlatform name:@"Twitch" symbol:@"gamecontroller.fill" tint:UIColor.systemIndigoColor],
-        [MVPlatform name:@"SoundCloud" symbol:@"waveform" tint:UIColor.systemOrangeColor],
-        [MVPlatform name:@"More" symbol:@"ellipsis.circle.fill" tint:[MVTheme accent]],
-    ];
+    // Tiles come from the browser's own site list so the two cannot drift apart.
+    NSMutableArray<MVPlatform *> *tiles = [NSMutableArray array];
+    for (NSDictionary *site in [MVBrowserViewController quickAccessSites]) {
+        if (tiles.count >= 7) break;
+        [tiles addObject:[MVPlatform name:site[@"name"]
+                                   symbol:site[@"symbol"]
+                                     tint:[self colorFromHex:site[@"color"]]
+                                      url:site[@"url"]]];
+    }
+    [tiles addObject:[MVPlatform name:@"More" symbol:@"ellipsis.circle.fill" tint:[MVTheme accent] url:nil]];
+    self.platforms = tiles;
 
     [self buildLayout];
     [self refreshText];
@@ -276,6 +282,8 @@
     UIControl *tile = [UIControl new];
     [MVTheme applyCardStyle:tile cornerRadius:16];
     tile.translatesAutoresizingMaskIntoConstraints = NO;
+    // platformTapped: reads the tile back out of self.platforms by tag.
+    tile.tag = [self.platforms indexOfObject:platform];
 
     UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:platform.symbol]];
     icon.tintColor = platform.tint;
@@ -399,16 +407,50 @@
 #pragma mark - Actions
 
 - (void)platformTapped:(UIControl *)tile {
-    // We deliberately do not embed a browser yet: an in-app web view needs a
-    // media sniffer to be useful, so for now we point the user at the flow that
-    // actually works rather than opening something that cannot detect media.
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Quick access"]
-                                                                  message:MVLang.shared.isRTL
-                                       ? @"انسخ الرابط من التطبيق ثم الصقه هنا."
-                                       : @"Copy the link from the app, then paste it here."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    MVPlatform *platform = self.platforms[tile.tag];
+    if (!platform) return;
+    if (!platform.url.length) {
+        [self showHistory];
+        return;
+    }
+    // Opens the site in the in-app browser, which injects the download button.
+    [MVBrowserViewController presentFrom:self url:platform.url];
+}
+
+- (UIColor *)colorFromHex:(NSString *)hex {
+    NSString *clean = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    if (clean.length != 6) return [MVTheme accent];
+    unsigned int value = 0;
+    [[NSScanner scannerWithString:clean] scanHexInt:&value];
+    return [UIColor colorWithRed:((value >> 16) & 0xFF) / 255.0
+                           green:((value >> 8) & 0xFF) / 255.0
+                            blue:(value & 0xFF) / 255.0
+                           alpha:1.0];
+}
+
+/// The trailing "More" tile: the browsing history, so a visited site is one tap
+/// away without retyping its address.
+- (void)showHistory {
+    NSArray<MVBrowserEntry *> *entries = MVBrowserHistory.shared.history;
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"History"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    NSUInteger shown = 0;
+    for (MVBrowserEntry *e in entries) {
+        if (shown >= 12) break;
+        shown++;
+        NSString *label = e.title.length ? e.title : e.url;
+        [sheet addAction:[UIAlertAction actionWithTitle:label style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [MVBrowserViewController presentFrom:self url:e.url];
+        }]];
+    }
+    if (!shown) {
+        [sheet setValue:[[NSAttributedString alloc] initWithString:[MVLang t:@"No history yet"]] forKey:@"attributedMessage"];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 240, 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (void)pasteFromClipboard {
