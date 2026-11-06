@@ -42,12 +42,10 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"More": @"المزيد",
             @"Premium": @"بريميوم",
             @"Search": @"بحث",
-            @"Quick access": @"وصول سريع",
             @"Suggested for you": @"مقترح لك",
             @"Paste your video link here...": @"الصق رابط الفيديو هنا...",
             @"Fetch": @"جلب",
             @"Paste and fetch": @"لصق وجلب",
-            @"Cancel download": @"إلغاء التحميل",
             @"Active downloads": @"التحميلات النشطة",
             @"Completed downloads": @"التحميلات المكتملة",
             @"No active downloads": @"لا توجد تحميلات نشطة",
@@ -159,7 +157,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
     // English wording is the key itself, so English never needs a table lookup.
     // (The table holds Arabic only; forgetting this check made the switch look
     // broken because Arabic came back for every language.)
-    if (![self.shared.code isEqualToString:@"ar"]) return key;
+    if (![MVLang.shared.code isEqualToString:@"ar"]) return key;
     return MVTable()[key] ?: key;
 }
 

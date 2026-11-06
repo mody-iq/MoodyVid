@@ -536,7 +536,7 @@
 /// Toggles the primary button between "Download" and "Cancel" and keeps the
 /// paste button out of the way while a job is in flight.
 - (void)setBusy:(BOOL)busy {
-    self.busy = busy;
+    _busy = busy;
     [self updateDownloadButton];
 }
 
