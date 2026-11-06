@@ -140,11 +140,18 @@ static NSString *pyErrorString(void) {
         PyGILState_STATE g = PyGILState_Ensure();
         PyObject *mod = PyImport_ImportModule(module.UTF8String);
         PyObject *fn = mod ? PyObject_GetAttrString(mod, function.UTF8String) : NULL;
-        PyObject *tuple = PyTuple_New((Py_ssize_t)args.count);
-        for (NSUInteger i = 0; i < args.count; i++) {
-            PyTuple_SetItem(tuple, (Py_ssize_t)i, PyUnicode_FromString(args[i].UTF8String));  // steals the reference
+        PyObject *tuple = NULL;
+        if (mod) {
+            tuple = PyTuple_New((Py_ssize_t)args.count);
+            for (NSUInteger i = 0; tuple && i < args.count; i++) {
+                // PyUnicode_FromString returns NULL for invalid UTF-8; a NULL slot
+                // in the tuple would crash when Python reads the arguments.
+                PyObject *item = PyUnicode_FromString(args[i].UTF8String ?: "");
+                if (!item) { Py_CLEAR(tuple); break; }
+                PyTuple_SetItem(tuple, (Py_ssize_t)i, item);  // steals the reference
+            }
         }
-        PyObject *r = fn ? PyObject_CallObject(fn, tuple) : NULL;
+        PyObject *r = (fn && tuple) ? PyObject_CallObject(fn, tuple) : NULL;
         if (r && PyUnicode_Check(r)) json = [NSString stringWithUTF8String:PyUnicode_AsUTF8(r) ?: "{}"];
         else err = pyErrorString();
         PyErr_Clear();

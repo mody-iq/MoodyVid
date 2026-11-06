@@ -29,6 +29,21 @@ def _ctypes_guard():
 _ctypes_guard()
 
 
+def _use_bundled_certificates():
+    """iOS has no system CA store, so point OpenSSL at the certifi bundle we ship."""
+    try:
+        import certifi
+    except BaseException:
+        return False
+    if os.path.exists(certifi.where()):
+        os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+        return True
+    return False
+
+
+_use_bundled_certificates()
+
+
 def _err(e):
     return f'{type(e).__name__}: {e}'
 
@@ -41,12 +56,9 @@ def info():
         out['ssl'] = ssl.OPENSSL_VERSION
     except BaseException as e:
         out['ssl_error'] = _err(e)
-    try:
-        import certifi
-        os.environ['SSL_CERT_FILE'] = certifi.where()
-        out['certifi'] = os.path.exists(certifi.where())
-    except BaseException as e:
-        out['certifi_error'] = _err(e)
+    out['certifi'] = _use_bundled_certificates()
+    if not out['certifi']:
+        out['certifi_error'] = 'the CA bundle is missing'
     try:
         from yt_dlp.version import __version__ as ytdlp_version
         out['yt_dlp'] = ytdlp_version

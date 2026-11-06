@@ -2,6 +2,11 @@
 #import "MVPython.h"
 #import <Photos/Photos.h>
 
+@interface MVDownloadEngine ()
+- (BOOL)isVideoFile:(NSString *)path;
+- (void)saveToPhotos:(NSString *)filePath completion:(void (^)(NSString *filePath, NSString *error))completion;
+@end
+
 @implementation MVDownloadEngine
 
 + (instancetype)shared {
@@ -20,8 +25,22 @@
             completion(nil, @"فشل التحميل");
             return;
         }
-        [self saveToPhotos:path completion:completion];
+        // Audio-only downloads are not videos, so Photos cannot store them.
+        if ([self isVideoFile:path]) {
+            [self saveToPhotos:path completion:completion];
+        } else {
+            completion(path, nil);
+        }
     }];
+}
+
+- (BOOL)isVideoFile:(NSString *)path {
+    static NSSet *extensions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        extensions = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"webm", @"mkv", @"avi", @"3gp"]];
+    });
+    return [extensions containsObject:path.pathExtension.lowercaseString];
 }
 
 - (void)saveToPhotos:(NSString *)filePath completion:(void (^)(NSString *filePath, NSString *error))completion {
@@ -31,7 +50,8 @@
             if (newStatus == PHAuthorizationStatusAuthorized || newStatus == PHAuthorizationStatusLimited) {
                 [self saveToPhotos:filePath completion:completion];
             } else {
-                completion(filePath, @"تم التحميل لكن الإذن refused");
+                // The file is on disk, so the download itself succeeded.
+                completion(filePath, @"تم التحميل لكن لم يتم حفظه في الصور: الإذن مرفوض");
             }
         }];
         return;
@@ -42,7 +62,8 @@
         if (success) {
             completion(filePath, nil);
         } else {
-            completion(filePath, nil);
+            completion(filePath, [NSString stringWithFormat:@"تم التحميل لكن فشل الحفظ في الصور: %@",
+                                  err.localizedDescription ?: @"خطأ غير معروف"]);
         }
     }];
 }
