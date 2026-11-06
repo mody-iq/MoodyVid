@@ -33,22 +33,17 @@ static NSString *const kInjectedScript = @""
 "    if (v.__moodyvidBtn && v.__moodyvidBtn.parentNode) return;\n"
 "    var b=document.createElement('div');\n"
 "    b.textContent='⬇ __MV_DOWNLOAD__';\n"
-"    b.style.cssText='position:absolute;z-index:2147483647;top:12px;right:12px;padding:8px 14px;'\n"
+"    b.style.cssText='z-index:2147483647;padding:8px 14px;'\n"
 "      +'border-radius:999px;background:#0FA0B0;color:#fff;font:600 14px -apple-system,sans-serif;'\n"
 "      +'box-shadow:0 4px 14px rgba(0,0,0,.45);cursor:pointer';\n"
 "    b.addEventListener('click',function(ev){\n"
 "      ev.preventDefault(); ev.stopPropagation();\n"
 "      post({type:'tap', src:v.currentSrc||v.src||'', page:location.href, title:document.title||''});\n"
 "    });\n"
-"    var host=v.parentNode;\n"
-"    if (host && getComputedStyle(host).position==='static') host.style.position='relative';\n"
-"    (host||document.body).appendChild(b);\n"
+"    b.style.position='fixed';\n"
+"    b.style.top='84px'; b.style.right='12px';\n"
+"    document.body.appendChild(b);\n"
 "    v.__moodyvidBtn=b;\n"
-"    function sync(){ try{\n"
-"      var r=v.getBoundingClientRect();\n"
-"      b.style.top=(v.offsetTop+12)+'px'; b.style.left=(v.offsetLeft+Math.max(8,r.width-140))+'px';\n"
-"    }catch(e){} }\n"
-"    sync(); v.addEventListener('timeupdate', sync);\n"
 "  }\n"
 "  function scan(){\n"
 "    var v=best();\n"
@@ -68,6 +63,7 @@ static NSString *const kMessageHandler = @"moodyvid";
 @property (nonatomic, strong) UIButton *backButton;
 @property (nonatomic, strong) UIButton *forwardButton;
 @property (nonatomic, strong) UIButton *favoriteButton;
+@property (nonatomic, strong) UIButton *downloadButton;
 @property (nonatomic, strong) UIStackView *foundBar;
 @property (nonatomic, strong) UILabel *foundLabel;
 @property (nonatomic, copy, nullable) NSString *foundURL;
@@ -242,7 +238,12 @@ static NSString *const kMessageHandler = @"moodyvid";
     self.forwardButton = [self toolbarButton:@"chevron.forward" action:@selector(goForward)];
     self.favoriteButton = [self toolbarButton:@"star" action:@selector(toggleFavorite)];
 
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.backButton, self.forwardButton, self.addressField, self.favoriteButton]];
+    // Always-available download for the page currently open. The button injected
+    // into the page can be covered by the site's own overlay, so the user needs a
+    // control the page cannot take away.
+    self.downloadButton = [self toolbarButton:@"arrow.down.circle" action:@selector(downloadCurrentPage)];
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.backButton, self.forwardButton, self.addressField, self.downloadButton, self.favoriteButton]];
     row.translatesAutoresizingMaskIntoConstraints = NO;
     row.spacing = 8;
     row.alignment = UIStackViewAlignmentCenter;
@@ -293,6 +294,7 @@ static NSString *const kMessageHandler = @"moodyvid";
         [self.backButton.widthAnchor constraintEqualToConstant:32],
         [self.forwardButton.widthAnchor constraintEqualToConstant:32],
         [self.favoriteButton.widthAnchor constraintEqualToConstant:32],
+        [self.downloadButton.widthAnchor constraintEqualToConstant:32],
     ]];
 
 }
@@ -398,14 +400,19 @@ static NSString *const kMessageHandler = @"moodyvid";
     NSDictionary *body = [message.body isKindOfClass:NSDictionary.class] ? message.body : nil;
     if (!body) return;
     NSString *type = body[@"type"];
-    NSString *src = body[@"src"];
-    if (![src isKindOfClass:NSString.class] || !src.length) return;
+    NSString *src = [body[@"src"] isKindOfClass:NSString.class] ? body[@"src"] : @"";
 
     if ([type isEqualToString:@"tap"]) {
-        // The button on the video: the user has decided, so download it now.
-        [self startDownloadOf:src title:body[@"title"]];
+        // The button on the video: the user has decided, so download it now. A
+        // blob: source (what YouTube's player uses) cannot be fetched, and on some
+        // players currentSrc is empty; both fall through to the page address,
+        // which the engine knows how to extract. The old guard returned early on
+        // an empty src, so the tap was dropped and the button looked dead.
+        NSString *target = [self looksLikeMedia:src] ? src : self.web.URL.absoluteString;
+        if (!target.length) return;
+        [self startDownloadOf:target title:body[@"title"]];
     } else if ([type isEqualToString:@"found"]) {
-        if ([src hasPrefix:@"blob:"]) return;   // blob URLs cannot be fetched directly
+        if (!src.length || [src hasPrefix:@"blob:"]) return;  // blob URLs cannot be fetched
         self.foundURL = src;
         self.foundTitle = body[@"title"];
         [self showFoundBar];
@@ -420,6 +427,14 @@ static NSString *const kMessageHandler = @"moodyvid";
     }
     NSString *name = self.foundTitle.length ? self.foundTitle : [MVLang t:@"Media found"];
     self.foundLabel.text = name;
+}
+
+/// The toolbar's Download button. Prefers a media URL the sniffer found; falls
+/// back to the page address, which the engine knows how to extract.
+- (void)downloadCurrentPage {
+    NSString *target = self.foundURL.length ? self.foundURL : self.web.URL.absoluteString;
+    if (!target.length) return;
+    [self startDownloadOf:target title:self.foundTitle ?: self.web.title];
 }
 
 - (void)downloadFound {
