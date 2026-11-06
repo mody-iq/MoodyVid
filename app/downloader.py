@@ -102,6 +102,15 @@ def _error(message):
     return json.dumps({"error": str(message)}, ensure_ascii=False)
 
 
+def _native():
+    """The native helpers, or None off-device (tests import this module directly)."""
+    try:
+        import mvnative
+        return mvnative
+    except BaseException:
+        return None
+
+
 def _client_order():
     """The remembered client first, then the rest, skipping a duplicate."""
     order = list(PLAYER_CLIENTS)
@@ -112,7 +121,7 @@ def _client_order():
     return order
 
 
-def download(url, quality="best"):
+def download(url, quality="best", _task=""):
     try:
         import yt_dlp
     except Exception as e:
@@ -127,10 +136,15 @@ def download(url, quality="best"):
         return _error(f"cannot create the download folder: {e}")
 
     fmt = FORMATS.get(quality, FORMATS["best"])
+    native = _native()
     last_error = None
     for client in _client_order():
+        if _is_cancelled(native, _task):
+            return _error("cancelled")
         try:
-            info, filename = _download_once(yt_dlp, url, fmt, client, out_dir)
+            info, filename = _download_once(yt_dlp, url, fmt, client, out_dir, native, _task)
+        except _Cancelled:
+            return _error("cancelled")
         except Exception as e:
             last_error = e
             continue
@@ -148,7 +162,51 @@ def download(url, quality="best"):
     return _error(last_error or "download failed")
 
 
-def _download_once(yt_dlp, url, fmt, client, out_dir):
+class _Cancelled(Exception):
+    """Raised from the progress hook when the UI asked the task to stop."""
+
+
+def _is_cancelled(native, task):
+    if not native or not task:
+        return False
+    try:
+        return bool(native.cancelled(task))
+    except BaseException:
+        return False
+
+
+def _progress_hook(native, task):
+    """Feeds live progress back to the UI, and stops the download on request.
+
+    The UI cannot be called from here (this runs on a worker thread inside
+    Python), so we hand the numbers to the native side and let it poll. Raising
+    from the hook is the documented way to abort a yt-dlp download.
+    """
+    def hook(status):
+        if _is_cancelled(native, task):
+            raise _Cancelled()
+        if not native or not task:
+            return
+        try:
+            state = status.get("status")
+            total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
+            downloaded = status.get("downloaded_bytes") or 0
+            progress = (downloaded / total) if total else -1
+            native.set_progress(task, json.dumps({
+                "status": state or "",
+                "progress": progress,
+                "speed": status.get("speed") or 0,
+                "eta": status.get("eta") or 0,
+                "total": total,
+                "title": status.get("info_dict", {}).get("title", ""),
+            }))
+        except BaseException:
+            # Progress is a nicety; never let it break the download.
+            pass
+    return hook
+
+
+def _download_once(yt_dlp, url, fmt, client, out_dir, native=None, task=""):
     opts = {
         "format": fmt,
         "outtmpl": os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s"),
@@ -159,6 +217,7 @@ def _download_once(yt_dlp, url, fmt, client, out_dir):
         "fragment_retries": 3,
         # A blocked style should fail quickly so the next one is tried.
         "socket_timeout": 15,
+        "progress_hooks": [_progress_hook(native, task)],
     }
     if client:
         opts["extractor_args"] = {"youtube": {"player_client": client}}

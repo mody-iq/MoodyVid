@@ -50,8 +50,26 @@ static PyObject *mv_run_js(PyObject *self, PyObject *args) {
     return Py_BuildValue("(Os)", Py_True, output.UTF8String);
 }
 
+static PyObject *mv_progress(PyObject *self, PyObject *args) {
+    const char *task = NULL;
+    if (!PyArg_ParseTuple(args, "s", &task)) return NULL;
+    NSDictionary *p = [[MVPython shared] progressForTask:[NSString stringWithUTF8String:task ?: ""]];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:(p ?: @{}) options:0 error:nil];
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"{}";
+    return PyUnicode_FromString(json.UTF8String);
+}
+
+static PyObject *mv_cancelled(PyObject *self, PyObject *args) {
+    const char *task = NULL;
+    if (!PyArg_ParseTuple(args, "s", &task)) return NULL;
+    if ([[MVPython shared] isTaskCancelled:[NSString stringWithUTF8String:task ?: ""]]) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
 static PyMethodDef MVMethods[] = {
     {"run_js", mv_run_js, METH_VARARGS, "Runs JavaScript in JavaScriptCore; returns (ok, output or error)."},
+    {"progress", mv_progress, METH_VARARGS, "Returns the last reported progress for a task, as JSON."},
+    {"cancelled", mv_cancelled, METH_VARARGS, "Returns True when the task has been asked to stop."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -66,6 +84,11 @@ static PyObject *PyInit_mvnative(void) { return PyModule_Create(&MVNativeModule)
 @property (nonatomic) dispatch_group_t ready;
 @property (nonatomic, nullable) NSString *startError;
 @property (nonatomic) BOOL started;
+@property (nonatomic, readwrite, copy) NSDictionary *engineInfo;
+// Progress and cancellation, keyed by task id, guarded by `stateLock`.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *progressByTask;
+@property (nonatomic, strong) NSMutableSet<NSString *> *cancelledTasks;
+@property (nonatomic, strong) NSLock *stateLock;
 @end
 
 @implementation MVPython
@@ -77,6 +100,10 @@ static PyObject *PyInit_mvnative(void) { return PyModule_Create(&MVNativeModule)
         instance = [MVPython new];
         instance.queue = dispatch_queue_create("com.mody.moodyvid.python", DISPATCH_QUEUE_SERIAL);
         instance.ready = dispatch_group_create();
+        instance.progressByTask = [NSMutableDictionary dictionary];
+        instance.cancelledTasks = [NSMutableSet set];
+        instance.stateLock = [NSLock new];
+        instance->_engineInfo = @{};
     });
     return instance;
 }
@@ -191,13 +218,43 @@ static NSString *pyErrorString(void) {
     Py_XDECREF(boot);
     PyErr_Clear();
 
+    [self readEngineInfo];
+
     // Release the GIL; every later call takes it with PyGILState_Ensure.
     PyEval_SaveThread();
+}
+
+/// Asks mvboot for its self-test so the Settings screen can show the engine
+/// version and whether JavaScriptCore came up.
+- (void)readEngineInfo {
+    PyObject *mod = PyImport_ImportModule("mvboot");
+    PyObject *fn = mod ? PyObject_GetAttrString(mod, "info") : NULL;
+    PyObject *r = fn ? PyObject_CallObject(fn, NULL) : NULL;
+    if (r && PyUnicode_Check(r)) {
+        const char *utf8 = PyUnicode_AsUTF8(r);
+        if (utf8) {
+            id obj = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:utf8 length:strlen(utf8)]
+                                                     options:0 error:nil];
+            if ([obj isKindOfClass:NSDictionary.class]) self.engineInfo = obj;
+        }
+    }
+    PyErr_Clear();
+    Py_XDECREF(r);
+    Py_XDECREF(fn);
+    Py_XDECREF(mod);
 }
 
 - (void)call:(NSString *)module
     function:(NSString *)function
         args:(NSArray<NSString *> *)args
+  completion:(void (^)(NSDictionary *_Nullable, NSString *_Nullable))completion {
+    [self call:module function:function args:args task:nil completion:completion];
+}
+
+- (void)call:(NSString *)module
+    function:(NSString *)function
+        args:(NSArray<NSString *> *)args
+        task:(NSString *)task
   completion:(void (^)(NSDictionary *_Nullable, NSString *_Nullable))completion {
     [self start];
     dispatch_group_notify(self.ready, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -211,6 +268,7 @@ static NSString *pyErrorString(void) {
         PyObject *mod = PyImport_ImportModule(module.UTF8String);
         PyObject *fn = mod ? PyObject_GetAttrString(mod, function.UTF8String) : NULL;
         PyObject *tuple = NULL;
+        PyObject *kwargs = NULL;
         if (mod) {
             tuple = PyTuple_New((Py_ssize_t)args.count);
             for (NSUInteger i = 0; tuple && i < args.count; i++) {
@@ -220,12 +278,19 @@ static NSString *pyErrorString(void) {
                 if (!item) { Py_CLEAR(tuple); break; }
                 PyTuple_SetItem(tuple, (Py_ssize_t)i, item);  // steals the reference
             }
+            if (task.length) {
+                kwargs = PyDict_New();
+                PyObject *v = PyUnicode_FromString(task.UTF8String ?: "");
+                if (v) PyDict_SetItemString(kwargs, "_task", v);  // steals the reference
+                Py_XDECREF(v);
+            }
         }
-        PyObject *r = (fn && tuple) ? PyObject_CallObject(fn, tuple) : NULL;
+        PyObject *r = (fn && tuple) ? PyObject_Call(fn, tuple, kwargs) : NULL;
         if (r && PyUnicode_Check(r)) json = [NSString stringWithUTF8String:PyUnicode_AsUTF8(r) ?: "{}"];
         else err = pyErrorString();
         PyErr_Clear();
         Py_XDECREF(r);
+        Py_XDECREF(kwargs);
         Py_XDECREF(tuple);
         Py_XDECREF(fn);
         Py_XDECREF(mod);
@@ -241,6 +306,46 @@ static NSString *pyErrorString(void) {
         if (result[@"error"]) { err = result[@"error"]; result = nil; }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(result, err); });
     });
+}
+
+#pragma mark - Progress and cancellation
+
+- (void)setProgress:(NSDictionary *)progress forTask:(NSString *)task {
+    if (!task.length) return;
+    [self.stateLock lock];
+    self.progressByTask[task] = progress ?: @{};
+    [self.stateLock unlock];
+}
+
+- (NSDictionary *)progressForTask:(NSString *)task {
+    if (!task.length) return @{};
+    [self.stateLock lock];
+    NSDictionary *p = self.progressByTask[task] ?: @{};
+    [self.stateLock unlock];
+    return p;
+}
+
+- (void)cancelTask:(NSString *)task {
+    if (!task.length) return;
+    [self.stateLock lock];
+    [self.cancelledTasks addObject:task];
+    [self.stateLock unlock];
+}
+
+- (BOOL)isTaskCancelled:(NSString *)task {
+    if (!task.length) return NO;
+    [self.stateLock lock];
+    BOOL cancelled = [self.cancelledTasks containsObject:task];
+    [self.stateLock unlock];
+    return cancelled;
+}
+
+- (void)forgetTask:(NSString *)task {
+    if (!task.length) return;
+    [self.stateLock lock];
+    [self.progressByTask removeObjectForKey:task];
+    [self.cancelledTasks removeObject:task];
+    [self.stateLock unlock];
 }
 
 @end

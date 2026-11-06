@@ -1,12 +1,11 @@
 #import <UIKit/UIKit.h>
 
+NS_ASSUME_NONNULL_BEGIN
+
+/// The Home tab: brand header, platform shortcuts, the link field with one-tap
+/// paste, and the recent downloads.
 @interface MVDownloaderViewController : UIViewController
 
-@property (strong, nonatomic) UITextField *urlField;
-@property (strong, nonatomic) UILabel *statusLabel;
-@property (strong, nonatomic) UIProgressView *progressView;
-@property (strong, nonatomic) UIButton *downloadButton;
-@property (strong, nonatomic) UIButton *qualityButton;
-@property (strong, nonatomic) NSString *selectedQuality;
-
 @end
+
+NS_ASSUME_NONNULL_END

@@ -18,6 +18,32 @@ NS_ASSUME_NONNULL_BEGIN
         args:(NSArray<NSString *> *)args
   completion:(void (^)(NSDictionary *_Nullable result, NSString *_Nullable error))completion;
 
+/// Runs `module.function(*args)` on a background thread and returns the parsed
+/// JSON result. The engine's own `_task` keyword argument carries `task`, so the
+/// Python side can report progress and poll for cancellation while it works.
+///
+/// `completion` runs on the main queue.
+- (void)call:(NSString *)module
+    function:(NSString *)function
+        args:(NSArray<NSString *> *)args
+        task:(NSString *)task
+  completion:(void (^)(NSDictionary *_Nullable result, NSString *_Nullable error))completion;
+
+/// Engine self-test results (yt-dlp version, JavaScriptCore status, ...). Filled in
+/// once the interpreter has started; empty before that.
+@property (nonatomic, readonly) NSDictionary *engineInfo;
+
+/// Reports download progress for a task. Read from Python via `mvnative.progress`.
+- (void)setProgress:(NSDictionary *)progress forTask:(NSString *)task;
+
+/// Returns the last progress reported for a task (empty dictionary if none).
+- (NSDictionary *)progressForTask:(NSString *)task;
+
+/// Asks a task to stop. The Python side polls this and aborts.
+- (void)cancelTask:(NSString *)task;
+- (BOOL)isTaskCancelled:(NSString *)task;
+- (void)forgetTask:(NSString *)task;
+
 @end
 
 NS_ASSUME_NONNULL_END

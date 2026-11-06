@@ -1,153 +1,505 @@
 #import "MVDownloaderViewController.h"
+#import "MVLang.h"
+#import "MVTheme.h"
+#import "MVPaths.h"
+#import "MVDownloadStore.h"
 #import "MVDownloadEngine.h"
 
-@interface MVDownloaderViewController () <UITextFieldDelegate>
+// A platform shortcut: the name, the SF Symbol standing in for its logo (we ship
+// no third-party brand assets) and the tint used for the tile.
+@interface MVPlatform : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *symbol;
+@property (nonatomic, strong) UIColor *tint;
++ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint;
+@end
+
+@implementation MVPlatform
++ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint {
+    MVPlatform *p = [MVPlatform new];
+    p.name = name; p.symbol = symbol; p.tint = tint;
+    return p;
+}
+@end
+
+@interface MVDownloaderViewController () <UITextFieldDelegate, UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UIScrollView *scroll;
+@property (nonatomic, strong) UITextField *urlField;
+@property (nonatomic, strong) UIButton *pasteButton;
+@property (nonatomic, strong) UIButton *downloadButton;
+@property (nonatomic, strong) UIButton *qualityButton;
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIProgressView *progressView;
+@property (nonatomic, strong) UITableView *recentTable;
+@property (nonatomic, strong) UILabel *recentTitle;
+@property (nonatomic, strong) UILabel *platformsTitle;
+@property (nonatomic, copy) NSString *selectedQuality;
+@property (nonatomic, strong) NSArray<MVPlatform *> *platforms;
+@property (nonatomic, strong) NSLayoutConstraint *recentHeight;
 @end
 
 @implementation MVDownloaderViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = [MVTheme background];
     self.selectedQuality = @"best";
 
-    UIScrollView *scroll = [[UIScrollView alloc] init];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:scroll];
+    self.platforms = @[
+        [MVPlatform name:@"YouTube" symbol:@"play.rectangle.fill" tint:UIColor.systemRedColor],
+        [MVPlatform name:@"TikTok" symbol:@"music.note" tint:UIColor.systemPinkColor],
+        [MVPlatform name:@"Instagram" symbol:@"camera.fill" tint:UIColor.systemPurpleColor],
+        [MVPlatform name:@"X" symbol:@"bird.fill" tint:UIColor.labelColor],
+        [MVPlatform name:@"Facebook" symbol:@"f.circle.fill" tint:UIColor.systemBlueColor],
+        [MVPlatform name:@"Twitch" symbol:@"gamecontroller.fill" tint:UIColor.systemIndigoColor],
+        [MVPlatform name:@"SoundCloud" symbol:@"waveform" tint:UIColor.systemOrangeColor],
+        [MVPlatform name:@"More" symbol:@"ellipsis.circle.fill" tint:[MVTheme accent]],
+    ];
 
-    UIView *content = [[UIView alloc] init];
-    content.translatesAutoresizingMaskIntoConstraints = NO;
-    [scroll addSubview:content];
+    [self buildLayout];
+    [self refreshText];
 
-    UILabel *title = [[UILabel alloc] init];
-    title.text = @"تحميل فيديو";
-    title.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
-    title.textColor = UIColor.labelColor;
-    title.textAlignment = NSTextAlignmentCenter;
+    for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification, MVDownloadStoreDidChangeNotification]) {
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refreshText) name:name object:nil];
+    }
+}
 
-    self.urlField = [[UITextField alloc] init];
-    self.urlField.placeholder = @"لصق رابط الفيديو هنا";
-    self.urlField.borderStyle = UITextBorderStyleRoundedRect;
-    self.urlField.font = [UIFont systemFontOfSize:17];
-    self.urlField.autocorrectionType = UITextAutocorrectionTypeNo;
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self refreshText];
+    [self updatePasteButton];
+}
+
+#pragma mark - Layout
+
+- (void)buildLayout {
+    self.scroll = [UIScrollView new];
+    self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scroll.alwaysBounceVertical = YES;
+    self.scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    [self.view addSubview:self.scroll];
+
+    UIStackView *stack = [UIStackView new];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 20;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.scroll addSubview:stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [stack.topAnchor constraintEqualToAnchor:self.scroll.topAnchor constant:12],
+        [stack.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor constant:20],
+        [stack.trailingAnchor constraintEqualToAnchor:self.scroll.trailingAnchor constant:-20],
+        [stack.bottomAnchor constraintEqualToAnchor:self.scroll.bottomAnchor constant:-24],
+        [stack.widthAnchor constraintEqualToAnchor:self.scroll.widthAnchor constant:-40],
+    ]];
+
+    [stack addArrangedSubview:[self makeHeader]];
+
+    // Link card: field + paste, then the download button and quality picker.
+    UIView *linkCard = [UIView new];
+    [MVTheme applyCardStyle:linkCard];
+    linkCard.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.urlField = [UITextField new];
+    self.urlField.translatesAutoresizingMaskIntoConstraints = NO;
+    self.urlField.borderStyle = UITextBorderStyleNone;
+    self.urlField.keyboardType = UIKeyboardTypeURL;
     self.urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.urlField.autocorrectionType = UITextAutocorrectionTypeNo;
     self.urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
     self.urlField.returnKeyType = UIReturnKeyDone;
     self.urlField.delegate = self;
+    self.urlField.font = [UIFont systemFontOfSize:15];
+    self.urlField.textColor = [MVTheme text];
+    [linkCard addSubview:self.urlField];
 
-    self.qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.qualityButton setTitle:@"الجودة: أفضل جودة" forState:UIControlStateNormal];
-    self.qualityButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    [self.qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
+    self.pasteButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.pasteButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.pasteButton addTarget:self action:@selector(pasteFromClipboard) forControlEvents:UIControlEventTouchUpInside];
+    self.pasteButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    [self.pasteButton setTitleColor:[MVTheme accent] forState:UIControlStateNormal];
+    [linkCard addSubview:self.pasteButton];
+
+    UIView *divider = [UIView new];
+    divider.translatesAutoresizingMaskIntoConstraints = NO;
+    divider.backgroundColor = [[MVTheme separator] colorWithAlphaComponent:0.15];
+    [linkCard addSubview:divider];
 
     self.downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.downloadButton setTitle:@"تحميل" forState:UIControlStateNormal];
-    // UIButtonTypeSystem tints its title with the system accent colour, which is
-    // unreadable on the blue background we set below.
-    [self.downloadButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    [self.downloadButton setTitleColor:[UIColor.whiteColor colorWithAlphaComponent:0.6] forState:UIControlStateDisabled];
-    self.downloadButton.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    self.downloadButton.backgroundColor = UIColor.systemBlueColor;
-    self.downloadButton.layer.cornerRadius = 12;
+    self.downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyPrimaryButtonStyle:self.downloadButton];
     [self.downloadButton addTarget:self action:@selector(startDownload) forControlEvents:UIControlEventTouchUpInside];
+    [linkCard addSubview:self.downloadButton];
 
-    self.statusLabel = [[UILabel alloc] init];
-    self.statusLabel.text = @"أدخل رابط الفيديو";
-    self.statusLabel.font = [UIFont systemFontOfSize:15];
-    self.statusLabel.textColor = UIColor.secondaryLabelColor;
-    self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.numberOfLines = 0;
+    self.qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.qualityButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.qualityButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    [self.qualityButton setTitleColor:[MVTheme secondaryText] forState:UIControlStateNormal];
+    [self.qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
+    [linkCard addSubview:self.qualityButton];
 
-    self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-    self.progressView.progress = 0.0f;
+    self.progressView = [UIProgressView new];
+    self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
     self.progressView.hidden = YES;
+    self.progressView.progressTintColor = [MVTheme accent];
+    self.progressView.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.2];
+    [linkCard addSubview:self.progressView];
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, self.urlField, self.qualityButton, self.downloadButton, self.statusLabel, self.progressView]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.alignment = UIStackViewAlignmentFill;
-    stack.spacing = 16;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:stack];
+    self.statusLabel = [UILabel new];
+    self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusLabel.numberOfLines = 3;
+    self.statusLabel.font = [UIFont systemFontOfSize:13];
+    self.statusLabel.textColor = [MVTheme secondaryText];
+    [linkCard addSubview:self.statusLabel];
 
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
-        [content.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor],
-        [content.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor],
-        [content.topAnchor constraintEqualToAnchor:scroll.topAnchor],
-        [content.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor],
-        [content.widthAnchor constraintEqualToAnchor:scroll.widthAnchor],
-        [stack.centerXAnchor constraintEqualToAnchor:content.centerXAnchor],
-        [stack.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-48],
-        [stack.topAnchor constraintEqualToAnchor:content.topAnchor constant:24],
-        [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-24],
-        [self.urlField.heightAnchor constraintEqualToConstant:44],
-        [self.qualityButton.heightAnchor constraintEqualToConstant:44],
-        [self.downloadButton.heightAnchor constraintEqualToConstant:52],
-        [self.progressView.heightAnchor constraintEqualToConstant:4]
+        [self.urlField.topAnchor constraintEqualToAnchor:linkCard.topAnchor constant:14],
+        [self.urlField.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
+        [self.urlField.heightAnchor constraintEqualToConstant:26],
+
+        [self.pasteButton.leadingAnchor constraintEqualToAnchor:self.urlField.trailingAnchor constant:8],
+        [self.pasteButton.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
+        [self.pasteButton.centerYAnchor constraintEqualToAnchor:self.urlField.centerYAnchor],
+        [self.pasteButton.widthAnchor constraintGreaterThanOrEqualToConstant:54],
+
+        [divider.topAnchor constraintEqualToAnchor:self.urlField.bottomAnchor constant:12],
+        [divider.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
+        [divider.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
+        [divider.heightAnchor constraintEqualToConstant:1],
+
+        [self.downloadButton.topAnchor constraintEqualToAnchor:divider.bottomAnchor constant:14],
+        [self.downloadButton.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
+        [self.downloadButton.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
+        [self.downloadButton.heightAnchor constraintEqualToConstant:46],
+
+        [self.qualityButton.topAnchor constraintEqualToAnchor:self.downloadButton.bottomAnchor constant:10],
+        [self.qualityButton.centerXAnchor constraintEqualToAnchor:linkCard.centerXAnchor],
+
+        [self.progressView.topAnchor constraintEqualToAnchor:self.qualityButton.bottomAnchor constant:12],
+        [self.progressView.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
+        [self.progressView.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
+
+        [self.statusLabel.topAnchor constraintEqualToAnchor:self.progressView.bottomAnchor constant:10],
+        [self.statusLabel.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
+        [self.statusLabel.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
+        [self.statusLabel.bottomAnchor constraintEqualToAnchor:linkCard.bottomAnchor constant:-16],
     ]];
+    [stack addArrangedSubview:linkCard];
+
+    self.platformsTitle = [self makeSectionTitle];
+    [stack addArrangedSubview:self.platformsTitle];
+    [stack addArrangedSubview:[self makePlatformGrid]];
+
+    self.recentTitle = [self makeSectionTitle];
+    [stack addArrangedSubview:self.recentTitle];
+
+    self.recentTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.recentTable.translatesAutoresizingMaskIntoConstraints = NO;
+    self.recentTable.backgroundColor = UIColor.clearColor;
+    self.recentTable.scrollEnabled = NO;
+    self.recentTable.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.12];
+    self.recentTable.dataSource = self;
+    self.recentTable.delegate = self;
+    self.recentTable.rowHeight = 52;
+    [self.recentTable registerClass:UITableViewCell.class forCellReuseIdentifier:@"MVRecentCell"];
+    [stack addArrangedSubview:self.recentTable];
+    self.recentHeight = [self.recentTable.heightAnchor constraintEqualToConstant:0];
+    self.recentHeight.active = YES;
+}
+
+- (UILabel *)makeSectionTitle {
+    UILabel *label = [UILabel new];
+    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    label.textColor = [MVTheme text];
+    return label;
+}
+
+- (UIView *)makeHeader {
+    UIView *header = [UIView new];
+
+    UILabel *brand = [UILabel new];
+    brand.text = @"MoodyVid";
+    brand.font = [UIFont systemFontOfSize:28 weight:UIFontWeightHeavy];
+    brand.textColor = [MVTheme text];
+    brand.translatesAutoresizingMaskIntoConstraints = NO;
+    [header addSubview:brand];
+
+    UILabel *tagline = [UILabel new];
+    tagline.translatesAutoresizingMaskIntoConstraints = NO;
+    tagline.tag = 101;
+    tagline.font = [UIFont systemFontOfSize:13];
+    tagline.textColor = [MVTheme secondaryText];
+    [header addSubview:tagline];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [brand.topAnchor constraintEqualToAnchor:header.topAnchor],
+        [brand.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+        [brand.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
+
+        [tagline.topAnchor constraintEqualToAnchor:brand.bottomAnchor constant:2],
+        [tagline.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+        [tagline.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
+        [tagline.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
+    ]];
+    return header;
+}
+
+- (UIView *)makePlatformGrid {
+    UIStackView *grid = [UIStackView new];
+    grid.axis = UILayoutConstraintAxisVertical;
+    grid.spacing = 12;
+
+    // Two rows of four tiles; UICollectionView would be overkill here.
+    for (NSInteger row = 0; row < 2; row++) {
+        UIStackView *line = [UIStackView new];
+        line.axis = UILayoutConstraintAxisHorizontal;
+        line.distribution = UIStackViewDistributionFillEqually;
+        line.spacing = 12;
+        for (NSInteger col = 0; col < 4; col++) {
+            MVPlatform *p = self.platforms[row * 4 + col];
+            [line addArrangedSubview:[self makePlatformTile:p]];
+        }
+        [grid addArrangedSubview:line];
+    }
+    return grid;
+}
+
+- (UIView *)makePlatformTile:(MVPlatform *)platform {
+    UIControl *tile = [UIControl new];
+    [MVTheme applyCardStyle:tile cornerRadius:16];
+    tile.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:platform.symbol]];
+    icon.tintColor = platform.tint;
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.userInteractionEnabled = NO;
+    [tile addSubview:icon];
+
+    UILabel *name = [UILabel new];
+    name.text = platform.name;
+    name.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightMedium];
+    name.textColor = [MVTheme secondaryText];
+    name.textAlignment = NSTextAlignmentCenter;
+    name.adjustsFontSizeToFitWidth = YES;
+    name.minimumScaleFactor = 0.7;
+    name.translatesAutoresizingMaskIntoConstraints = NO;
+    name.userInteractionEnabled = NO;
+    [tile addSubview:name];
+
+    [tile addTarget:self action:@selector(platformTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [tile.heightAnchor constraintEqualToConstant:72],
+        [icon.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
+        [icon.topAnchor constraintEqualToAnchor:tile.topAnchor constant:13],
+        [icon.widthAnchor constraintEqualToConstant:24],
+        [icon.heightAnchor constraintEqualToConstant:24],
+        [name.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:6],
+        [name.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:4],
+        [name.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-4],
+    ]];
+    return tile;
+}
+
+#pragma mark - Text and state
+
+- (void)refreshText {
+    self.title = [MVLang t:@"Home"];
+    self.urlField.placeholder = [MVLang t:@"Paste video link here..."];
+    [self.pasteButton setTitle:[MVLang t:@"Paste"] forState:UIControlStateNormal];
+    [self.downloadButton setTitle:[MVLang t:@"Download"] forState:UIControlStateNormal];
+    self.platformsTitle.text = [MVLang t:@"Quick access"];
+    self.recentTitle.text = [MVLang t:@"Recent"];
+    [self updateQualityTitle];
+    self.statusLabel.text = self.statusLabel.text.length ? self.statusLabel.text : @"";
+
+    UILabel *tagline = [self.view viewWithTag:101];
+    tagline.text = MVLang.shared.isRTL ? @"حمّل الفيديوهات من أي مكان" : @"Download videos from anywhere";
+
+    self.view.semanticContentAttribute = MVLang.shared.isRTL
+        ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
+    [self updatePasteButton];
+    [self reloadRecent];
+    [self applyThemeRecursively];
+}
+
+/// Re-applies theme colours to views that were built once in viewDidLoad.
+- (void)applyThemeRecursively {
+    self.view.backgroundColor = [MVTheme background];
+    self.urlField.textColor = [MVTheme text];
+    self.statusLabel.textColor = [MVTheme secondaryText];
+    self.platformsTitle.textColor = [MVTheme text];
+    self.recentTitle.textColor = [MVTheme text];
+    self.recentTable.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.12];
+    [self updateQualityTitle];
+    [self.recentTable reloadData];
+}
+
+- (void)updateQualityTitle {
+    NSString *label;
+    if ([self.selectedQuality isEqualToString:@"720p"]) label = [MVLang t:@"Up to 720p"];
+    else if ([self.selectedQuality isEqualToString:@"480p"]) label = [MVLang t:@"Up to 480p"];
+    else if ([self.selectedQuality isEqualToString:@"audio"]) label = [MVLang t:@"Audio only (M4A)"];
+    else label = [MVLang t:@"Best available"];
+    [self.qualityButton setTitle:[NSString stringWithFormat:@"%@: %@", [MVLang t:@"Quality"], label]
+                        forState:UIControlStateNormal];
+}
+
+- (void)updatePasteButton {
+    // Only offer paste when there is actually something to paste.
+    NSString *clip = UIPasteboard.generalPasteboard.string;
+    BOOL hasLink = clip.length > 0 && [clip hasPrefix:@"http"];
+    self.pasteButton.enabled = hasLink;
+    self.pasteButton.alpha = hasLink ? 1.0 : 0.45;
+}
+
+- (void)reloadRecent {
+    NSArray *finished = MVDownloadStore.shared.finishedRecords;
+    NSArray *recent = finished.count > 6 ? [finished subarrayWithRange:NSMakeRange(0, 6)] : finished;
+    self.recentHeight.constant = recent.count * 52;
+    self.recentTitle.hidden = recent.count == 0;
+    self.recentTable.hidden = recent.count == 0;
+    [self.recentTable reloadData];
+}
+
+#pragma mark - Recent table
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    NSArray *finished = MVDownloadStore.shared.finishedRecords;
+    return MIN(finished.count, 6);
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MVRecentCell" forIndexPath:indexPath];
+    MVDownloadRecord *record = MVDownloadStore.shared.finishedRecords[indexPath.row];
+    UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
+    content.text = record.title.length ? record.title : record.url;
+    content.textProperties.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    content.textProperties.color = [MVTheme text];
+    content.secondaryText = record.state == MVDownloadStateCompleted
+        ? [MVPaths formatBytes:record.totalBytes] : [MVLang t:@"Failed"];
+    content.secondaryTextProperties.color = [MVTheme secondaryText];
+    content.image = [UIImage systemImageNamed:record.state == MVDownloadStateCompleted ? @"checkmark.circle.fill" : @"exclamationmark.circle"];
+    content.imageProperties.tintColor = record.state == MVDownloadStateCompleted ? [MVTheme success] : [MVTheme danger];
+    cell.contentConfiguration = content;
+    cell.backgroundColor = UIColor.clearColor;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+}
+
+#pragma mark - Actions
+
+- (void)platformTapped:(UIControl *)tile {
+    // We deliberately do not embed a browser yet: an in-app web view needs a
+    // media sniffer to be useful, so for now we point the user at the flow that
+    // actually works rather than opening something that cannot detect media.
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Quick access"]
+                                                                  message:MVLang.shared.isRTL
+                                       ? @"انسخ الرابط من التطبيق ثم الصقه هنا."
+                                       : @"Copy the link from the app, then paste it here."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)pasteFromClipboard {
+    NSString *clip = UIPasteboard.generalPasteboard.string;
+    if (!clip.length) return;
+    self.urlField.text = [clip stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
 }
 
 - (void)showQualityMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"اختر الجودة"
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"أفضل جودة متاحة" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        self.selectedQuality = @"best";
-        [self.qualityButton setTitle:@"الجودة: أفضل جودة" forState:UIControlStateNormal];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"حتى 720p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        self.selectedQuality = @"720p";
-        [self.qualityButton setTitle:@"الجودة: حتى 720p" forState:UIControlStateNormal];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"حتى 480p" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        self.selectedQuality = @"480p";
-        [self.qualityButton setTitle:@"الجودة: حتى 480p" forState:UIControlStateNormal];
-    }]];
-    // The file keeps its original sound container (usually M4A); we do not transcode.
-    [alert addAction:[UIAlertAction actionWithTitle:@"صوت فقط (M4A)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        self.selectedQuality = @"audio";
-        [self.qualityButton setTitle:@"الجودة: صوت فقط" forState:UIControlStateNormal];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Choose quality"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray<NSArray *> *options = @[
+        @[@"Best available", @"best"],
+        @[@"Up to 720p", @"720p"],
+        @[@"Up to 480p", @"480p"],
+        @[@"Audio only (M4A)", @"audio"],
+    ];
+    for (NSArray *option in options) {
+        NSString *quality = option[1];
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:option[0]] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            self.selectedQuality = quality;
+            [self updateQualityTitle];
+        }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    alert.popoverPresentationController.sourceView = self.qualityButton;
+    alert.popoverPresentationController.sourceRect = self.qualityButton.bounds;
     [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)startDownload {
-    NSString *url = self.urlField.text;
+    NSString *url = [self.urlField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!url.length) {
-        self.statusLabel.text = @"الرجاء لصق رابط أولاً";
-        self.statusLabel.textColor = UIColor.systemRedColor;
+        [self showStatus:[MVLang t:@"Please paste a link first"] color:[MVTheme warning]];
         return;
     }
 
     self.downloadButton.enabled = NO;
-    self.downloadButton.alpha = 0.6f;
+    self.downloadButton.alpha = 0.6;
     self.progressView.hidden = NO;
-    self.progressView.progress = 0.0f;
-    self.statusLabel.text = @"جاري التحميل...";
-    self.statusLabel.textColor = UIColor.secondaryLabelColor;
+    self.progressView.progress = 0.0;
+    [self showStatus:[MVLang t:@"Downloading..."] color:[MVTheme secondaryText]];
+
+    // Watch this record so the bar follows the real download, not a guess.
+    __weak typeof(self) weakSelf = self;
+    __block MVDownloadRecord *watched = nil;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:MVDownloadStoreDidChangeNotification
+                                                                 object:nil queue:NSOperationQueue.mainQueue
+                                                             usingBlock:^(NSNotification *note) {
+        typeof(self) self_ = weakSelf;
+        if (!self_ || !watched) return;
+        self_.progressView.progress = watched.progress;
+        if (watched.isActive && watched.speed > 0) {
+            [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
+                               watched.progress * 100,
+                               [MVPaths formatSpeed:watched.speed],
+                               [MVPaths formatDuration:watched.eta]]
+                        color:[MVTheme secondaryText]];
+        }
+    }];
 
     [[MVDownloadEngine shared] downloadURL:url quality:self.selectedQuality completion:^(NSString *filePath, NSString *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.downloadButton.enabled = YES;
-            self.downloadButton.alpha = 1.0f;
-            self.progressView.hidden = YES;
-            // A file path means the download itself worked; a non-nil error is then
-            // only a warning about saving it to the photo library.
-            if (filePath.length) {
-                self.statusLabel.text = error ?: @"تم التحميل بنجاح";
-                self.statusLabel.textColor = error ? UIColor.systemOrangeColor : UIColor.systemGreenColor;
-                return;
-            }
-            self.statusLabel.text = [@"فشل: " stringByAppendingString:(error ?: @"خطأ غير معروف")];
-            self.statusLabel.textColor = UIColor.systemRedColor;
-        });
+        [NSNotificationCenter.defaultCenter removeObserver:observer];
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        self_.downloadButton.enabled = YES;
+        self_.downloadButton.alpha = 1.0;
+        self_.progressView.hidden = YES;
+        if (filePath.length) {
+            // A file path means the download worked; an error is then only a
+            // warning about the photo library.
+            [self_ showStatus:error ?: [MVLang t:@"Downloaded successfully"]
+                        color:error ? [MVTheme warning] : [MVTheme success]];
+            self_.urlField.text = @"";
+        } else {
+            NSString *message = [NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
+                                 error ?: [MVLang t:@"Unknown error"]];
+            [self_ showStatus:message color:[MVTheme danger]];
+        }
+        [self_ reloadRecent];
+        [self_ updatePasteButton];
     }];
+
+    // Grab the record the engine just created so the observer can follow it.
+    watched = MVDownloadStore.shared.records.firstObject;
 }
+
+- (void)showStatus:(NSString *)text color:(UIColor *)color {
+    self.statusLabel.text = text;
+    self.statusLabel.textColor = color;
+}
+
+#pragma mark - UITextFieldDelegate
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
     [textField resignFirstResponder];
