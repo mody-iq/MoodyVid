@@ -11,7 +11,25 @@ permissions:
   contents: read
 
 jobs:
+  # Fast gate: the downloader's Python contract is testable off-device, and these
+  # run in seconds on Linux. If they fail there is no point paying for macOS.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Run downloader tests
+        run: python3 -m unittest discover -s tests -v
+
   build:
+    needs: test
     runs-on: macos-15
     timeout-minutes: 30
     steps:
