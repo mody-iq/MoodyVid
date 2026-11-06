@@ -3,8 +3,6 @@
 @interface MVDownloadEngine : NSObject
 
 + (instancetype)shared;
-- (void)downloadURL:(NSString *)url
-            quality:(NSString *)quality
-         completion:(void (^)(NSString *filePath, NSString *error))completion;
+- (void)downloadURL:(NSString *)url quality:(NSString *)quality completion:(void (^)(NSString *filePath, NSString *error))completion;
 
 @end
