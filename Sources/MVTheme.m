@@ -45,15 +45,16 @@ static UIColor *MVColor(CGFloat dr, CGFloat dg, CGFloat db, CGFloat lr, CGFloat 
     }];
 }
 
-// Dark palette: near-black (OLED friendly) with a violet accent.
-+ (UIColor *)background   { return MVColor(0.04, 0.04, 0.06,  0.96, 0.96, 0.98); }
-+ (UIColor *)card         { return MVColor(0.11, 0.11, 0.15,  1.00, 1.00, 1.00); }
+// Dark palette: near-black with a navy cast and a teal accent, matching the
+// design (background #0a0a0c, accent #0FA0B0).
++ (UIColor *)background   { return MVColor(0.039, 0.039, 0.047,  0.96, 0.96, 0.98); }
++ (UIColor *)card         { return MVColor(0.094, 0.094, 0.118,  1.00, 1.00, 1.00); }
 + (UIColor *)cardBorder   { return MVColor(1.00, 1.00, 1.00,  0.00, 0.00, 0.00); }
 + (UIColor *)separator    { return MVColor(1.00, 1.00, 1.00,  0.00, 0.00, 0.00); }
-+ (UIColor *)text         { return MVColor(0.97, 0.97, 1.00,  0.07, 0.07, 0.10); }
-+ (UIColor *)secondaryText{ return MVColor(0.62, 0.62, 0.70,  0.42, 0.42, 0.48); }
-+ (UIColor *)accent       { return MVColor(0.55, 0.36, 1.00,  0.42, 0.22, 0.92); }
-+ (UIColor *)accentSoft   { return MVColor(0.55, 0.36, 1.00,  0.42, 0.22, 0.92); }
++ (UIColor *)text         { return MVColor(0.96, 0.97, 0.98,  0.07, 0.07, 0.10); }
++ (UIColor *)secondaryText{ return MVColor(0.58, 0.62, 0.66,  0.42, 0.42, 0.48); }
++ (UIColor *)accent       { return MVColor(0.06, 0.63, 0.69,  0.02, 0.48, 0.55); }
++ (UIColor *)accentSoft   { return MVColor(0.06, 0.63, 0.69,  0.02, 0.48, 0.55); }
 + (UIColor *)success      { return MVColor(0.20, 0.83, 0.60,  0.10, 0.65, 0.45); }
 + (UIColor *)warning      { return MVColor(1.00, 0.70, 0.20,  0.85, 0.55, 0.05); }
 + (UIColor *)danger       { return MVColor(1.00, 0.35, 0.42,  0.85, 0.20, 0.28); }

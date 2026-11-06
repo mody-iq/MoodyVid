@@ -1,0 +1,59 @@
+# MoodyVid — project memory
+
+iOS media downloader (sideloaded IPA). Objective-C UI + embedded CPython 3.14
+(BeeWare `Python-Apple-support` `3.14-b14`) + yt-dlp nightly, assembled by
+`scripts/assemble.py`, built on `macos-15` GitHub Actions.
+
+## Hard constraints (cause most bugs)
+- **No ffmpeg on iOS.** yt-dlp cannot merge `bestvideo+bestaudio`; any selector
+  must resolve to one pre-muxed file. `bestvideo+bestaudio` → hard failure.
+- **YouTube quality labels are not format selectors.** `1080p`/`720p`/`audio`
+  are parsed as format *ids* → "Requested format is not available". Use
+  `best[height<=N][ext=mp4]/best[height<=N]/best[ext=mp4]/best`.
+- **YouTube needs a JavaScript runtime.** With none, yt-dlp returns ZERO
+  combined video+audio formats and every download fails. iOS has no node/deno,
+  so `Sources/MVPython.m` registers a native `mvnative` module (JavaScriptCore
+  `JSContext`) and `app/downloader.py` registers it as a yt-dlp JsRuntime +
+  `EJSBaseJCP` challenge provider. It is auto-selected; no config needed.
+  `PyImport_AppendInittab` must be called before `Py_PreInitialize`.
+- **YouTube blocks clients.** Iterate several `player_client` values and cache
+  the last good one for an hour (see `PLAYER_CLIENTS` in `app/downloader.py`).
+- **Downloads must go to Documents/**, not TMPDIR (iOS purges TMPDIR, which
+  silently discarded audio-only files). ObjC sets `MV_DOCUMENTS`.
+- **Info.plist needs `NSPhotoLibraryAddUsageDescription`** or `PHPhotoLibrary`
+  crashes the app instantly.
+- Python uses certifi automatically, but set `SSL_CERT_FILE` at boot
+  (`app/mvboot.py`) since iOS has no system CA store.
+
+## Verify
+- `gh run list --repo mody-iq/MoodyVid` — builds were green; failures are runtime.
+- Reproduce downloader bugs offline: unzip the yt-dlp nightly and run
+  `python -m yt_dlp -f <selector> <url>` with `PATH` lacking ffmpeg.
+- BeeWare asset name: `Python-3.14-iOS-support.<build>.tar.gz`.
+
+## Status
+`main` (commit `32605f7`) has the new 4-tab UI (Home / Downloads / Files /
+Settings) with Arabic+English runtime switching and a dark/light theme. It builds
+green (run 42271895155) but is **not yet verified on a device**.
+
+Earlier work at `51e4a81` was verified on a real device end to end: best quality,
+Photos save, Documents/Files visibility, audio-only (M4A), a second video, and a
+non-YouTube site all worked. The JavaScriptCore provider is confirmed on hardware.
+Still to do: in-app browser, download queue + background downloads,
+notifications, app icon, on-device testing of the new UI.
+
+## Building (no local ObjC compiler)
+There is no iOS SDK in this workspace, so every ObjC change must be validated by
+pushing to `main` and reading the CI log:
+```
+gh run list --repo mody-iq/MoodyVid --branch main --limit 1
+gh run watch <id> --repo mody-iq/MoodyVid --exit-status
+gh run view <id> --repo mody-iq/MoodyVid --log-failed | grep -E "error:|undefined"
+```
+Each round trip is about two minutes. Before pushing, run the cheap checks:
+brace/paren/bracket balance per `Sources/*.m`, and confirm every `#import "MV*.h"`
+resolves. Link new Apple frameworks in `scripts/build.sh` — `CGRectZero`
+(CoreGraphics) and `kCACornerCurveContinuous` (QuartzCore) are **not** pulled in by
+UIKit.
+
+See `2026-11-06.md` for the full investigation notes.

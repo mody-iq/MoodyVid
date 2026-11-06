@@ -36,6 +36,9 @@
 @property (nonatomic, copy) NSString *selectedQuality;
 @property (nonatomic, strong) NSArray<MVPlatform *> *platforms;
 @property (nonatomic, strong) NSLayoutConstraint *recentHeight;
+@property (nonatomic, copy, nullable) NSString *watchedIdentifier;
+@property (nonatomic, strong, nullable) id storeObserver;
+@property (nonatomic, assign) BOOL busy;
 @end
 
 @implementation MVDownloaderViewController
@@ -133,7 +136,7 @@
     self.downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
     [MVTheme applyPrimaryButtonStyle:self.downloadButton];
-    [self.downloadButton addTarget:self action:@selector(startDownload) forControlEvents:UIControlEventTouchUpInside];
+    [self.downloadButton addTarget:self action:@selector(primaryTapped) forControlEvents:UIControlEventTouchUpInside];
     [linkCard addSubview:self.downloadButton];
 
     self.qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -313,7 +316,7 @@
     self.title = [MVLang t:@"Home"];
     self.urlField.placeholder = [MVLang t:@"Paste video link here..."];
     [self.pasteButton setTitle:[MVLang t:@"Paste"] forState:UIControlStateNormal];
-    [self.downloadButton setTitle:[MVLang t:@"Download"] forState:UIControlStateNormal];
+    [self updateDownloadButton];
     self.platformsTitle.text = [MVLang t:@"Quick access"];
     self.recentTitle.text = [MVLang t:@"Recent"];
     [self updateQualityTitle];
@@ -437,6 +440,15 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+/// The primary button starts a download, or stops the running one.
+- (void)primaryTapped {
+    if (self.busy) {
+        [self cancelDownload];
+    } else {
+        [self startDownload];
+    }
+}
+
 - (void)startDownload {
     NSString *url = [self.urlField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!url.length) {
@@ -444,22 +456,58 @@
         return;
     }
 
-    self.downloadButton.enabled = NO;
-    self.downloadButton.alpha = 0.6;
+    // Read the clipboard the same way the paste button does, so a copied link
+    // works even if the field was not filled in.
+    NSString *quality = self.selectedQuality;
     self.progressView.hidden = NO;
     self.progressView.progress = 0.0;
-    [self showStatus:[MVLang t:@"Downloading..."] color:[MVTheme secondaryText]];
+    [self setBusy:YES];
+    [self showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
 
-    // Watch this record so the bar follows the real download, not a guess.
     __weak typeof(self) weakSelf = self;
-    __block MVDownloadRecord *watched = nil;
-    id observer = [NSNotificationCenter.defaultCenter addObserverForName:MVDownloadStoreDidChangeNotification
-                                                                 object:nil queue:NSOperationQueue.mainQueue
-                                                             usingBlock:^(NSNotification *note) {
+    [[MVDownloadEngine shared] downloadURL:url quality:quality completion:^(NSString *filePath, NSString *error) {
         typeof(self) self_ = weakSelf;
-        if (!self_ || !watched) return;
-        self_.progressView.progress = watched.progress;
-        if (watched.isActive && watched.speed > 0) {
+        if (!self_) return;
+        [self_ setBusy:NO];
+        self_.progressView.hidden = YES;
+        if (filePath.length) {
+            // A path means the download worked; an error is then only a warning
+            // about the photo library.
+            [self_ showStatus:error ?: [MVLang t:@"Downloaded successfully"]
+                        color:error ? [MVTheme warning] : [MVTheme success]];
+            self_.urlField.text = @"";
+        } else {
+            [self_ showStatus:[NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
+                               error ?: [MVLang t:@"Unknown error"]]
+                        color:[MVTheme danger]];
+        }
+        [self_ reloadRecent];
+        [self_ updatePasteButton];
+    }];
+
+    // The engine prepends its new record, so the first one is the job we just
+    // started. Watching the store (instead of the engine) keeps the bar correct
+    // even when the queue delays the actual start.
+    self.watchedIdentifier = MVDownloadStore.shared.records.firstObject.identifier;
+    [self beginWatching];
+}
+
+/// Follows the shared store so the bar shows real progress, speed and ETA.
+- (void)beginWatching {
+    if (!self.watchedIdentifier) return;
+    __weak typeof(self) weakSelf = self;
+    self.storeObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVDownloadStoreDidChangeNotification
+                                                                       object:nil queue:NSOperationQueue.mainQueue
+                                                                   usingBlock:^(NSNotification *note) {
+        typeof(self) self_ = weakSelf;
+        if (!self_ || !self_.watchedIdentifier) return;
+        MVDownloadRecord *watched = [self_ recordFor:self_.watchedIdentifier];
+        if (!watched) return;
+
+        self_.progressView.progress = (float)watched.progress;
+        if (watched.state == MVDownloadStateWaiting) {
+            [self_ showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
+        } else if (watched.isActive) {
             [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
                                watched.progress * 100,
                                [MVPaths formatSpeed:watched.speed],
@@ -467,31 +515,37 @@
                         color:[MVTheme secondaryText]];
         }
     }];
+}
 
-    [[MVDownloadEngine shared] downloadURL:url quality:self.selectedQuality completion:^(NSString *filePath, NSString *error) {
-        [NSNotificationCenter.defaultCenter removeObserver:observer];
-        typeof(self) self_ = weakSelf;
-        if (!self_) return;
-        self_.downloadButton.enabled = YES;
-        self_.downloadButton.alpha = 1.0;
-        self_.progressView.hidden = YES;
-        if (filePath.length) {
-            // A file path means the download worked; an error is then only a
-            // warning about the photo library.
-            [self_ showStatus:error ?: [MVLang t:@"Downloaded successfully"]
-                        color:error ? [MVTheme warning] : [MVTheme success]];
-            self_.urlField.text = @"";
-        } else {
-            NSString *message = [NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
-                                 error ?: [MVLang t:@"Unknown error"]];
-            [self_ showStatus:message color:[MVTheme danger]];
-        }
-        [self_ reloadRecent];
-        [self_ updatePasteButton];
-    }];
+- (MVDownloadRecord *)recordFor:(NSString *)identifier {
+    if (!identifier) return nil;
+    for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+        if ([r.identifier isEqualToString:identifier]) return r;
+    }
+    return nil;
+}
 
-    // Grab the record the engine just created so the observer can follow it.
-    watched = MVDownloadStore.shared.records.firstObject;
+- (void)cancelDownload {
+    if (!self.watchedIdentifier) return;
+    [[MVDownloadEngine shared] cancelDownload:self.watchedIdentifier];
+    [self setBusy:NO];
+    self.progressView.hidden = YES;
+    [self showStatus:[MVLang t:@"Cancel"] color:[MVTheme warning]];
+}
+
+/// Toggles the primary button between "Download" and "Cancel" and keeps the
+/// paste button out of the way while a job is in flight.
+- (void)setBusy:(BOOL)busy {
+    self.busy = busy;
+    [self updateDownloadButton];
+}
+
+- (void)updateDownloadButton {
+    NSString *title = self.busy ? [MVLang t:@"Cancel download"] : [MVLang t:@"Download"];
+    [self.downloadButton setTitle:title forState:UIControlStateNormal];
+    self.downloadButton.backgroundColor = self.busy ? [MVTheme danger] : [MVTheme accent];
+    self.downloadButton.enabled = YES;
+    self.downloadButton.alpha = 1.0;
 }
 
 - (void)showStatus:(NSString *)text color:(UIColor *)color {

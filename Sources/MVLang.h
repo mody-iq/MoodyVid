@@ -21,8 +21,14 @@ extern NSString *const MVLangDidChangeNotification;
 @property (nonatomic, readonly) BOOL isRTL;
 
 /// The translation for `key`, or the key itself when it is missing (so a missing
-/// string is visible rather than blank).
+/// string is visible rather than blank). In English the key *is* the wording.
 + (NSString *)t:(NSString *)key;
+
+/// The localised name for `code` ("ar" / "en") to show in a language picker.
++ (NSString *)displayNameForCode:(NSString *)code;
+
+/// Every language code the picker offers, in display order.
++ (NSArray<NSString *> *)availableCodes;
 
 /// Same, with `%@`-style placeholders filled from `args`.
 + (NSString *)t:(NSString *)key args:(NSArray *)args;

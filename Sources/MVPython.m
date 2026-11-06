@@ -66,8 +66,21 @@ static PyObject *mv_cancelled(PyObject *self, PyObject *args) {
     Py_RETURN_FALSE;
 }
 
+static PyObject *mv_set_progress(PyObject *self, PyObject *args) {
+    const char *task = NULL;
+    const char *json = NULL;
+    if (!PyArg_ParseTuple(args, "ss", &task, &json)) return NULL;
+    NSString *t = [NSString stringWithUTF8String:task ?: ""];
+    NSData *data = [[NSString stringWithUTF8String:json ?: "{}"] dataUsingEncoding:NSUTF8StringEncoding];
+    id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSDictionary *progress = [obj isKindOfClass:NSDictionary.class] ? obj : @{};
+    [[MVPython shared] setProgress:progress forTask:t];
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef MVMethods[] = {
     {"run_js", mv_run_js, METH_VARARGS, "Runs JavaScript in JavaScriptCore; returns (ok, output or error)."},
+    {"set_progress", mv_set_progress, METH_VARARGS, "Stores live progress for a task, as a JSON string."},
     {"progress", mv_progress, METH_VARARGS, "Returns the last reported progress for a task, as JSON."},
     {"cancelled", mv_cancelled, METH_VARARGS, "Returns True when the task has been asked to stop."},
     {NULL, NULL, 0, NULL},

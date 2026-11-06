@@ -39,6 +39,39 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Downloads": @"التنزيلات",
             @"Files": @"الملفات",
             @"Settings": @"الإعدادات",
+            @"More": @"المزيد",
+            @"Premium": @"بريميوم",
+            @"Search": @"بحث",
+            @"Quick access": @"وصول سريع",
+            @"Suggested for you": @"مقترح لك",
+            @"Paste your video link here...": @"الصق رابط الفيديو هنا...",
+            @"Fetch": @"جلب",
+            @"Paste and fetch": @"لصق وجلب",
+            @"Cancel download": @"إلغاء التحميل",
+            @"Active downloads": @"التحميلات النشطة",
+            @"Completed downloads": @"التحميلات المكتملة",
+            @"No active downloads": @"لا توجد تحميلات نشطة",
+            @"No completed downloads": @"لا توجد تحميلات مكتملة",
+            @"Open in Files": @"فتح في الملفات",
+            @"Remove from history": @"إزالة من السجل",
+            @"Browser": @"المتصفح",
+            @"Search or enter address": @"ابحث أو أدخل عنواناً",
+            @"Download this video": @"حمّل هذا الفيديو",
+            @"Favorites": @"المفضلة",
+            @"History": @"السجل",
+            @"No history yet": @"لا يوجد سجل بعد",
+            @"Back": @"رجوع",
+            @"Forward": @"تقدّم",
+            @"Refresh": @"تحديث",
+            @"Close": @"إغلاق",
+            @"Add to favorites": @"أضف إلى المفضلة",
+            @"Media found": @"تم إيجاد وسائط",
+            @"Downloading to": @"يُحمَّل إلى",
+            @"Cancel all": @"إلغاء الكل",
+            @"Retry": @"إعادة المحاولة",
+            @"Queued": @"في الانتظار",
+            @"Tap a site to browse it inside the app": @"اضغط على موقع لتصفحه داخل التطبيق",
+            @"Your downloads will keep running while you use the app": @"ستستمر تحميلاتك أثناء استخدامك للتطبيق",
 
             // Home
             @"Paste video link here...": @"الصق رابط الفيديو هنا...",
@@ -123,8 +156,18 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
 
 + (NSString *)t:(NSString *)key {
     if (!key.length) return @"";
-    NSString *value = MVTable()[key];
-    return value ?: key;
+    // English wording is the key itself, so English never needs a table lookup.
+    // (The table holds Arabic only; forgetting this check made the switch look
+    // broken because Arabic came back for every language.)
+    if (![self.shared.code isEqualToString:@"ar"]) return key;
+    return MVTable()[key] ?: key;
+}
+
++ (NSArray<NSString *> *)availableCodes { return @[@"ar", @"en"]; }
+
++ (NSString *)displayNameForCode:(NSString *)code {
+    if ([code isEqualToString:@"ar"]) return MVTable()[@"Arabic"] ?: @"العربية";
+    return @"English";
 }
 
 + (NSString *)t:(NSString *)key args:(NSArray *)args {

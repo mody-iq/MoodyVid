@@ -60,7 +60,7 @@
         nav.navigationBar.tintColor = [MVTheme accent];
     }
 
-    NSArray<NSString *> *titles = @[@"Home", @"Downloads", @"Files", @"Settings"];
+    NSArray<NSString *> *titles = @[@"Home", @"Downloads", @"Files", @"More"];
     [self.viewControllers enumerateObjectsUsingBlock:^(UIViewController *vc, NSUInteger i, BOOL *stop) {
         vc.tabBarItem.title = [MVLang t:titles[i]];
     }];

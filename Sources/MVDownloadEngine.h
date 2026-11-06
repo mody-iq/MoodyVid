@@ -5,18 +5,26 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Runs downloads through the embedded Python engine and keeps the shared
 /// download store up to date while they run.
+///
+/// Downloads go through a small queue (two at a time) and each one holds a
+/// background task assertion, so leaving the app or opening another screen does
+/// not stop it. iOS still suspends us eventually, so the assertion is only extra
+/// time, not a promise of unlimited background downloading.
 @interface MVDownloadEngine : NSObject
 
 + (instancetype)shared;
 
-/// Starts a download and records it in the store. `quality` is one of
+/// Queues a download and records it in the store. `quality` is one of
 /// best / 720p / 480p / audio. `completion` runs on the main queue.
 - (void)downloadURL:(NSString *)url
             quality:(NSString *)quality
          completion:(void (^)(NSString *_Nullable filePath, NSString *_Nullable error))completion;
 
-/// Stops an in-progress download; its record is marked cancelled.
+/// Stops a queued or running download; its record is marked cancelled.
 - (void)cancelDownload:(NSString *)identifier;
+
+/// How many downloads are running right now.
+- (NSUInteger)runningCount;
 
 @end
 

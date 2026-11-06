@@ -85,7 +85,7 @@ static NSString *const kCell = @"MVCell";
 
     if (indexPath.section == 0) {
         content.text = [MVLang t:@"Language"];
-        content.secondaryText = MVLang.shared.isRTL ? [MVLang t:@"Arabic"] : [MVLang t:@"English"];
+        content.secondaryText = [MVLang displayNameForCode:MVLang.shared.code];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == 1) {
         NSArray *modes = @[@[@"Dark", @(MVThemeModeDark)], @[@"Light", @(MVThemeModeLight)], @[@"System", @(MVThemeModeSystem)]];
@@ -137,14 +137,23 @@ static NSString *const kCell = @"MVCell";
 }
 
 - (void)showLanguageMenu {
+    // A checkmark per row is clearer than a sheet on iPad, and it is one tap.
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Language"]
                                                                   message:nil
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSString *code in @[@"ar", @"en"]) {
-        NSString *label = [code isEqualToString:@"ar"] ? [MVLang t:@"Arabic"] : [MVLang t:@"English"];
-        [sheet addAction:[UIAlertAction actionWithTitle:label style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    NSString *current = MVLang.shared.code;
+    for (NSString *code in [MVLang availableCodes]) {
+        NSString *label = [MVLang displayNameForCode:code];
+        UIAlertAction *action = [UIAlertAction actionWithTitle:label
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(UIAlertAction *a) {
             MVLang.shared.code = code;
-        }]];
+            [self refresh];
+        }];
+        if ([code isEqualToString:current]) {
+            [action setValue:[UIImage systemImageNamed:@"checkmark"] forKey:@"image"];
+        }
+        [sheet addAction:action];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = self.view;
