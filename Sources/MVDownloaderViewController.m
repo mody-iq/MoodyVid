@@ -125,30 +125,30 @@
     self.downloadButton.alpha = 0.6f;
     self.progressView.hidden = NO;
     self.progressView.progress = 0.0f;
-    self.statusLabel.text = @"جاري التحضير...";
+    self.statusLabel.text = @"جاري التحميل...";
     self.statusLabel.textColor = UIColor.secondaryLabelColor;
 
-    __weak MVDownloaderViewController *weakSelf = self;
-    [[MVPython shared] call:@"mvboot" function:@"info" args:@[]
-                 completion:^(NSDictionary *result, NSString *error) {
-        MVDownloaderViewController *strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (error) {
-            strongSelf.statusLabel.text = [@"المحرك غير جاهز: " stringByAppendingString:(error ?: @"خطأ غير معروف")];
-            strongSelf.statusLabel.textColor = UIColor.systemRedColor;
-            strongSelf.downloadButton.enabled = YES;
-            strongSelf.downloadButton.alpha = 1.0f;
-            strongSelf.progressView.hidden = YES;
-            return;
-        }
-        strongSelf.statusLabel.text = @"جاري التحليل...";
-        strongSelf.statusLabel.textColor = UIColor.secondaryLabelColor;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            strongSelf.statusLabel.text = @"تم 준비 الرابط (سيبدأ التحميل الفعلي في الخطوة التالية)";
-            strongSelf.statusLabel.textColor = UIColor.systemGreenColor;
-            strongSelf.downloadButton.enabled = YES;
-            strongSelf.downloadButton.alpha = 1.0f;
-            strongSelf.progressView.hidden = YES;
+    [[MVDownloadEngine shared] downloadURL:url quality:self.selectedQuality completion:^(NSString *filePath, NSString *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.downloadButton.enabled = YES;
+            self.downloadButton.alpha = 1.0f;
+            self.progressView.hidden = YES;
+            if (error) {
+                self.statusLabel.text = @"فشل: " + (error ?: @"خطأ غير معروف");
+                self.statusLabel.textColor = UIColor.systemRedColor;
+                return;
+            }
+            self.statusLabel.text = @"تم التحميل، جاري الحفظ في الصور...";
+            self.statusLabel.textColor = UIColor.systemBlueColor;
+            [[MVDownloadEngine shared] saveToPhotos:filePath completion:^(BOOL success, NSString *err) {
+                if (success) {
+                    self.statusLabel.text = @"تم الحفظ في الصور بنجاح ✅";
+                    self.statusLabel.textColor = UIColor.systemGreenColor;
+                } else {
+                    self.statusLabel.text = @"فشل الحفظ: " + (err ?: @"خطأ غير معروف");
+                    self.statusLabel.textColor = UIColor.systemRedColor;
+                }
+            }];
         });
     }];
 }
