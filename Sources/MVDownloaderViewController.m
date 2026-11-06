@@ -33,6 +33,9 @@
 @property (nonatomic, strong) UIButton *pasteButton;
 @property (nonatomic, strong) UIButton *downloadButton;
 @property (nonatomic, strong) UIButton *qualityButton;
+@property (nonatomic, strong) UIButton *pasteFetchButton;
+@property (nonatomic, strong) UILabel *suggestedTitle;
+@property (nonatomic, strong) UIScrollView *suggestedScroll;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UITableView *recentTable;
@@ -152,6 +155,13 @@
     [self.qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
     [linkCard addSubview:self.qualityButton];
 
+    self.pasteFetchButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.pasteFetchButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.pasteFetchButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    [self.pasteFetchButton setTitleColor:[MVTheme accent] forState:UIControlStateNormal];
+    [self.pasteFetchButton addTarget:self action:@selector(pasteAndFetch) forControlEvents:UIControlEventTouchUpInside];
+    [linkCard addSubview:self.pasteFetchButton];
+
     self.progressView = [UIProgressView new];
     self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
     self.progressView.hidden = YES;
@@ -187,7 +197,10 @@
         [self.downloadButton.heightAnchor constraintEqualToConstant:46],
 
         [self.qualityButton.topAnchor constraintEqualToAnchor:self.downloadButton.bottomAnchor constant:10],
-        [self.qualityButton.centerXAnchor constraintEqualToAnchor:linkCard.centerXAnchor],
+        [self.qualityButton.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
+
+        [self.pasteFetchButton.centerYAnchor constraintEqualToAnchor:self.qualityButton.centerYAnchor],
+        [self.pasteFetchButton.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
 
         [self.progressView.topAnchor constraintEqualToAnchor:self.qualityButton.bottomAnchor constant:12],
         [self.progressView.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
@@ -204,6 +217,10 @@
     [stack addArrangedSubview:self.platformsTitle];
     [stack addArrangedSubview:[self makePlatformGrid]];
 
+    self.suggestedTitle = [self makeSectionTitle];
+    [stack addArrangedSubview:self.suggestedTitle];
+    [stack addArrangedSubview:[self makeSuggestedRow]];
+
     self.recentTitle = [self makeSectionTitle];
     [stack addArrangedSubview:self.recentTitle];
 
@@ -219,6 +236,86 @@
     [stack addArrangedSubview:self.recentTable];
     self.recentHeight = [self.recentTable.heightAnchor constraintEqualToConstant:0];
     self.recentHeight.active = YES;
+}
+
+/// A horizontal strip of cards the user can tap to search a topic on YouTube.
+/// Real recommendations would need an API key, so these are curated topics that
+/// always resolve to something watchable.
+- (UIView *)makeSuggestedRow {
+    NSArray<NSArray<NSString *> *> *topics = @[
+        @[@"Music", @"music.note", @"#FF3B30"],
+        @[@"Movies", @"film.fill", @"#0FA0B0"],
+        @[@"Sports", @"sportscourt.fill", @"#34C759"],
+        @[@"News", @"newspaper.fill", @"#FF9500"],
+        @[@"Gaming", @"gamecontroller.fill", @"#9146FF"],
+        @[@"Tech", @"cpu.fill", @"#5AC8FA"],
+    ];
+
+    self.suggestedScroll = [UIScrollView new];
+    self.suggestedScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.suggestedScroll.showsHorizontalScrollIndicator = NO;
+
+    UIStackView *row = [UIStackView new];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 12;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.suggestedScroll addSubview:row];
+
+    for (NSArray<NSString *> *topic in topics) {
+        UIControl *card = [UIControl new];
+        [MVTheme applyCardStyle:card cornerRadius:16];
+        card.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:topic[1]]];
+        icon.tintColor = [self colorFromHex:topic[2]];
+        icon.contentMode = UIViewContentModeScaleAspectFit;
+        icon.translatesAutoresizingMaskIntoConstraints = NO;
+        icon.userInteractionEnabled = NO;
+        [card addSubview:icon];
+
+        UILabel *label = [UILabel new];
+        label.text = [MVLang t:topic[0]];
+        label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        label.textColor = [MVTheme text];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.userInteractionEnabled = NO;
+        [card addSubview:label];
+
+        [card addTarget:self action:@selector(suggestedTapped:) forControlEvents:UIControlEventTouchUpInside];
+        card.accessibilityLabel = topic[0];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [card.widthAnchor constraintEqualToConstant:104],
+            [card.heightAnchor constraintEqualToConstant:84],
+            [icon.centerXAnchor constraintEqualToAnchor:card.centerXAnchor],
+            [icon.topAnchor constraintEqualToAnchor:card.topAnchor constant:18],
+            [icon.widthAnchor constraintEqualToConstant:26],
+            [icon.heightAnchor constraintEqualToConstant:26],
+            [label.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:8],
+            [label.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:6],
+            [label.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-6],
+        ]];
+        [row addArrangedSubview:card];
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:self.suggestedScroll.topAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:self.suggestedScroll.leadingAnchor],
+        [row.trailingAnchor constraintEqualToAnchor:self.suggestedScroll.trailingAnchor],
+        [row.bottomAnchor constraintEqualToAnchor:self.suggestedScroll.bottomAnchor],
+        [row.heightAnchor constraintEqualToAnchor:self.suggestedScroll.heightAnchor],
+        [self.suggestedScroll.heightAnchor constraintEqualToConstant:84],
+    ]];
+    return self.suggestedScroll;
+}
+
+- (void)suggestedTapped:(UIControl *)card {
+    NSString *topic = card.accessibilityLabel;
+    if (!topic.length) return;
+    NSString *query = [topic stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
+    NSString *url = [NSString stringWithFormat:@"https://m.youtube.com/results?search_query=%@", query];
+    [MVBrowserViewController presentFrom:self url:url];
 }
 
 - (UILabel *)makeSectionTitle {
@@ -326,6 +423,8 @@
     [self.pasteButton setTitle:[MVLang t:@"Paste"] forState:UIControlStateNormal];
     [self updateDownloadButton];
     self.platformsTitle.text = [MVLang t:@"Quick access"];
+    self.suggestedTitle.text = [MVLang t:@"Suggested for you"];
+    [self.pasteFetchButton setTitle:[MVLang t:@"Paste and fetch"] forState:UIControlStateNormal];
     self.recentTitle.text = [MVLang t:@"Recent"];
     [self updateQualityTitle];
     self.statusLabel.text = self.statusLabel.text.length ? self.statusLabel.text : @"";
@@ -451,6 +550,17 @@
     sheet.popoverPresentationController.sourceView = self.view;
     sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 240, 1, 1);
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+/// One tap for the whole flow: take the clipboard and start downloading it.
+- (void)pasteAndFetch {
+    NSString *clip = UIPasteboard.generalPasteboard.string;
+    if (!clip.length) {
+        [self showStatus:[MVLang t:@"Clipboard is empty"] color:[MVTheme warning]];
+        return;
+    }
+    self.urlField.text = [clip stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    [self startDownload];
 }
 
 - (void)pasteFromClipboard {
