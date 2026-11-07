@@ -614,6 +614,26 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
                     toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
 }
 
+- (void)seekToSeconds:(double)seconds { [self seekTo:seconds]; }
+
+- (double)currentTime {
+    AVPlayerItem *item = self.internalPlayer.currentItem;
+    if (!item) return 0;
+    double t = CMTimeGetSeconds([self.internalPlayer currentTime]);
+    return isnan(t) ? 0 : MAX(0, t);
+}
+
+- (double)duration {
+    AVPlayerItem *item = self.internalPlayer.currentItem;
+    if (!item) return 0;
+    double d = CMTimeGetSeconds(item.duration);
+    return isnan(d) || d < 0 ? 0 : d;
+}
+
+- (BOOL)hasQueue { return self.queue.count > 1; }
+
+- (NSInteger)queueIndex { return self.queueIndex; }
+
 #pragma mark - Playback state
 
 - (BOOL)isPlaying {

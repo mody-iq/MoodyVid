@@ -127,12 +127,12 @@ static NSString *const kDoneCell = @"MVDoneCell";
         highlight.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.15];
         self.selectedBackgroundView = highlight;
 
-        self.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        self.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
         self.textLabel.textColor = [MVTheme text];
         self.textLabel.numberOfLines = 1;
         self.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
-        self.detailTextLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        self.detailTextLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
         self.detailTextLabel.numberOfLines = 1;
 
         _actionButton = [[MVRowActionButton alloc] initWithFrame:CGRectZero];
@@ -170,7 +170,13 @@ static NSString *const kDoneCell = @"MVDoneCell";
             [self.actionButton showProgress:0];
             break;
         case MVDownloadStateActive:
-            self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
+            // Pre-download phase (DNS, metadata): no bytes yet, so show a
+            // meaningful status instead of a frozen 0%.
+            if (record.progress <= 0 && record.totalBytes <= 0) {
+                self.detailTextLabel.text = [MVLang t:@"Connecting…"];
+            } else {
+                self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
+            }
             self.detailTextLabel.textColor = normal;
             [self.actionButton showProgress:record.progress];
             break;
@@ -244,7 +250,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.search.obscuresBackgroundDuringPresentation = NO;
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
     self.navigationItem.searchController = self.search;
-    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.navigationItem.hidesSearchBarWhenScrolling = YES;
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:[MVLang t:@"Edit"] style:UIBarButtonItemStylePlain
         target:self action:@selector(toggleEditMode)];

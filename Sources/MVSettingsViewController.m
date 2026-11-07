@@ -17,11 +17,16 @@ static NSString *const kCell = @"MVCell";
     self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"More"];
 
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    // A plain full-width list so the More screen scrolls like the Downloads and
+    // Files lists and doesn't look like a floating inset panel.
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.backgroundColor = UIColor.clearColor;
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
+    self.tableView.rowHeight = 54;
+    self.tableView.tableFooterView = [UIView new];
+    self.tableView.separatorInset = UIEdgeInsetsMake(0, 20, 0, 0);
     [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:kCell];
     [self.view addSubview:self.tableView];
     [NSLayoutConstraint activateConstraints:@[
@@ -88,20 +93,55 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case MVMoreSectionLanguage:   return nil;
-        case MVMoreSectionAppearance: return nil;
-        case MVMoreSectionWallpaper:  return nil;
         case MVMoreSectionStorage:    return [MVLang t:@"Storage"];
         case MVMoreSectionAbout:      return [MVLang t:@"About"];
         default: return nil;
     }
 }
 
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    if (!title.length) {
+        UIView *pad = [UIView new];
+        pad.backgroundColor = UIColor.clearColor;
+        return pad;
+    }
+    UILabel *label = [UILabel new];
+    label.text = title.uppercaseString;
+    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    label.textColor = [MVTheme secondaryText];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UIView *box = [UIView new];
+    box.backgroundColor = UIColor.clearColor;
+    [box addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:20],
+        [label.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-20],
+        [label.centerYAnchor constraintEqualToAnchor:box.centerYAnchor],
+    ]];
+    return box;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    return [self tableView:tableView titleForHeaderInSection:section].length ? 40 : 8;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    return section == MVMoreSectionAbout ? 24 : 4;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    return [UIView new];
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCell forIndexPath:indexPath];
     UIListContentConfiguration *content = [UIListContentConfiguration valueCellConfiguration];
     content.textProperties.color = [MVTheme text];
+    content.textProperties.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
     content.secondaryTextProperties.color = [MVTheme secondaryText];
+    content.secondaryTextProperties.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    cell.backgroundColor = UIColor.clearColor;
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
 

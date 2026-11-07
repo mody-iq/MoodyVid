@@ -43,6 +43,20 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)playNext;
 - (void)playPrevious;
 
+/// YES when there is more than one item, so previous/next are meaningful.
+@property (nonatomic, readonly) BOOL hasQueue;
+@property (nonatomic, readonly) NSInteger queueIndex;
+
+/// Skips by the player's fixed step (used by the 15-second buttons).
+- (void)seekForward;
+- (void)seekBack;
+
+/// Scrubbing for an inline scrubber. Returns the current position and the
+/// duration in seconds (0 while unknown), and seeks to an absolute position.
+@property (nonatomic, readonly) double currentTime;
+@property (nonatomic, readonly) double duration;
+- (void)seekToSeconds:(double)seconds;
+
 @property (nonatomic, readonly, getter=isPlaying) BOOL playing;
 @property (nonatomic, readonly, nullable) AVPlayer *player;
 @property (nonatomic, readonly, nullable) NSString *currentTitle;
