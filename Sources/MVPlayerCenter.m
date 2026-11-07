@@ -9,6 +9,8 @@ static CGFloat const kMiniBarHeight = 80;
 static CGFloat const kMiniThumb = 46;
 static CGFloat const kSeekSeconds = 15.0;
 
+NSNotificationName const MVPlayerBarVisibilityDidChangeNotification = @"MVPlayerBarVisibilityDidChangeNotification";
+
 /// A small tinted icon button used in the mini bar.
 static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -509,6 +511,53 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         [self toggle];
         return MPRemoteCommandHandlerStatusSuccess;
     }];
+    // Previous/next only make sense for a queue, so they are disabled for a
+    // single item rather than silently doing nothing from the lock screen.
+    center.nextTrackCommand.enabled = YES;
+    [center.nextTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+        if (!self.hasQueue) return MPRemoteCommandHandlerStatusCommandFailed;
+        [self playNext];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+    center.previousTrackCommand.enabled = YES;
+    [center.previousTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+        if (!self.hasQueue) return MPRemoteCommandHandlerStatusCommandFailed;
+        [self playPrevious];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+    // Scrubbing from the lock screen / Control Center.
+    [center.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+        MPChangePlaybackPositionCommandEvent *e = (MPChangePlaybackPositionCommandEvent *)event;
+        [self seekTo:e.positionTime];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+    [center.skipForwardCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+        [self seekForward];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+    [center.skipBackwardCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+        [self seekBack];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+}
+
+/// Publishes what is playing to the lock screen and Control Center. Without this
+/// the audio keeps playing in the background but the system shows no controls,
+/// so the user cannot pause or scrub without reopening the app.
+- (void)updateNowPlayingInfo {
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    info[MPMediaItemPropertyTitle] = self.currentTitle.length ? self.currentTitle : [MVLang t:@"Now playing"];
+    info[MPMediaItemPropertyArtist] = @"MoodyVid";
+    double total = self.duration;
+    double pos = self.currentTime;
+    if (total > 0) {
+        info[MPMediaItemPropertyPlaybackDuration] = @(total);
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(pos);
+    }
+    info[MPNowPlayingInfoPropertyPlaybackRate] = @(self.isPlaying ? 1.0 : 0.0);
+    MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo = info;
+    MPNowPlayingInfoCenter.defaultCenter.playbackState = self.isPlaying
+        ? MPNowPlayingPlaybackStatePlaying : MPNowPlayingPlaybackStatePaused;
 }
 
 - (void)ensureAudioSession {
@@ -692,6 +741,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)pause {
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = YES;
+    [self updateNowPlayingInfo];
 }
 
 - (void)toggle {
@@ -700,9 +750,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         [self.internalPlayer pause];
         self.bar.pauseButton.selected = YES;
     } else {
+        [self ensureAudioSession];
         [self.internalPlayer play];
         self.bar.pauseButton.selected = NO;
     }
+    [self updateNowPlayingInfo];
 }
 
 - (void)stop {
@@ -716,6 +768,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     self.queue = nil;
     self.queueTitles = nil;
     self.consecutiveFailures = 0;
+    // Nothing is playing, so the lock screen must not keep showing stale controls.
+    MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo = nil;
+    MPNowPlayingInfoCenter.defaultCenter.playbackState = MPNowPlayingPlaybackStateStopped;
     [self hideBar];
 }
 
@@ -812,6 +867,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     self.bar.nextButton.enabled = multi;
     self.bar.prevButton.alpha = multi ? 1 : 0.4;
     self.bar.nextButton.alpha = multi ? 1 : 0.4;
+    [self updateNowPlayingInfo];
 }
 
 - (void)showBar {
@@ -828,6 +884,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         ]];
     }
     self.bar.alpha = 1;
+    [NSNotificationCenter.defaultCenter postNotificationName:MVPlayerBarVisibilityDidChangeNotification object:self];
 }
 
 - (void)hideBar {
@@ -836,11 +893,14 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         self.bar.alpha = 0;
     } completion:^(BOOL done) {
         if (self.bar.superview) [self.bar removeFromSuperview];
+        [NSNotificationCenter.defaultCenter postNotificationName:MVPlayerBarVisibilityDidChangeNotification object:self];
     }];
 }
 
 - (void)hideFloatingBar { [self hideBar]; }
 - (void)showFloatingBar { [self showBar]; }
+
+- (BOOL)floatingBarVisible { return self.bar.superview != nil && self.bar.alpha > 0.01; }
 
 - (UIWindow *)keyWindow {
     UIWindow *candidate = nil;

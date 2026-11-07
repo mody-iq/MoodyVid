@@ -3,6 +3,7 @@
 #import "MVPaths.h"
 #import "MVLang.h"
 #import "MVMediaConverter.h"
+#import "MVBackgroundKeeper.h"
 #import <Photos/Photos.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -28,6 +29,7 @@ static const NSUInteger kMaxConcurrent = 2;
     NSMutableDictionary<NSString *, MVDownloadJob *> *_running;
     NSMutableSet<NSString *> *_cancelled;
     UIBackgroundTaskIdentifier _backgroundTask;
+    BOOL _awake;
 }
 
 + (instancetype)shared {
@@ -357,18 +359,31 @@ static const NSUInteger kMaxConcurrent = 2;
 /// While anything is queued or running, hold one background task assertion.
 /// Without it iOS suspends the process a few seconds after the app leaves the
 /// foreground and the download stops mid-file.
+///
+/// The task assertion is only good for a few minutes, so it is paired with a
+/// silent-audio keep-alive that holds the process for as long as the queue runs.
 - (void)updateBackgroundTask {
     BOOL busy = _running.count > 0 || _queue.count > 0;
-    if (busy && _backgroundTask == UIBackgroundTaskInvalid) {
-        __weak typeof(self) weakSelf = self;
-        _backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"MoodyVid downloads"
-                                                                    expirationHandler:^{
-            typeof(self) self_ = weakSelf;
-            if (!self_) return;
-            [self_ endBackgroundTask];
-        }];
-    } else if (!busy && _backgroundTask != UIBackgroundTaskInvalid) {
-        [self endBackgroundTask];
+    if (busy) {
+        if (!_awake) {
+            _awake = YES;
+            [[MVBackgroundKeeper shared] begin];
+        }
+        if (_backgroundTask == UIBackgroundTaskInvalid) {
+            __weak typeof(self) weakSelf = self;
+            _backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"MoodyVid downloads"
+                                                                        expirationHandler:^{
+                typeof(self) self_ = weakSelf;
+                if (!self_) return;
+                [self_ endBackgroundTask];
+            }];
+        }
+    } else {
+        if (_awake) {
+            _awake = NO;
+            [[MVBackgroundKeeper shared] end];
+        }
+        if (_backgroundTask != UIBackgroundTaskInvalid) [self endBackgroundTask];
     }
 }
 

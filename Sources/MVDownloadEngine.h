@@ -6,10 +6,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Runs downloads through the embedded Python engine and keeps the shared
 /// download store up to date while they run.
 ///
-/// Downloads go through a small queue (two at a time) and each one holds a
-/// background task assertion, so leaving the app or opening another screen does
-/// not stop it. iOS still suspends us eventually, so the assertion is only extra
-/// time, not a promise of unlimited background downloading.
+/// Downloads go through a small queue (two at a time). While anything is queued
+/// the engine holds a silent-audio keep-alive plus a background task assertion,
+/// so a download started here keeps running after the app is backgrounded or the
+/// screen is locked. If iOS does reclaim the app, the next launch resumes the
+/// queue and yt-dlp continues the .part files.
 @interface MVDownloadEngine : NSObject
 
 + (instancetype)shared;

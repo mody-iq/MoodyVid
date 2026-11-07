@@ -89,6 +89,8 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Forward": @"تقدّم",
             @"Refresh": @"تحديث",
             @"Close": @"إغلاق",
+            @"Minimize": @"تصغير",
+            @"Tap to return to the page": @"اضغط للعودة إلى الصفحة",
             @"Add to favorites": @"أضف إلى المفضلة",
             @"Media found": @"تم إيجاد وسائط",
             @"Downloading to": @"يُحمَّل إلى",
