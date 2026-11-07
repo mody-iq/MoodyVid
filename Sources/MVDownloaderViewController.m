@@ -1,562 +1,524 @@
-#import "MVDownloaderViewController.h"
-#import "MVBrowserViewController.h"
-#import "MVBrowserHistory.h"
+#import "MVDownloadsViewController.h"
+#import <AVKit/AVKit.h>
+#import "MVPlayerCenter.h"
+#import "MVDownloadStore.h"
+#import "MVDownloadEngine.h"
+#import "MVPaths.h"
 #import "MVLang.h"
 #import "MVTheme.h"
-#import "MVDownloadStore.h"
-#import "MVPaths.h"
-#import "MVDownloadEngine.h"
 
-// A platform shortcut: the name, the SF Symbol standing in for its logo (we ship
-// no third-party brand assets) and the tint used for the tile.
-@interface MVPlatform : NSObject
-@property (nonatomic, copy) NSString *name;
-@property (nonatomic, copy) NSString *symbol;
-@property (nonatomic, strong) UIColor *tint;
-/// The site the tile opens in the in-app browser; nil for the trailing "More"
-/// tile, which opens the history instead.
-@property (nonatomic, copy, nullable) NSString *url;
-+ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint url:(nullable NSString *)url;
+static NSString *const kDoneCell = @"MVDoneCell";
+
+// The round button at the end of a row: a progress ring with a stop square while
+// the download runs, and a plain icon once it has finished.
+@interface MVRowActionButton : UIButton
+- (void)showProgress:(double)progress;
+- (void)showIcon:(NSString *)symbolName;
 @end
 
-@implementation MVPlatform
-+ (instancetype)name:(NSString *)name symbol:(NSString *)symbol tint:(UIColor *)tint url:(NSString *)url {
-    MVPlatform *p = [MVPlatform new];
-    p.name = name; p.symbol = symbol; p.tint = tint; p.url = url;
-    return p;
+@implementation MVRowActionButton {
+    CAShapeLayer *_track;
+    CAShapeLayer *_ring;
+    UIView *_stop;
+    UIImageView *_icon;
 }
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:CGRectMake(0, 0, 44, 44)])) {
+        _track = [CAShapeLayer layer];
+        _track.fillColor = UIColor.clearColor.CGColor;
+        _track.lineWidth = 2.5;
+        [self.layer addSublayer:_track];
+
+        _ring = [CAShapeLayer layer];
+        _ring.fillColor = UIColor.clearColor.CGColor;
+        _ring.lineWidth = 2.5;
+        _ring.lineCap = kCALineCapRound;
+        _ring.strokeEnd = 0;
+        [self.layer addSublayer:_ring];
+
+        _stop = [UIView new];
+        _stop.frame = CGRectMake(0, 0, 10, 10);
+        _stop.layer.cornerRadius = 2;
+        _stop.userInteractionEnabled = NO;
+        [self addSubview:_stop];
+
+        _icon = [UIImageView new];
+        _icon.frame = CGRectMake(0, 0, 32, 32);
+        _icon.contentMode = UIViewContentModeCenter;
+        _icon.userInteractionEnabled = NO;
+        [self addSubview:_icon];
+    }
+    return self;
+}
+
+- (void)showProgress:(double)progress {
+    _icon.hidden = YES;
+    _stop.hidden = NO;
+    _track.hidden = NO;
+    _ring.hidden = NO;
+    // A small sliver stays visible so a download that just started still looks alive.
+    _ring.strokeEnd = MAX(0.04, MIN(1.0, progress));
+    [self setNeedsLayout];
+}
+
+- (void)showIcon:(NSString *)symbolName {
+    _icon.hidden = NO;
+    _stop.hidden = YES;
+    _track.hidden = YES;
+    _ring.hidden = YES;
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightRegular];
+    _icon.image = [UIImage systemImageNamed:symbolName withConfiguration:config];
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGPoint center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    UIBezierPath *circle = [UIBezierPath bezierPathWithArcCenter:center
+                                                          radius:14
+                                                      startAngle:-M_PI_2
+                                                        endAngle:M_PI * 1.5
+                                                       clockwise:YES];
+    UIColor *accent = [[MVTheme accent] resolvedColorWithTraitCollection:self.traitCollection];
+    UIColor *track = [[[MVTheme secondaryText] colorWithAlphaComponent:0.30]
+                      resolvedColorWithTraitCollection:self.traitCollection];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _track.frame = self.bounds;
+    _ring.frame = self.bounds;
+    _track.path = circle.CGPath;
+    _ring.path = circle.CGPath;
+    _track.strokeColor = track.CGColor;
+    _ring.strokeColor = accent.CGColor;
+    [CATransaction commit];
+
+    _stop.backgroundColor = accent;
+    _stop.center = center;
+    _icon.tintColor = [MVTheme secondaryText];
+    _icon.center = center;
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self setNeedsLayout];
+}
+
 @end
 
-@interface MVDownloaderViewController () <UITextFieldDelegate>
-@property (nonatomic, strong) UIScrollView *scroll;
-@property (nonatomic, strong) UITextField *urlField;
-@property (nonatomic, strong) UIButton *pasteButton;
-@property (nonatomic, strong) UIButton *downloadButton;
-@property (nonatomic, strong) UIButton *qualityButton;
-@property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UIProgressView *progressView;
-@property (nonatomic, strong) UILabel *platformsTitle;
-@property (nonatomic, copy) NSString *selectedQuality;
-@property (nonatomic, strong) NSArray<MVPlatform *> *platforms;
-@property (nonatomic, copy, nullable) NSString *watchedIdentifier;
-@property (nonatomic, strong, nullable) id storeObserver;
-@property (nonatomic, assign) BOOL busy;
+// One row, as in a plain file list: the title, a line under it, and the round
+// button at the end.
+@interface MVDownloadCell : UITableViewCell
+@property (nonatomic, strong) MVRowActionButton *actionButton;
+@property (nonatomic, copy, nullable) void (^onAction)(void);
+- (void)configureWithRecord:(MVDownloadRecord *)record;
 @end
 
-@implementation MVDownloaderViewController
+@implementation MVDownloadCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    if ((self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier])) {
+        self.backgroundColor = UIColor.clearColor;
+        self.contentView.backgroundColor = UIColor.clearColor;
+
+        UIView *highlight = [UIView new];
+        highlight.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.15];
+        self.selectedBackgroundView = highlight;
+
+        self.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        self.textLabel.textColor = [MVTheme text];
+        self.textLabel.numberOfLines = 1;
+        self.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+
+        self.detailTextLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        self.detailTextLabel.numberOfLines = 1;
+
+        _actionButton = [[MVRowActionButton alloc] initWithFrame:CGRectZero];
+        [_actionButton addTarget:self action:@selector(actionTapped) forControlEvents:UIControlEventTouchUpInside];
+        self.accessoryView = _actionButton;
+    }
+    return self;
+}
+
+- (void)actionTapped {
+    if (self.onAction) self.onAction();
+}
+
+/// "1.6 MB of 11.0 MB". Each size is wrapped in direction isolates so the numbers
+/// and units stay in the right order inside an Arabic line.
++ (NSString *)sizesTextForRecord:(MVDownloadRecord *)record {
+    if (record.totalBytes <= 0) {
+        return [NSString stringWithFormat:@"%.0f%%", record.progress * 100];
+    }
+    long long done = (long long)llround(record.progress * (double)record.totalBytes);
+    NSString *of = MVLang.shared.isRTL ? @"من" : @"of";
+    return [NSString stringWithFormat:@"\u2068%@\u2069 %@ \u2068%@\u2069",
+            [MVPaths formatBytes:done], of, [MVPaths formatBytes:record.totalBytes]];
+}
+
+- (void)configureWithRecord:(MVDownloadRecord *)record {
+    self.textLabel.text = record.title.length ? record.title : record.url;
+    self.textLabel.textColor = [MVTheme text];
+
+    UIColor *normal = [[MVTheme text] colorWithAlphaComponent:0.85];
+    switch (record.state) {
+        case MVDownloadStateWaiting:
+            self.detailTextLabel.text = [MVLang t:@"Waiting"];
+            self.detailTextLabel.textColor = [MVTheme secondaryText];
+            [self.actionButton showProgress:0];
+            break;
+        case MVDownloadStateActive:
+            self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
+            self.detailTextLabel.textColor = normal;
+            [self.actionButton showProgress:record.progress];
+            break;
+        case MVDownloadStateCompleted:
+            self.detailTextLabel.text = [MVLang t:@"Completed"];
+            self.detailTextLabel.textColor = normal;
+            [self.actionButton showIcon:@"square.and.arrow.down"];
+            break;
+        case MVDownloadStateFailed:
+            self.detailTextLabel.text = [NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
+                                         record.error ?: [MVLang t:@"Unknown error"]];
+            self.detailTextLabel.textColor = [MVTheme danger];
+            [self.actionButton showIcon:@"exclamationmark.circle"];
+            break;
+        case MVDownloadStateCancelled:
+            self.detailTextLabel.text = [MVLang t:@"Cancel"];
+            self.detailTextLabel.textColor = [MVTheme secondaryText];
+            [self.actionButton showIcon:@"square.and.arrow.down"];
+            break;
+    }
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.onAction = nil;
+}
+
+@end
+
+@interface MVDownloadsViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UILabel *emptyLabel;
+@property (nonatomic, strong) UISearchController *search;
+@property (nonatomic, copy) NSString *filter;
+@property (nonatomic) BOOL editingMode;
+@property (nonatomic, copy) NSArray<NSString *> *shownIdentifiers;
+@end
+
+@implementation MVDownloadsViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [MVTheme background];
-    self.selectedQuality = @"best";
+    self.title = [MVLang t:@"Downloads"];
 
-    // Tiles come from the browser's own site list so the two cannot drift apart.
-    NSMutableArray<MVPlatform *> *tiles = [NSMutableArray array];
-    for (NSDictionary *site in [MVBrowserViewController quickAccessSites]) {
-        if (tiles.count >= 7) break;
-        [tiles addObject:[MVPlatform name:site[@"name"]
-                                   symbol:site[@"symbol"]
-                                     tint:[self colorFromHex:site[@"color"]]
-                                      url:site[@"url"]]];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.tableView.backgroundColor = UIColor.clearColor;
+    self.tableView.dataSource = self;
+    self.tableView.delegate = self;
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 64;
+    self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.35];
+    self.tableView.tableFooterView = [UIView new];
+    [self.tableView registerClass:MVDownloadCell.class forCellReuseIdentifier:kDoneCell];
+    UILongPressGestureRecognizer *longPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
+    [self.tableView addGestureRecognizer:longPress];
+    [self.view addSubview:self.tableView];
+
+    self.emptyLabel = [UILabel new];
+    self.emptyLabel.text = [MVLang t:@"No downloads yet"];
+    self.emptyLabel.textColor = [MVTheme secondaryText];
+    self.emptyLabel.font = [UIFont systemFontOfSize:15];
+    self.emptyLabel.textAlignment = NSTextAlignmentCenter;
+    self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.emptyLabel];
+
+    self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
+    self.search.searchResultsUpdater = self;
+    self.search.obscuresBackgroundDuringPresentation = NO;
+    self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
+    self.navigationItem.searchController = self.search;
+    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:[MVLang t:@"Edit"] style:UIBarButtonItemStylePlain
+        target:self action:@selector(toggleEditMode)];
+    self.definesPresentationContext = YES;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.tableView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.emptyLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.emptyLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+    ]];
+
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(storeDidChange)
+                                               name:MVDownloadStoreDidChangeNotification object:nil];
+    for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
     }
-    [tiles addObject:[MVPlatform name:@"More" symbol:@"ellipsis.circle.fill" tint:[MVTheme accent] url:nil]];
-    self.platforms = tiles;
+}
 
-    [self buildLayout];
-    [self refreshText];
+- (void)refresh {
+    self.title = [MVLang t:@"Downloads"];
+    self.emptyLabel.text = [MVLang t:@"No downloads yet"];
+    self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
+    [self reloadList];
+}
 
-    for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification, MVDownloadStoreDidChangeNotification]) {
-        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refreshText) name:name object:nil];
+- (void)reloadList {
+    self.shownIdentifiers = [[self records] valueForKey:@"identifier"];
+    [self.tableView reloadData];
+}
+
+/// Progress arrives four times a second. Reloading the whole table that often
+/// would cancel a tap on the stop button halfway through, so when the same rows
+/// are still in the same order only the visible cells are refreshed in place.
+- (void)storeDidChange {
+    NSArray<MVDownloadRecord *> *now = [self records];
+    BOOL sameRows = (now.count == self.shownIdentifiers.count);
+    for (NSUInteger i = 0; sameRows && i < now.count; i++) {
+        if (![now[i].identifier isEqualToString:self.shownIdentifiers[i]]) sameRows = NO;
     }
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self refreshText];
-    [self updatePasteButton];
-}
-
-#pragma mark - Layout
-
-- (void)buildLayout {
-    self.scroll = [UIScrollView new];
-    self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    self.scroll.alwaysBounceVertical = YES;
-    self.scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    [self.view addSubview:self.scroll];
-
-    UIStackView *stack = [UIStackView new];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 20;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.scroll addSubview:stack];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [self.scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-
-        [stack.topAnchor constraintEqualToAnchor:self.scroll.topAnchor constant:12],
-        [stack.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:self.scroll.trailingAnchor constant:-20],
-        [stack.bottomAnchor constraintEqualToAnchor:self.scroll.bottomAnchor constant:-24],
-        [stack.widthAnchor constraintEqualToAnchor:self.scroll.widthAnchor constant:-40],
-    ]];
-
-    [stack addArrangedSubview:[self makeHeader]];
-
-    // Link card: field + paste, then the download button and quality picker.
-    UIView *linkCard = [UIView new];
-    [MVTheme applyCardStyle:linkCard];
-    linkCard.translatesAutoresizingMaskIntoConstraints = NO;
-
-    self.urlField = [UITextField new];
-    self.urlField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.urlField.borderStyle = UITextBorderStyleNone;
-    self.urlField.keyboardType = UIKeyboardTypeURL;
-    self.urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    self.urlField.autocorrectionType = UITextAutocorrectionTypeNo;
-    self.urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    self.urlField.returnKeyType = UIReturnKeyDone;
-    self.urlField.delegate = self;
-    self.urlField.font = [UIFont systemFontOfSize:15];
-    self.urlField.textColor = [MVTheme text];
-    [linkCard addSubview:self.urlField];
-
-    self.pasteButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.pasteButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.pasteButton addTarget:self action:@selector(pasteFromClipboard) forControlEvents:UIControlEventTouchUpInside];
-    self.pasteButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    [self.pasteButton setTitleColor:[MVTheme accent] forState:UIControlStateNormal];
-    [linkCard addSubview:self.pasteButton];
-
-    UIView *divider = [UIView new];
-    divider.translatesAutoresizingMaskIntoConstraints = NO;
-    divider.backgroundColor = [[MVTheme separator] colorWithAlphaComponent:0.15];
-    [linkCard addSubview:divider];
-
-    self.downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [MVTheme applyPrimaryButtonStyle:self.downloadButton];
-    [self.downloadButton addTarget:self action:@selector(primaryTapped) forControlEvents:UIControlEventTouchUpInside];
-    [linkCard addSubview:self.downloadButton];
-
-    self.qualityButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.qualityButton.translatesAutoresizingMaskIntoConstraints = NO;
-    self.qualityButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-    [self.qualityButton setTitleColor:[MVTheme secondaryText] forState:UIControlStateNormal];
-    [self.qualityButton addTarget:self action:@selector(showQualityMenu) forControlEvents:UIControlEventTouchUpInside];
-    [linkCard addSubview:self.qualityButton];
-
-    self.progressView = [UIProgressView new];
-    self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.progressView.hidden = YES;
-    self.progressView.progressTintColor = [MVTheme accent];
-    self.progressView.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.2];
-    [linkCard addSubview:self.progressView];
-
-    self.statusLabel = [UILabel new];
-    self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusLabel.numberOfLines = 3;
-    self.statusLabel.font = [UIFont systemFontOfSize:13];
-    self.statusLabel.textColor = [MVTheme secondaryText];
-    [linkCard addSubview:self.statusLabel];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.urlField.topAnchor constraintEqualToAnchor:linkCard.topAnchor constant:14],
-        [self.urlField.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
-        [self.urlField.heightAnchor constraintEqualToConstant:26],
-
-        [self.pasteButton.leadingAnchor constraintEqualToAnchor:self.urlField.trailingAnchor constant:8],
-        [self.pasteButton.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
-        [self.pasteButton.centerYAnchor constraintEqualToAnchor:self.urlField.centerYAnchor],
-        [self.pasteButton.widthAnchor constraintGreaterThanOrEqualToConstant:54],
-
-        [divider.topAnchor constraintEqualToAnchor:self.urlField.bottomAnchor constant:12],
-        [divider.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
-        [divider.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
-        [divider.heightAnchor constraintEqualToConstant:1],
-
-        [self.downloadButton.topAnchor constraintEqualToAnchor:divider.bottomAnchor constant:14],
-        [self.downloadButton.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
-        [self.downloadButton.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
-        [self.downloadButton.heightAnchor constraintEqualToConstant:46],
-
-        [self.qualityButton.topAnchor constraintEqualToAnchor:self.downloadButton.bottomAnchor constant:10],
-        [self.qualityButton.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
-
-        [self.progressView.topAnchor constraintEqualToAnchor:self.qualityButton.bottomAnchor constant:12],
-        [self.progressView.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
-        [self.progressView.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
-
-        [self.statusLabel.topAnchor constraintEqualToAnchor:self.progressView.bottomAnchor constant:10],
-        [self.statusLabel.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
-        [self.statusLabel.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
-        [self.statusLabel.bottomAnchor constraintEqualToAnchor:linkCard.bottomAnchor constant:-16],
-    ]];
-    [stack addArrangedSubview:linkCard];
-
-    self.platformsTitle = [self makeSectionTitle];
-    [stack addArrangedSubview:self.platformsTitle];
-    [stack addArrangedSubview:[self makePlatformGrid]];
-
-    // The screen ends here on purpose: recent downloads belong to the Downloads
-    // tab, and a topics strip is noise on a screen whose one job is a link.
-}
-
-- (UILabel *)makeSectionTitle {
-    UILabel *label = [UILabel new];
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-    label.textColor = [MVTheme text];
-    return label;
-}
-
-- (UIView *)makeHeader {
-    UIView *header = [UIView new];
-
-    UILabel *brand = [UILabel new];
-    brand.text = @"MoodyVid";
-    brand.font = [UIFont systemFontOfSize:28 weight:UIFontWeightHeavy];
-    brand.textColor = [MVTheme text];
-    brand.translatesAutoresizingMaskIntoConstraints = NO;
-    [header addSubview:brand];
-
-    UILabel *tagline = [UILabel new];
-    tagline.translatesAutoresizingMaskIntoConstraints = NO;
-    tagline.tag = 101;
-    tagline.font = [UIFont systemFontOfSize:13];
-    tagline.textColor = [MVTheme secondaryText];
-    [header addSubview:tagline];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [brand.topAnchor constraintEqualToAnchor:header.topAnchor],
-        [brand.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [brand.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
-
-        [tagline.topAnchor constraintEqualToAnchor:brand.bottomAnchor constant:2],
-        [tagline.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [tagline.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
-        [tagline.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
-    ]];
-    return header;
-}
-
-- (UIView *)makePlatformGrid {
-    UIStackView *grid = [UIStackView new];
-    grid.axis = UILayoutConstraintAxisVertical;
-    grid.spacing = 12;
-
-    // Two rows of four tiles; UICollectionView would be overkill here.
-    for (NSInteger row = 0; row < 2; row++) {
-        UIStackView *line = [UIStackView new];
-        line.axis = UILayoutConstraintAxisHorizontal;
-        line.distribution = UIStackViewDistributionFillEqually;
-        line.spacing = 12;
-        for (NSInteger col = 0; col < 4; col++) {
-            MVPlatform *p = self.platforms[row * 4 + col];
-            [line addArrangedSubview:[self makePlatformTile:p]];
-        }
-        [grid addArrangedSubview:line];
-    }
-    return grid;
-}
-
-- (UIView *)makePlatformTile:(MVPlatform *)platform {
-    UIControl *tile = [UIControl new];
-    [MVTheme applyCardStyle:tile cornerRadius:16];
-    tile.translatesAutoresizingMaskIntoConstraints = NO;
-    // platformTapped: reads the tile back out of self.platforms by tag.
-    tile.tag = [self.platforms indexOfObject:platform];
-
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:platform.symbol]];
-    icon.tintColor = platform.tint;
-    icon.contentMode = UIViewContentModeScaleAspectFit;
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.userInteractionEnabled = NO;
-    [tile addSubview:icon];
-
-    UILabel *name = [UILabel new];
-    name.text = platform.name;
-    name.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightMedium];
-    name.textColor = [MVTheme secondaryText];
-    name.textAlignment = NSTextAlignmentCenter;
-    name.adjustsFontSizeToFitWidth = YES;
-    name.minimumScaleFactor = 0.7;
-    name.translatesAutoresizingMaskIntoConstraints = NO;
-    name.userInteractionEnabled = NO;
-    [tile addSubview:name];
-
-    [tile addTarget:self action:@selector(platformTapped:) forControlEvents:UIControlEventTouchUpInside];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [tile.heightAnchor constraintEqualToConstant:72],
-        [icon.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
-        [icon.topAnchor constraintEqualToAnchor:tile.topAnchor constant:13],
-        [icon.widthAnchor constraintEqualToConstant:24],
-        [icon.heightAnchor constraintEqualToConstant:24],
-        [name.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:6],
-        [name.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:4],
-        [name.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-4],
-    ]];
-    return tile;
-}
-
-#pragma mark - Text and state
-
-- (void)refreshText {
-    self.title = [MVLang t:@"Home"];
-    self.urlField.placeholder = [MVLang t:@"Paste video link here..."];
-    [self.pasteButton setTitle:[MVLang t:@"Paste"] forState:UIControlStateNormal];
-    [self updateDownloadButton];
-    self.platformsTitle.text = [MVLang t:@"Quick access"];
-    [self updateQualityTitle];
-    self.statusLabel.text = self.statusLabel.text.length ? self.statusLabel.text : @"";
-
-    UILabel *tagline = [self.view viewWithTag:101];
-    tagline.text = MVLang.shared.isRTL ? @"حمّل الفيديوهات من أي مكان" : @"Download videos from anywhere";
-
-    self.view.semanticContentAttribute = MVLang.shared.isRTL
-        ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
-    [self updatePasteButton];
-    [self applyThemeRecursively];
-}
-
-/// Re-applies theme colours to views that were built once in viewDidLoad.
-- (void)applyThemeRecursively {
-    self.view.backgroundColor = [MVTheme background];
-    self.urlField.textColor = [MVTheme text];
-    self.statusLabel.textColor = [MVTheme secondaryText];
-    self.platformsTitle.textColor = [MVTheme text];
-    [self updateQualityTitle];
-}
-
-- (void)updateQualityTitle {
-    NSString *label;
-    if ([self.selectedQuality isEqualToString:@"720p"]) label = [MVLang t:@"Up to 720p"];
-    else if ([self.selectedQuality isEqualToString:@"480p"]) label = [MVLang t:@"Up to 480p"];
-    else if ([self.selectedQuality isEqualToString:@"audio"]) label = [MVLang t:@"Audio only (M4A)"];
-    else label = [MVLang t:@"Best available"];
-    [self.qualityButton setTitle:[NSString stringWithFormat:@"%@: %@", [MVLang t:@"Quality"], label]
-                        forState:UIControlStateNormal];
-}
-
-- (void)updatePasteButton {
-    // Tint rather than hide: a disabled button that vanishes teaches the user
-    // nothing about what the screen can do.
-    NSString *clip = UIPasteboard.generalPasteboard.string;
-    BOOL hasLink = clip.length > 0 && [clip hasPrefix:@"http"];
-    [self.pasteButton setTitleColor:hasLink ? [MVTheme accent] : [MVTheme secondaryText]
-                           forState:UIControlStateNormal];
-}
-
-#pragma mark - Actions
-
-- (void)platformTapped:(UIControl *)tile {
-    MVPlatform *platform = self.platforms[tile.tag];
-    if (!platform) return;
-    if (!platform.url.length) {
-        [self showHistory];
+    if (!sameRows) {
+        [self reloadList];
         return;
     }
-    // Opens the site in the in-app browser, which injects the download button.
-    [MVBrowserViewController presentFrom:self url:platform.url];
+    for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows) {
+        MVDownloadCell *cell = (MVDownloadCell *)[self.tableView cellForRowAtIndexPath:indexPath];
+        if ([cell isKindOfClass:MVDownloadCell.class] && indexPath.row < (NSInteger)now.count) {
+            [cell configureWithRecord:now[indexPath.row]];
+        }
+    }
+    self.emptyLabel.hidden = now.count > 0;
 }
 
-- (UIColor *)colorFromHex:(NSString *)hex {
-    NSString *clean = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
-    if (clean.length != 6) return [MVTheme accent];
-    unsigned int value = 0;
-    [[NSScanner scannerWithString:clean] scanHexInt:&value];
-    return [UIColor colorWithRed:((value >> 16) & 0xFF) / 255.0
-                           green:((value >> 8) & 0xFF) / 255.0
-                            blue:(value & 0xFF) / 255.0
-                           alpha:1.0];
+- (NSArray<MVDownloadRecord *> *)records {
+    // One list, newest first, with whatever is still downloading pinned to the
+    // top so it is the first thing seen. There is no Active/Completed split any
+    // more: a row shows its own progress bar while it is still running.
+    NSArray *all = [MVDownloadStore.shared.records sortedArrayUsingComparator:^NSComparisonResult(MVDownloadRecord *a, MVDownloadRecord *b) {
+        if (a.isActive != b.isActive) return a.isActive ? NSOrderedAscending : NSOrderedDescending;
+        return a.createdAt > b.createdAt ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    if (!self.filter.length) return all;
+    NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(MVDownloadRecord *r, NSDictionary *b) {
+        NSString *hay = [NSString stringWithFormat:@"%@ %@", r.title ?: @"", r.url ?: @""];
+        return [hay localizedCaseInsensitiveContainsString:self.filter];
+    }];
+    return [all filteredArrayUsingPredicate:p];
 }
 
-/// The trailing "More" tile: the browsing history, so a visited site is one tap
-/// away without retyping its address.
-- (void)showHistory {
-    NSArray<MVBrowserEntry *> *entries = MVBrowserHistory.shared.history;
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"History"]
+- (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
+    self.filter = searchController.searchBar.text ?: @"";
+    [self reloadList];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    NSArray *records = [self records];
+    self.emptyLabel.hidden = records.count > 0;
+    return records.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    MVDownloadCell *cell = [tableView dequeueReusableCellWithIdentifier:kDoneCell forIndexPath:indexPath];
+    MVDownloadRecord *record = [self records][indexPath.row];
+    [cell configureWithRecord:record];
+
+    // The round button cancels a running download; on a finished row it opens
+    // the same menu as tapping the row.
+    __weak typeof(self) weakSelf = self;
+    __weak MVDownloadCell *weakCell = cell;
+    cell.onAction = ^{
+        if (record.isActive) {
+            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+        } else {
+            [weakSelf showMenuForRecord:record sourceView:weakCell];
+        }
+    };
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.editingMode) return;
+    [self showMenuForRecord:[self records][indexPath.row] sourceView:[tableView cellForRowAtIndexPath:indexPath]];
+}
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    MVDownloadRecord *record = [self records][indexPath.row];
+    if (record.isActive) {
+        UIContextualAction *cancel = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+                                                                            title:[MVLang t:@"Cancel"]
+                                                                          handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+            done(YES);
+        }];
+        cancel.backgroundColor = [MVTheme danger];
+        return [UISwipeActionsConfiguration configurationWithActions:@[cancel]];
+    }
+    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                     title:[MVLang t:@"Delete"]
+                                                                   handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+        [self confirmDelete:record];
+        done(YES);
+    }];
+    del.backgroundColor = [MVTheme warning];
+    return [UISwipeActionsConfiguration configurationWithActions:@[del]];
+}
+
+- (void)longPressRow:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    CGPoint point = [gesture locationInView:self.tableView];
+    NSIndexPath *indexPath = [self.tableView indexPathForRowAtPoint:point];
+    if (!indexPath) return;
+    [self showMenuForRecord:[self records][indexPath.row]
+                 sourceView:[self.tableView cellForRowAtIndexPath:indexPath]];
+}
+
+- (void)showMenuForRecord:(MVDownloadRecord *)record sourceView:(UIView *)source {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:record.title
                                                                   message:nil
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    NSUInteger shown = 0;
-    for (MVBrowserEntry *e in entries) {
-        if (shown >= 12) break;
-        shown++;
-        NSString *label = e.title.length ? e.title : e.url;
-        [sheet addAction:[UIAlertAction actionWithTitle:label style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [MVBrowserViewController presentFrom:self url:e.url];
+    if (record.state == MVDownloadStateCompleted && record.path.length) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self playFile:record];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] saveToPhotos:record.path completion:^(NSString *fp, NSString *err) {
+                if (fp && !err) {
+                    [self alert:[MVLang t:@"Saved"] message:[MVLang t:@"Saved to Photos"]];
+                } else if (err) {
+                    [self alert:[MVLang t:@"Failed"] message:err];
+                }
+            }];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            UIActivityViewController *share = [[UIActivityViewController alloc]
+                initWithActivityItems:@[[NSURL fileURLWithPath:record.path]] applicationActivities:nil];
+            [self presentViewController:share animated:YES completion:nil];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Rename"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self promptRename:record];
+        }]];
+    } else if (record.isActive) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel download"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] cancelDownload:record.identifier];
         }]];
     }
-    if (!shown) {
-        [sheet setValue:[[NSAttributedString alloc] initWithString:[MVLang t:@"No history yet"]] forKey:@"attributedMessage"];
-    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [self confirmDelete:record];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = self.view;
-    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 240, 1, 1);
+
+    // Required on iPad, and harmless on iPhone. CGRect is a struct, so it needs
+    // a ternary rather than `?:`.
+    sheet.popoverPresentationController.sourceView = source ?: self.view;
+    sheet.popoverPresentationController.sourceRect = source ? source.bounds : self.view.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)pasteFromClipboard {
-    NSString *clip = UIPasteboard.generalPasteboard.string;
-    if (!clip.length) return;
-    self.urlField.text = [clip stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+- (void)playFile:(MVDownloadRecord *)record {
+    NSString *path = record.path;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [self alert:[MVLang t:@"Failed"] message:[MVLang t:@"No files"]];
+        return;
+    }
+    [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
+                                title:path.lastPathComponent.stringByDeletingPathExtension];
+    if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {
+        UIImage *art = [UIImage imageWithContentsOfFile:record.thumbnail];
+        if (art) [[MVPlayerCenter shared] setThumbnailImage:art];
+    }
+    // The user tapped "Play": bring the video player up right away. The mini
+    // bar remains for when they dismiss it.
+    [[MVPlayerCenter shared] presentCurrentPlayer];
 }
 
-- (void)showQualityMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Choose quality"]
+- (void)promptRename:(MVDownloadRecord *)record {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Rename"]
                                                                   message:nil
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray<NSArray *> *options = @[
-        @[@"Best available", @"best"],
-        @[@"Up to 720p", @"720p"],
-        @[@"Up to 480p", @"480p"],
-        @[@"Audio only (M4A)", @"audio"],
-    ];
-    for (NSArray *option in options) {
-        NSString *quality = option[1];
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:option[0]] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            self.selectedQuality = quality;
-            [self updateQualityTitle];
-        }]];
-    }
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *f) {
+        f.text = record.path.lastPathComponent.stringByDeletingPathExtension;
+        f.semanticContentAttribute = MVLang.shared.isRTL ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
+    }];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-    alert.popoverPresentationController.sourceView = self.qualityButton;
-    alert.popoverPresentationController.sourceRect = self.qualityButton.bounds;
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Rename"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *name = alert.textFields.firstObject.text;
+        if (!name.length) return;
+        NSString *ext = record.path.pathExtension;
+        NSString *target = [[record.path stringByDeletingLastPathComponent]
+                            stringByAppendingPathComponent:[name stringByAppendingPathExtension:ext]];
+        NSError *err = nil;
+        if ([[NSFileManager defaultManager] moveItemAtPath:record.path toPath:target error:&err]) {
+            record.path = target;
+            [MVDownloadStore.shared update:record];
+        } else {
+            [self alert:[MVLang t:@"Failed"] message:err.localizedDescription];
+        }
+    }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-/// The primary button starts a download, or stops the running one.
-- (void)primaryTapped {
-    if (self.busy) {
-        [self cancelDownload];
-    } else {
-        [self startDownload];
+- (void)confirmDelete:(MVDownloadRecord *)record {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Delete this file?"]
+                                                                  message:[MVLang t:@"This cannot be undone."]
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        if (record.path.length) [[NSFileManager defaultManager] removeItemAtPath:record.path error:nil];
+        [MVDownloadStore.shared remove:record];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+
+- (void)toggleEditMode {
+    self.editingMode = !self.editingMode;
+    [self.tableView setEditing:self.editingMode animated:YES];
+    self.navigationItem.rightBarButtonItem.title = self.editingMode ? [MVLang t:@"Done"] : [MVLang t:@"Edit"];
+    if (!self.editingMode) {
+        [self reloadList];
     }
 }
 
-- (void)startDownload {
-    NSString *url = [self.urlField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (!url.length) {
-        [self showStatus:[MVLang t:@"Please paste a link first"] color:[MVTheme warning]];
-        return;
-    }
-
-    // Read the clipboard the same way the paste button does, so a copied link
-    // works even if the field was not filled in.
-    NSString *quality = self.selectedQuality;
-    self.progressView.hidden = NO;
-    self.progressView.progress = 0.0;
-    [self setBusy:YES];
-    [self showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
-
-    __weak typeof(self) weakSelf = self;
-    [[MVDownloadEngine shared] downloadURL:url quality:quality completion:^(NSString *filePath, NSString *error) {
-        typeof(self) self_ = weakSelf;
-        if (!self_) return;
-        [self_ stopWatching];
-        [self_ setBusy:NO];
-        self_.progressView.hidden = YES;
-        if (filePath.length) {
-            // A path means the download worked; an error is then only a warning
-            // about the photo library.
-            [self_ showStatus:error ?: [MVLang t:@"Downloaded successfully"]
-                        color:error ? [MVTheme warning] : [MVTheme success]];
-            self_.urlField.text = @"";
-        } else {
-            [self_ showStatus:[NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
-                               error ?: [MVLang t:@"Unknown error"]]
-                        color:[MVTheme danger]];
-        }
-        [self_ updatePasteButton];
-    }];
-
-    // The engine prepends its new record, so the first one is the job we just
-    // started. Watching the store (instead of the engine) keeps the bar correct
-    // even when the queue delays the actual start.
-    self.watchedIdentifier = MVDownloadStore.shared.records.firstObject.identifier;
-    [self beginWatching];
-}
-
-/// Follows the shared store so the bar shows real progress, speed and ETA.
-- (void)beginWatching {
-    if (!self.watchedIdentifier) return;
-    // One observer per job: a second download would otherwise leave the first
-    // block running against a stale identifier.
-    [self stopWatching];
-    __weak typeof(self) weakSelf = self;
-    self.storeObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVDownloadStoreDidChangeNotification
-                                                                       object:nil queue:NSOperationQueue.mainQueue
-                                                                   usingBlock:^(NSNotification *note) {
-        typeof(self) self_ = weakSelf;
-        if (!self_ || !self_.watchedIdentifier) return;
-        MVDownloadRecord *watched = [self_ recordFor:self_.watchedIdentifier];
-        if (!watched) return;
-
-        self_.progressView.progress = (float)watched.progress;
-        if (watched.state == MVDownloadStateWaiting) {
-            [self_ showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
-        } else if (watched.isActive) {
-            [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
-                               watched.progress * 100,
-                               [MVPaths formatSpeed:watched.speed],
-                               [MVPaths formatDuration:watched.eta]]
-                        color:[MVTheme secondaryText]];
-        }
-    }];
-}
-
-- (void)stopWatching {
-    if (self.storeObserver) {
-        [NSNotificationCenter.defaultCenter removeObserver:self.storeObserver];
-        self.storeObserver = nil;
-    }
-}
-
-- (MVDownloadRecord *)recordFor:(NSString *)identifier {
-    if (!identifier) return nil;
-    for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
-        if ([r.identifier isEqualToString:identifier]) return r;
-    }
-    return nil;
-}
-
-- (void)cancelDownload {
-    if (!self.watchedIdentifier) return;
-    [[MVDownloadEngine shared] cancelDownload:self.watchedIdentifier];
-    [self stopWatching];
-    [self setBusy:NO];
-    self.progressView.hidden = YES;
-    [self showStatus:[MVLang t:@"Cancel"] color:[MVTheme warning]];
-}
-
-/// Toggles the primary button between "Download" and "Cancel" and keeps the
-/// paste button out of the way while a job is in flight.
-- (void)setBusy:(BOOL)busy {
-    _busy = busy;
-    [self updateDownloadButton];
-}
-
-- (void)updateDownloadButton {
-    NSString *title = self.busy ? [MVLang t:@"Cancel download"] : [MVLang t:@"Download"];
-    [self.downloadButton setTitle:title forState:UIControlStateNormal];
-    self.downloadButton.backgroundColor = self.busy ? [MVTheme danger] : [MVTheme accent];
-    self.downloadButton.enabled = YES;
-    self.downloadButton.alpha = 1.0;
-}
-
-- (void)showStatus:(NSString *)text color:(UIColor *)color {
-    self.statusLabel.text = text;
-    self.statusLabel.textColor = color;
-}
-
-#pragma mark - UITextFieldDelegate
-
-- (BOOL)textFieldShouldReturn:(UITextField *)textField {
-    [textField resignFirstResponder];
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
     return YES;
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return UITableViewCellEditingStyleDelete;
+}
+
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+                                            forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle != UITableViewCellEditingStyleDelete) return;
+    MVDownloadRecord *record = [self records][indexPath.row];
+    if (record.isActive) {
+        [[MVDownloadEngine shared] cancelDownload:record.identifier];
+    } else {
+        if (record.path.length) [[NSFileManager defaultManager] removeItemAtPath:record.path error:nil];
+        [MVDownloadStore.shared remove:record];
+    }
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return [MVLang t:@"Delete"];
+}
+
+- (void)alert:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
