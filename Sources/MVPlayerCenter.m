@@ -108,6 +108,42 @@ static CGFloat const kMiniThumb = 44;
 
 @end
 
+/// The system player, with one fix: iOS pauses an AVPlayerViewController's player
+/// when the controller is dismissed. The user expects the video to keep playing
+/// in the mini bar, so playback is resumed if it was playing when the dismissal began.
+@interface MVPlayerViewController : AVPlayerViewController
+@property (nonatomic, copy, nullable) void (^onDismissed)(void);
+@property (nonatomic) BOOL wasPlaying;
+@end
+
+@implementation MVPlayerViewController
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    if (self.isBeingDismissed) {
+        self.wasPlaying = (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused);
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    if (!self.isBeingDismissed) return;
+    AVPlayer *player = self.player;
+    if (self.wasPlaying && player) {
+        [player play];
+        // The system can pause a moment after the dismissal ends, so check again.
+        for (NSNumber *delay in @[@0.25, @0.8]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (player.timeControlStatus == AVPlayerTimeControlStatusPaused) [player play];
+            });
+        }
+    }
+    if (self.onDismissed) self.onDismissed();
+}
+
+@end
+
 @interface MVPlayerCenter () <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) AVPlayer *internalPlayer;
 @property (nonatomic, copy, nullable) NSString *currentTitle;
@@ -182,8 +218,9 @@ static CGFloat const kMiniThumb = 44;
     }
     [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
     [self.internalPlayer play];
+    // The bar is shown when the full player is dismissed (see openFullPlayer),
+    // so it never flashes for a split second before the player opens.
     [self refreshMiniBar];
-    [self showBar];
 }
 
 - (void)pause {
@@ -278,6 +315,8 @@ static CGFloat const kMiniThumb = 44;
     double total = CMTimeGetSeconds(item.duration);
     double pos = CMTimeGetSeconds(self.internalPlayer.currentTime);
     self.bar.progress.progress = (total > 0 && !isnan(pos / total)) ? pos / total : 0;
+    // selected == paused; if that disagrees with the player, refresh the labels.
+    if (self.bar.pauseButton.selected == self.isPlaying) [self refreshMiniBar];
 }
 
 - (void)handleInterruption:(NSNotification *)note {
@@ -298,16 +337,33 @@ static CGFloat const kMiniThumb = 44;
 
 - (void)openFullPlayer {
     [self ensureAudioSession];
-    AVPlayerViewController *full = [AVPlayerViewController new];
+    UIViewController *top = [self topViewController];
+    if (!top) {
+        [self showBar];
+        return;
+    }
+    // A second tap while the player is already open must not stack another one.
+    if ([top isKindOfClass:MVPlayerViewController.class]) return;
+
+    MVPlayerViewController *full = [MVPlayerViewController new];
     full.player = self.internalPlayer;
     if (@available(iOS 15.0, *)) {
         full.allowsPictureInPicturePlayback = YES;
     }
-    [full.player play];
-    UIViewController *top = [self topViewController];
-    if (top) {
-        [top presentViewController:full animated:YES completion:nil];
-    }
+    __weak typeof(self) weakSelf = self;
+    full.onDismissed = ^{
+        [weakSelf refreshMiniBar];
+        [weakSelf showBar];
+    };
+    // Hidden while the full player is up, so it never shows behind it.
+    self.bar.alpha = 0;
+    [self.internalPlayer play];
+    [top presentViewController:full animated:YES completion:nil];
+
+    // If iOS refused the presentation, do not leave the bar hidden forever.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!full.presentingViewController) [weakSelf showBar];
+    });
 }
 
 - (void)presentCurrentPlayer {
