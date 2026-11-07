@@ -140,6 +140,32 @@ def _client_order():
 
 
 
+def prewarm():
+    """Imports the heavy modules once, at launch, so the first download does not
+    have to pay the import cost while the spinner is on screen.
+
+    Must be callable off-device for the tests, which import this file directly.
+    Returns a small dict so the native side can log what warmed up.
+    """
+    warmed = []
+    try:
+        import yt_dlp  # noqa: F401
+        warmed.append("yt_dlp")
+    except BaseException:
+        pass
+    _use_bundled_certificates()
+    _native()
+    try:
+        # Instantiate once so the extractor's lazy class registry populates and
+        # the JS challenges warm their caches.
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            _ = ydl  # noqa
+        warmed.append("YoutubeDL")
+    except BaseException:
+        pass
+    return json.dumps({"warmed": warmed}, ensure_ascii=False)
+
+
 def download(url, quality="best", _task=""):
     try:
         import yt_dlp
