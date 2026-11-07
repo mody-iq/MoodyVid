@@ -779,8 +779,6 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (BOOL)hasQueue { return self.queue.count > 1; }
 
-- (NSInteger)queueIndex { return self.queueIndex; }
-
 #pragma mark - Playback state
 
 - (BOOL)isPlaying {
