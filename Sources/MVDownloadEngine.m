@@ -54,9 +54,9 @@ static const NSUInteger kMaxConcurrent = 2;
     if (!thumbURL.length || !url.length) return;
     NSURL *source = [NSURL URLWithString:thumbURL];
     if (!source) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSData *data = [NSData dataWithContentsOfURL:source timeoutInterval:15];
-        if (!data.length) return;
+    NSURLRequest *request = [NSURLRequest requestWithURL:source cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
+        if (err || !data.length) return;
         UIImage *image = [UIImage imageWithData:data];
         if (!image) return;
         NSString *name = [NSString stringWithFormat:@"%@.jpg",
@@ -72,7 +72,7 @@ static const NSUInteger kMaxConcurrent = 2;
                 }
             }
         });
-    });
+    }] resume];
 }
 
 

@@ -18,6 +18,9 @@ FOUNDATION_EXPORT NSString *const MVPathsThumbsDir;
 /// The yt-dlp cache directory.
 + (NSString *)cache;
 
+/// Where video thumbnail jpegs live. These are caches, not user files.
++ (NSString *)thumbs;
+
 /// A human-readable size such as "345 MB" or "1.2 GB".
 + (NSString *)formatBytes:(long long)bytes;
 

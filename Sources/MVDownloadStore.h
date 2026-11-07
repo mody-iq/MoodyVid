@@ -22,6 +22,8 @@ typedef NS_ENUM(NSInteger, MVDownloadState) {
 @property (nonatomic, copy, nullable) NSString *path;
 @property (nonatomic, copy) NSString *quality;
 @property (nonatomic, copy, nullable) NSString *error;
+/// Local path of the cached video thumbnail, if we have one.
+@property (nonatomic, copy, nullable) NSString *thumbnail;
 @property (nonatomic) MVDownloadState state;
 @property (nonatomic) double progress;      // 0.0 - 1.0
 @property (nonatomic) double speed;         // bytes per second, 0 when unknown
