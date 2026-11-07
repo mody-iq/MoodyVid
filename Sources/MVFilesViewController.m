@@ -1,5 +1,6 @@
 #import "MVFilesViewController.h"
 #import <AVKit/AVKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import "MVPlayerCenter.h"
 #import "MVPaths.h"
 #import "MVLang.h"
@@ -20,13 +21,26 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
 @property (nonatomic) MVSortMode sortMode;
+
+// Inline player card: videos play here, inside the tab, instead of a black
+// full-screen modal.
+@property (nonatomic, strong) UIView *playerCard;
+@property (nonatomic, strong) UIView *videoSurface;
+@property (nonatomic, strong) CALayer *videoLayer;
+@property (nonatomic, strong) UILabel *nowTitleLabel;
+@property (nonatomic, strong) UIButton *playPauseButton;
+@property (nonatomic, strong) UIButton *cardCloseButton;
+@property (nonatomic, assign) BOOL cardOpen;
+@property (nonatomic, strong) NSLayoutConstraint *cardHeight;
+@property (nonatomic, strong) id cardObserver;
+@property (nonatomic, strong) NSTimer *cardTicker;
 @end
 
 @implementation MVFilesViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [MVTheme background];
+    self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"Files"];
 
     UIBarButtonItem *newFolder = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"folder.badge.plus"]
@@ -69,12 +83,20 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
 
+    [self buildPlayerCard];
+    self.cardHeight = [self.playerCard.heightAnchor constraintEqualToConstant:0];
     [NSLayoutConstraint activateConstraints:@[
         [self.storageLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
         [self.storageLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:32],
         [self.storageLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-32],
 
-        [self.tableView.topAnchor constraintEqualToAnchor:self.storageLabel.bottomAnchor constant:4],
+        // Inline player card sits between the storage line and the list.
+        [self.playerCard.topAnchor constraintEqualToAnchor:self.storageLabel.bottomAnchor constant:10],
+        [self.playerCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.playerCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        self.cardHeight,
+
+        [self.tableView.topAnchor constraintEqualToAnchor:self.playerCard.bottomAnchor constant:8],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
@@ -82,6 +104,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [self.emptyLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.emptyLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
     ]];
+    self.cardHeight.constant = 0;
+    self.playerCard.hidden = YES;
 
     for (NSString *name in @[MVDownloadStoreDidChangeNotification, MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
@@ -92,6 +116,11 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refresh];
+    if (self.cardOpen) {
+        [self cardStateChanged];
+        // The card is back on screen and is the control again.
+        [[MVPlayerCenter shared] hideFloatingBar];
+    }
 }
 
 - (NSString *)currentDirectory { return self.rootOverride ?: [MVPaths downloads]; }
@@ -142,11 +171,173 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [self.tableView reloadData];
 }
 
+#pragma mark - Inline player card
+
+- (void)buildPlayerCard {
+    self.playerCard = [UIView new];
+    self.playerCard.translatesAutoresizingMaskIntoConstraints = NO;
+    self.playerCard.clipsToBounds = YES;
+    [MVTheme applyCardStyle:self.playerCard cornerRadius:18];
+
+    self.videoSurface = [UIView new];
+    self.videoSurface.translatesAutoresizingMaskIntoConstraints = NO;
+    self.videoSurface.backgroundColor = UIColor.blackColor;
+    self.videoSurface.layer.masksToBounds = YES;
+    self.videoSurface.layer.cornerRadius = 12;
+    [self.playerCard addSubview:self.videoSurface];
+
+    self.nowTitleLabel = [UILabel new];
+    self.nowTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.nowTitleLabel.numberOfLines = 2;
+    self.nowTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    self.nowTitleLabel.textColor = [MVTheme text];
+    self.nowTitleLabel.text = [MVLang t:@"Now playing"];
+    [self.playerCard addSubview:self.nowTitleLabel];
+
+    self.playPauseButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.playPauseButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.playPauseButton setImage:[UIImage systemImageNamed:@"pause.fill"] forState:UIControlStateNormal];
+    self.playPauseButton.tintColor = [MVTheme accent];
+    [self.playPauseButton addTarget:self action:@selector(toggleInlinePlay) forControlEvents:UIControlEventTouchUpInside];
+    [self.playerCard addSubview:self.playPauseButton];
+
+    self.cardCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.cardCloseButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.cardCloseButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+    self.cardCloseButton.tintColor = [MVTheme secondaryText];
+    [self.cardCloseButton addTarget:self action:@selector(closeInlinePlayer) forControlEvents:UIControlEventTouchUpInside];
+    [self.playerCard addSubview:self.cardCloseButton];
+
+    NSLayoutConstraint *videoAspect = [self.videoSurface.heightAnchor
+        constraintEqualToAnchor:self.videoSurface.widthAnchor multiplier:9.0/16.0];
+    videoAspect.priority = UILayoutPriorityRequired;
+
+    // Inner vertical constraints are breakable so collapsing the card to a
+    // zero height (hidden) doesn't fight them.
+    UILayoutPriority inner = UILayoutPriorityDefaultHigh;
+
+    NSLayoutConstraint *surfaceTop = [self.videoSurface.topAnchor constraintEqualToAnchor:self.playerCard.topAnchor constant:12];
+    NSLayoutConstraint *labelTop = [self.nowTitleLabel.topAnchor constraintEqualToAnchor:self.videoSurface.bottomAnchor constant:10];
+    NSLayoutConstraint *labelBottom = [self.nowTitleLabel.bottomAnchor constraintEqualToAnchor:self.playerCard.bottomAnchor constant:-6];
+    NSLayoutConstraint *playCenter = [self.playPauseButton.centerYAnchor constraintEqualToAnchor:self.nowTitleLabel.centerYAnchor];
+    surfaceTop.priority = inner;
+    labelTop.priority = inner;
+    labelBottom.priority = inner;
+    playCenter.priority = inner;
+
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray array];
+    [constraints addObjectsFromArray:@[
+        [self.videoSurface.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:12],
+        [self.videoSurface.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-12],
+        videoAspect,
+        surfaceTop,
+
+        [self.nowTitleLabel.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:16],
+        [self.nowTitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.playPauseButton.leadingAnchor constant:-12],
+        labelTop,
+        labelBottom,
+
+        [self.playPauseButton.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-12],
+        [self.playPauseButton.widthAnchor constraintEqualToConstant:40],
+        [self.playPauseButton.heightAnchor constraintEqualToConstant:40],
+        playCenter,
+
+        [self.cardCloseButton.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-8],
+        [self.cardCloseButton.topAnchor constraintEqualToAnchor:self.playerCard.topAnchor constant:8],
+        [self.cardCloseButton.widthAnchor constraintEqualToConstant:30],
+        [self.cardCloseButton.heightAnchor constraintEqualToConstant:30],
+    ]];
+    [NSLayoutConstraint activateConstraints:constraints];
+    [self.view addSubview:self.playerCard];
+}
+
+/// Refreshes the inline card when the shared player's state changes.
+- (void)cardStateChanged {
+    if (!self.cardOpen) return;
+    MVPlayerCenter *center = MVPlayerCenter.shared;
+    self.nowTitleLabel.text = center.currentTitle.length ? center.currentTitle : [MVLang t:@"Now playing"];
+    UIImage *img = [UIImage systemImageNamed:center.isPlaying ? @"pause.fill" : @"play.fill"];
+    [self.playPauseButton setImage:img forState:UIControlStateNormal];
+}
+
+- (void)openInlinePlayer {
+    MVPlayerCenter *center = MVPlayerCenter.shared;
+    self.cardOpen = YES;
+    self.playerCard.hidden = NO;
+
+    if (!self.videoLayer) {
+        // Lay the (shared) player into the surface once; further taps just
+        // refresh the title via the ticker and play the new item.
+        self.videoLayer = [AVPlayerLayer playerLayerWithPlayer:center.player];
+        self.videoLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        self.videoLayer.frame = self.videoSurface.bounds;
+        self.videoLayer.masksToBounds = YES;
+        [self.videoSurface.layer addSublayer:self.videoLayer];
+    }
+
+    // Height driven by the 16:9 video (full width minus insets) plus the title
+    // row below. ~290pt matches a full-width card at typical phone widths.
+    self.cardHeight.constant = 290;
+    [self.view layoutIfNeeded];
+    [self cardStateChanged];
+    // The card is the control while it's open; keep the mini bar out of the
+    // way. It comes back when the card closes.
+    [center hideFloatingBar];
+
+    if (!self.cardObserver) {
+        __weak typeof(self) weakSelf = self;
+        self.cardObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVDownloadStoreDidChangeNotification
+                                                                          object:nil queue:NSOperationQueue.mainQueue
+                                                                        usingBlock:^(NSNotification *note) {
+            [weakSelf cardStateChanged];
+        }];
+    }
+    // Mirror the play/pause state while the card is open (the player has no
+    // KVO for its rate; the card closes before the ticker can go stale).
+    [self.cardTicker invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.cardTicker = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf cardStateChanged];
+    }];
+}
+
+- (void)dealloc {
+    [self.cardTicker invalidate];
+    if (self.cardObserver) [NSNotificationCenter.defaultCenter removeObserver:self.cardObserver];
+}
+
+- (void)toggleInlinePlay {
+    [[MVPlayerCenter shared] toggle];
+    [self cardStateChanged];
+}
+
+- (void)closeInlinePlayer {
+    self.cardOpen = NO;
+    self.cardHeight.constant = 0;
+    [self.cardTicker invalidate];
+    [self.videoLayer removeFromSuperlayer];
+    self.videoLayer = nil;
+    [self.view layoutIfNeeded];
+    self.playerCard.hidden = YES;
+    // Hand control back to the floating mini bar (playback itself continues).
+    [[MVPlayerCenter shared] showFloatingBar];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    // Moving to another tab or folder: playback continues via the mini bar so
+    // it is still controllable, even though the card is no longer visible.
+    if (self.cardOpen && self.view.window) {
+        [[MVPlayerCenter shared] showFloatingBar];
+    }
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     for (CALayer *layer in [self.view.layer.sublayers copy]) {
         if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
     }
+    if (self.videoLayer) self.videoLayer.frame = self.videoSurface.bounds;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
@@ -433,7 +624,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     }
     if (!urls.count) return;
     [[MVPlayerCenter shared] playQueue:urls titles:titles fromIndex:index];
-    [[MVPlayerCenter shared] presentCurrentPlayer];
+    // Play inside the tab in the card instead of taking over the whole screen.
+    [self openInlinePlayer];
 }
 
 @end

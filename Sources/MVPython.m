@@ -231,6 +231,14 @@ static NSString *pyErrorString(void) {
     Py_XDECREF(boot);
     PyErr_Clear();
 
+    // Warm the downloader module (this is where yt-dlp and the JavaScriptCore
+    // registration get imported). Importing it here, in the background during
+    // launch, means the user's first download doesn't sit frozen for a couple
+    // of seconds while the engine imports everything.
+    PyObject *dl = PyImport_ImportModule("downloader");
+    if (!dl) PyErr_Clear();  // failure is fine; the download call will surface it
+    Py_XDECREF(dl);
+
     [self readEngineInfo];
 
     // Release the GIL; every later call takes it with PyGILState_Ensure.

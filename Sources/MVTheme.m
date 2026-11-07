@@ -285,8 +285,9 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
 }
 
 + (void)refreshWallpaperIfPattern:(UIView *)view {
-    if (!view || ![self wallpaperUsesImage:self.wallpaperName]) return;
-    [self applyWallpaperTo:view];
+    // Re-applies unconditionally: raster patterns need a fresh render, and
+    // gradient wallpapers must be re-resolved to the new appearance's colours.
+    if (view) [self applyWallpaperTo:view];
 }
 
 #pragma mark - Applying
@@ -315,11 +316,13 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
         }
     } else {
         CAGradientLayer *g = [CAGradientLayer layer];
-        // Pass the dynamic UIColor objects, not their CGColor: CAGradientLayer
-        // resolves them against the current trait environment and re-resolves
-        // them when the appearance switches, keeping the wallpaper adaptive.
+        // CAGradientLayer.colors only accepts CGColorRefs, so resolve the dynamic
+        // stops against the current appearance here and re-apply from
+        // -traitCollectionDidChange: when the appearance switches.
         NSArray<UIColor *> *colors = [self wallpaperColorsForName:name];
-        g.colors = colors;
+        NSMutableArray *cg = [NSMutableArray arrayWithCapacity:colors.count];
+        for (UIColor *c in colors) [cg addObject:(id)c.CGColor];
+        g.colors = cg;
         if (colors.count > 1) {
             NSMutableArray *loc = [NSMutableArray arrayWithCapacity:colors.count];
             for (NSUInteger i = 0; i < colors.count; i++) {
@@ -341,7 +344,7 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
 #pragma mark - Cards / controls
 
 + (UIColor *)glassCard {
-    return [[self card] colorWithAlphaComponent:0.55];
+    return [[self card] colorWithAlphaComponent:0.34];
 }
 
 + (void)applyCardStyle:(UIView *)view {

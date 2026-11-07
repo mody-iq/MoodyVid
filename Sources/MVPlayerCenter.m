@@ -154,39 +154,280 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 @end
 
-/// The system player, with a fix: iOS pauses an AVPlayerViewController's player
-/// when the controller is dismissed, but the user expects the video to keep
-/// playing back in the mini bar. `wasPlaying` is captured before teardown and
-/// the `onResume` block (armed by the player center with a generation guard)
-/// keeps playback alive through the dismissal animation.
-@interface MVPlayerViewController : AVPlayerViewController
-@property (nonatomic, copy, nullable) void (^onDismissed)(void);
-@property (nonatomic, copy, nullable) void (^onResume)(void);
-@property (nonatomic) BOOL wasPlaying;
+/// The full-screen player. A plain view controller with an AVPlayerLayer and a
+/// glass control bar. It never takes ownership of the player (unlike
+/// AVPlayerViewController, which pauses its player on dismissal), so the audio
+/// simply keeps playing when the sheet closes and the mini bar takes over —
+/// no resume polling, no audible gap.
+@interface MVFullPlayerViewController : UIViewController
+@property (nonatomic, strong, nullable) AVPlayer *player;
+@property (nonatomic, copy, nullable) void (^onClose)(void);
+@property (nonatomic, copy, nullable) void (^onPrev)(void);
+@property (nonatomic, copy, nullable) void (^onNext)(void);
+@property (nonatomic, copy, nullable) void (^onSeekBack)(void);
+@property (nonatomic, copy, nullable) void (^onSeekForward)(void);
 @end
 
-@implementation MVPlayerViewController
+@implementation MVFullPlayerViewController {
+    CALayer *_videoLayer;      // host layer for the player
+    CALayer *_scrim;           // dim overlay between wallpaper and video
+    UISlider *_slider;
+    UILabel *_titleLabel;
+    UILabel *_timeLabel;
+    UIButton *_playButton;
+    UIButton *_prevButton;
+    UIButton *_nextButton;
+    UIButton *_backButton;
+    UIButton *_forwardButton;
+    AVPlayer * _Nullable _player;
+    id _periodicObserver;
+}
 
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
-    if (self.isBeingDismissed) {
-        self.wasPlaying = (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused);
-        if (self.wasPlaying) {
-            // Try before the teardown has even started; often this alone
-            // prevents the audible drop.
-            [self.player play];
-            if (self.onResume) self.onResume();
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    // Transparent: the wallpaper sits behind, so the player feels part of the
+    // app rather than a black window.
+    self.view.backgroundColor = UIColor.clearColor;
+
+    // Wallpaper behind everything, frosting through the glass chrome.
+    [MVTheme applyWallpaperTo:self.view];
+
+    // A soft dim scrim helps the video stand out over the wallpaper.
+    _scrim = [CALayer layer];
+    _scrim.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.25].CGColor;
+    _scrim.name = @"MVPlayerScrim";
+
+    _videoLayer = [AVPlayerLayer layer];
+    _videoLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+
+    [self.view.layer insertSublayer:_scrim atIndex:1];
+    [self.view.layer insertSublayer:_videoLayer atIndex:2];
+    _videoLayer.player = self.player;
+
+    _titleLabel = [UILabel new];
+    _titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _titleLabel.textColor = [MVTheme text];
+    _titleLabel.numberOfLines = 2;
+    _titleLabel.textAlignment = NSTextAlignmentCenter;
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_titleLabel];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setImage:[UIImage systemImageNamed:@"chevron.down"] forState:UIControlStateNormal];
+    close.tintColor = [MVTheme text];
+    close.translatesAutoresizingMaskIntoConstraints = NO;
+    [close addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:close];
+
+    _timeLabel = [UILabel new];
+    _timeLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    _timeLabel.textColor = [MVTheme secondaryText];
+    _timeLabel.textAlignment = NSTextAlignmentCenter;
+    _timeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_timeLabel];
+
+    _slider = [UISlider new];
+    _slider.minimumTrackTintColor = [MVTheme accent];
+    _slider.maximumTrackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.25];
+    _slider.translatesAutoresizingMaskIntoConstraints = NO;
+    [_slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:_slider];
+
+    _prevButton = [self controlButton:@"backward.end.fill"];
+    _backButton = [self controlButton:@"gobackward.15"];
+    _playButton = [self controlButton:@"pause.fill"];
+    _forwardButton = [self controlButton:@"goforward.15"];
+    _nextButton = [self controlButton:@"forward.end.fill"];
+
+    [_prevButton addTarget:self action:@selector(prevTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_backButton addTarget:self action:@selector(backTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_playButton addTarget:self action:@selector(playTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_forwardButton addTarget:self action:@selector(forwardTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_nextButton addTarget:self action:@selector(nextTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    NSArray<UIButton *> *controls = @[_prevButton, _backButton, _playButton, _forwardButton, _nextButton];
+    for (UIButton *b in controls) [self.view addSubview:b];
+    [self.view addSubview:_playButton];
+
+    UIStackView *row = [UIStackView new];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 26;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    for (UIButton *b in controls) [row addArrangedSubview:b];
+    [self.view addSubview:row];
+
+    // Glass control bar behind the transport row.
+    UIView *glass = [UIView new];
+    glass.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyCardStyle:glass cornerRadius:22];
+    [self.view insertSubview:glass belowSubview:row];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_titleLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:18],
+        [_titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:56],
+        [_titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-56],
+
+        [close.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [close.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [close.widthAnchor constraintEqualToConstant:40],
+        [close.heightAnchor constraintEqualToConstant:40],
+
+        [row.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [row.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-34],
+        [row.heightAnchor constraintEqualToConstant:56],
+
+        [_prevButton.widthAnchor constraintEqualToConstant:48],
+        [_prevButton.heightAnchor constraintEqualToConstant:48],
+        [_backButton.widthAnchor constraintEqualToConstant:44],
+        [_backButton.heightAnchor constraintEqualToConstant:44],
+        [_playButton.widthAnchor constraintEqualToConstant:58],
+        [_playButton.heightAnchor constraintEqualToConstant:58],
+        [_forwardButton.widthAnchor constraintEqualToConstant:44],
+        [_forwardButton.heightAnchor constraintEqualToConstant:44],
+        [_nextButton.widthAnchor constraintEqualToConstant:48],
+        [_nextButton.heightAnchor constraintEqualToConstant:48],
+
+        [glass.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [glass.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [glass.topAnchor constraintEqualToAnchor:row.topAnchor constant:-18],
+        [glass.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:18],
+
+        [_timeLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:22],
+        [_timeLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-22],
+        [_timeLabel.topAnchor constraintEqualToAnchor:glass.bottomAnchor constant:12],
+
+        [_slider.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:22],
+        [_slider.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-22],
+        [_slider.bottomAnchor constraintEqualToAnchor:glass.topAnchor constant:-14],
+    ]];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _scrim.frame = self.view.bounds;
+    _videoLayer.frame = self.view.bounds;
+    [CATransaction commit];
+    for (CALayer *l in [self.view.layer.sublayers copy]) {
+        if ([l.name isEqualToString:@"MVWallpaperLayer"]) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            l.frame = self.view.bounds;
+            [CATransaction commit];
         }
     }
 }
 
-- (void)viewDidDisappear:(BOOL)animated {
-    [super viewDidDisappear:animated];
-    if (!self.isBeingDismissed) return;
-    if (self.wasPlaying) {
-        if (self.onResume) self.onResume();
+- (void)setPlayer:(AVPlayer *)player {
+    _player = player;
+    // The layer may not exist yet (view is still lazy); viewDidLoad attaches it.
+    if (_videoLayer) _videoLayer.player = player;
+    [self refreshTitle];
+    [self syncPlayIcon];
+    [self startTicker];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [MVTheme applyWallpaperTo:self.view];
+    [self refreshTitle];
+    [self syncPlayIcon];
+    [self startTicker];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self syncPlayIcon];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+        _titleLabel.textColor = [MVTheme text];
     }
-    if (self.onDismissed) self.onDismissed();
+}
+
+- (void)dealloc {
+    if (_periodicObserver) {
+        [_player removeTimeObserver:_periodicObserver];
+    }
+}
+
+/// Updates the slider + time label while playing.
+- (void)startTicker {
+    if (!_player || _periodicObserver) return;
+    __weak typeof(self) weakSelf = self;
+    _periodicObserver = [_player addPeriodicTimeObserverForInterval:CMTimeMakeWithSeconds(0.25, 600)
+                                                              queue:dispatch_get_main_queue()
+                                                         usingBlock:^(CMTime time) {
+        [weakSelf tick:time];
+    }];
+}
+
+- (void)tick:(CMTime)time {
+    if (!_player.currentItem) return;
+    double total = CMTimeGetSeconds(_player.currentItem.duration);
+    double pos = CMTimeGetSeconds(time);
+    if (!isnan(total) && total > 0) {
+        _slider.maximumValue = total;
+        if (!_slider.dragging) _slider.value = MAX(0, MIN(pos, total));
+        _timeLabel.text = [NSString stringWithFormat:@"%@  /  %@",
+                           [self hms:pos], [self hms:total]];
+    }
+}
+
+- (NSString *)hms:(double)seconds {
+    if (isnan(seconds) || seconds < 0) seconds = 0;
+    NSInteger s = (NSInteger)seconds;
+    if (s >= 3600) return [NSString stringWithFormat:@"%ld:%02ld:%02ld", s / 3600, (s / 60) % 60, s % 60];
+    return [NSString stringWithFormat:@"%ld:%02ld", s / 60, s % 60];
+}
+
+- (void)syncPlayIcon {
+    BOOL playing = _player.rate != 0 && !_player.error;
+    UIImage *img = [UIImage systemImageNamed:playing ? @"pause.fill" : @"play.fill"];
+    [_playButton setImage:img forState:UIControlStateNormal];
+}
+
+- (void)refreshTitle {
+    _titleLabel.text = self.title.length ? self.title : @"";
+}
+
+- (UIButton *)controlButton:(NSString *)symbol {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    b.tintColor = [MVTheme accent];
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    b.imageView.tintColor = [MVTheme accent];
+    return b;
+}
+
+- (void)closeTapped {
+    if (self.onClose) self.onClose();
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)playTapped {
+    if (_player.rate != 0 && !_player.error) {
+        [_player pause];
+    } else {
+        [_player play];
+    }
+    [self syncPlayIcon];
+}
+
+- (void)prevTapped { if (self.onPrev) self.onPrev(); }
+- (void)nextTapped { if (self.onNext) self.onNext(); }
+- (void)backTapped { if (self.onSeekBack) self.onSeekBack(); }
+- (void)forwardTapped { if (self.onSeekForward) self.onSeekForward(); }
+
+- (void)sliderChanged:(UISlider *)slider {
+    if (!_player.currentItem) return;
+    CMTime t = CMTimeMakeWithSeconds(slider.value, 600);
+    [_player seekToTime:t toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
 }
 
 @end
@@ -205,6 +446,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 // "resume after dismissal" from an earlier presentation cannot fight the new
 // state (for example restarting a paused video the user actually stopped).
 @property (nonatomic) NSUInteger generation;
+// Remembers playback was running when an interruption began, so we can restart
+// it automatically when the interruption ends.
+@property (nonatomic) BOOL wasInterruptedWhilePlaying;
 @end
 
 @implementation MVPlayerCenter
@@ -370,33 +614,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
                     toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
 }
 
-#pragma mark - Resume guard
-
-// After a full-screen player dismisses, AVKit pauses the player. Keep nudging
-// it back for a couple of seconds, but only for *this* generation: if the user
-// already stopped playback or started another video meanwhile, do nothing.
-- (void)resumePlaybackForGeneration:(NSUInteger)gen {
-    [self resumePlaybackForGeneration:gen attempts:60];
-}
-
-- (void)resumePlaybackForGeneration:(NSUInteger)gen attempts:(NSInteger)attempts {
-    if (attempts <= 0) return;
-    if (self.generation != gen) return;
-    AVPlayer *p = self.internalPlayer;
-    if (!p) return;
-    // Already playing, or the user paused on purpose while dismissing: stop.
-    if (p.rate != 0 && p.timeControlStatus != AVPlayerTimeControlStatusPaused) return;
-    if (p.status != AVPlayerStatusReadyToPlay) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self resumePlaybackForGeneration:gen attempts:attempts - 1];
-        });
-        return;
-    }
-    [p play];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self resumePlaybackForGeneration:gen attempts:attempts - 1];
-    });
-}
+#pragma mark - Playback state
 
 - (BOOL)isPlaying {
     return (self.internalPlayer.rate != 0 && !self.internalPlayer.error);
@@ -456,6 +674,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     }];
 }
 
+- (void)hideFloatingBar { [self hideBar]; }
+- (void)showFloatingBar { [self showBar]; }
+
 - (UIWindow *)keyWindow {
     UIWindow *candidate = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -483,8 +704,20 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)handleInterruption:(NSNotification *)note {
     NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
     if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
+        // Remember we were playing so "ended" can bring us back (e.g. a phone
+        // call that the user hangs up). This is the other common "video needs
+        // a manual play press" trap.
+        self.wasInterruptedWhilePlaying = self.isPlaying;
         [self.internalPlayer pause];
         self.bar.pauseButton.selected = YES;
+    } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
+        if (self.wasInterruptedWhilePlaying) {
+            self.wasInterruptedWhilePlaying = NO;
+            [self ensureAudioSession];
+            [self.internalPlayer play];
+            self.bar.pauseButton.selected = NO;
+            [self refreshMiniBar];
+        }
     }
 }
 
@@ -504,25 +737,27 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         return;
     }
     // A second tap while the player is already open must not stack another one.
-    if ([top isKindOfClass:MVPlayerViewController.class]) return;
+    if ([top isKindOfClass:MVFullPlayerViewController.class]) return;
 
-    MVPlayerViewController *full = [MVPlayerViewController new];
-    full.player = self.internalPlayer;
-    if (@available(iOS 15.0, *)) {
-        full.allowsPictureInPicturePlayback = YES;
-    }
-    NSUInteger gen = self.generation;
+    MVFullPlayerViewController *full = [MVFullPlayerViewController new];
     __weak typeof(self) weakSelf = self;
-    full.onResume = ^{
-        [weakSelf resumePlaybackForGeneration:gen];
-    };
-    full.onDismissed = ^{
+    full.title = self.currentTitle;
+    full.player = self.internalPlayer;
+    full.onClose = ^{
+        // The player keeps running on its own — take the mini bar back up and
+        // resync its state. No polling: nothing paused it.
         [weakSelf refreshMiniBar];
         [weakSelf showBar];
     };
+    full.onPrev = ^{ [weakSelf playPrevious]; };
+    full.onNext = ^{ [weakSelf playNext]; };
+    full.onSeekBack = ^{ [weakSelf seekBack]; };
+    full.onSeekForward = ^{ [weakSelf seekForward]; };
+
     // Hidden while the full player is up, so it never shows behind it.
     self.bar.alpha = 0;
-    [self.internalPlayer play];
+    if (!self.isPlaying) [self.internalPlayer play];
+    full.modalPresentationStyle = UIModalPresentationFullScreen;
     [top presentViewController:full animated:YES completion:nil];
 
     // If iOS refused the presentation, do not leave the bar hidden forever.

@@ -37,10 +37,16 @@
     BOOL dark = MVTheme.shared.isDark;
     self.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
 
+    // One wallpaper behind the whole shell: every tab and its chrome area sits
+    // over it, so the frosted nav/tab bars frost an actual wallpaper and the
+    // background reads through everywhere, not just in the content area.
+    self.view.backgroundColor = UIColor.clearColor;
+    [MVTheme applyWallpaperTo:self.view];
+
     // Frosted chrome: the wallpaper shows through translucent blurred bars.
     UIBlurEffectStyle blurStyle = dark ? UIBlurEffectStyleSystemChromeMaterialDark
                                         : UIBlurEffectStyleSystemChromeMaterialLight;
-    UIColor *chromeTint = [[MVTheme glassCard] colorWithAlphaComponent:0.35];
+    UIColor *chromeTint = [[MVTheme glassCard] colorWithAlphaComponent:0.2];
 
     UITabBarAppearance *bar = [UITabBarAppearance new];
     [bar configureWithTransparentBackground];
@@ -66,6 +72,11 @@
         nav.navigationBar.scrollEdgeAppearance = navBar;
         nav.navigationBar.compactAppearance = navBar;
         nav.navigationBar.tintColor = [MVTheme accent];
+        // A nav controller's view is opaque white by default, which would mask
+        // the shell wallpaper behind the chrome bars and produce the "wallpaper
+        // only in the middle" look. Make it clear so the wallpaper fills the
+        // whole page.
+        nav.view.backgroundColor = UIColor.clearColor;
     }
 
     NSArray<NSString *> *titles = @[@"Home", @"Downloads", @"Files", @"More"];
@@ -78,6 +89,21 @@
     self.view.semanticContentAttribute = MVLang.shared.isRTL
         ? UISemanticContentAttributeForceRightToLeft
         : UISemanticContentAttributeForceLeftToRight;
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+        [self applyTheme];
+    }
 }
 
 @end

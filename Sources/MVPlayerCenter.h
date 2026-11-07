@@ -22,8 +22,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Stops playback and clears the small floating bar.
 - (void)stop;
 
-/// Presents the native full-screen player if playback has started.
+/// Presents the full-screen player if playback has started.
 - (void)presentCurrentPlayer;
+
+/// Hides the floating mini bar (it still reappears on new playback).
+- (void)hideFloatingBar;
+/// Shows the floating mini bar again.
+- (void)showFloatingBar;
 
 /// Replaces the artwork shown in the floating mini-bar.
 - (void)setThumbnailImage:(UIImage *)image;

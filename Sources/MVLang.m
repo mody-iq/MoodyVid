@@ -85,6 +85,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Cancel all": @"إلغاء الكل",
             @"Retry": @"إعادة المحاولة",
             @"Queued": @"في الانتظار",
+            @"Connecting…": @"جارٍ الاتصال…",
             @"Tap a site to browse it inside the app": @"اضغط على موقع لتصفحه داخل التطبيق",
             @"Your downloads will keep running while you use the app": @"ستستمر تحميلاتك أثناء استخدامك للتطبيق",
 

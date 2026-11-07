@@ -1,7 +1,12 @@
 # MoodyVid memory index
 - Build: GitHub Actions; push to main triggers IPA build (`gh run list` to watch). `Sources/*.m` glob picks new files.
 - Push needs tokenized remote (GITHUB_TOKEN) — remote gets set with resolved token.
-- Player: MVPlayerCenter singleton owns the AVPlayer; floating mini-bar; audio bg mode declared; PiP on.
-- Downloads: static quality sheet; list unified; thumbnails cached under Caches/moodyvid-thumbs; resume on launch via resumeInterrupted.
-- Settings nil-lock/Premium sections removed.
+- Player: MVPlayerCenter singleton owns the AVPlayer; floating mini-bar; audio bg mode declared. Full player is a CUSTOM MVFullPlayerViewController (AVPlayerLayer + glass bar), NOT AVKit — AVPlayerViewController pauses its player on dismissal (the "audio stops on shrink" bug). Never transfer the player to another VC; hideFloatingBar/showFloatingBar control the mini bar.
+- Files tab plays videos IN a glass card (in-tab), not a modal. AVPlayerLayer shared-player card, 16:9 surface.
+- Wallpapers: 10 keys, gradient or raster pattern (`MVTheme.wallpaperUsesImage:`). `CAGradientLayer.colors` takes CGColorRefs — resolve dynamic colors, re-apply via `refreshWallpaperIfPattern:` on trait change. Shell wallpaper lives on MVTabBarController.view; nav controller views MUST be clearColor (else opaque white masks the wallpaper behind the chrome = "wallpaper only in middle").
+- Glass: `applyCardStyle:` inserts blur `UIVisualEffectView` (tag `kGlassBlurTag`, userInteractionEnabled NO). Nav/tab bars use transparent+blur appearances.
+- Settings: Appearance/Wallpaper rows present action sheets (Language pattern); swatches via `wallpaperSwatchViewForName:`.
+- Home brand = `MVGradientLabel` (kCGTextClip gradient text) + glassy badge.
+- Python: MVPython startOnQueue imports `downloader` (yt-dlp) at launch so first download doesn't stall.
+- Traps: `.CGColor` after `?:` mis-binds → resolve colors into locals first. Big heredoc writes truncate; use file_editor/python.
 - See daily logs: 2026-11-06.md, 2026-11-07.md.

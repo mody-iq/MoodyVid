@@ -115,7 +115,7 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [MVTheme background];
+    self.view.backgroundColor = UIColor.clearColor;
     self.selectedQuality = @"best";
 
     // Tiles come from the browser's own site list so the two cannot drift apart.
@@ -155,21 +155,23 @@
 
     UIStackView *stack = [UIStackView new];
     stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 20;
+    stack.spacing = 16;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.scroll addSubview:stack];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        // Full-bleed: the wallpaper and the scroll extend under the translucent
+        // nav bar so the whole page (chrome included) shows the wallpaper.
+        [self.scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
-        [stack.topAnchor constraintEqualToAnchor:self.scroll.topAnchor constant:12],
-        [stack.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:self.scroll.trailingAnchor constant:-20],
-        [stack.bottomAnchor constraintEqualToAnchor:self.scroll.bottomAnchor constant:-24],
-        [stack.widthAnchor constraintEqualToAnchor:self.scroll.widthAnchor constant:-40],
+        [stack.topAnchor constraintEqualToAnchor:self.scroll.topAnchor constant:8],
+        [stack.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:self.scroll.trailingAnchor constant:-16],
+        [stack.bottomAnchor constraintEqualToAnchor:self.scroll.bottomAnchor constant:-20],
+        [stack.widthAnchor constraintEqualToAnchor:self.scroll.widthAnchor constant:-32],
     ]];
 
     [stack addArrangedSubview:[self makeHeader]];
@@ -275,7 +277,7 @@
 
 - (UILabel *)makeSectionTitle {
     UILabel *label = [UILabel new];
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
     label.textColor = [MVTheme text];
     return label;
 }
@@ -286,23 +288,23 @@
     // Glassy icon badge on the left, brand gradient text beside it.
     UIView *badge = [UIView new];
     badge.translatesAutoresizingMaskIntoConstraints = NO;
-    badge.layer.cornerRadius = 18;
+    badge.layer.cornerRadius = 16;
     badge.layer.cornerCurve = kCACornerCurveContinuous;
-    [MVTheme applyCardStyle:badge cornerRadius:18];
+    [MVTheme applyCardStyle:badge cornerRadius:16];
     UIImageView *icon = [UIImageView new];
     icon.translatesAutoresizingMaskIntoConstraints = NO;
     icon.image = [UIImage systemImageNamed:@"play.rectangle.fill"];
     icon.tintColor = [MVTheme accent];
     [badge addSubview:icon];
-    [badge.widthAnchor constraintEqualToConstant:56].active = YES;
-    [badge.heightAnchor constraintEqualToConstant:56].active = YES;
+    [badge.widthAnchor constraintEqualToConstant:50].active = YES;
+    [badge.heightAnchor constraintEqualToConstant:50].active = YES;
     [icon.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor].active = YES;
     [icon.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor].active = YES;
 
     UILabel *tagline = [UILabel new];
     tagline.translatesAutoresizingMaskIntoConstraints = NO;
     tagline.tag = 101;
-    tagline.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    tagline.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     tagline.textColor = [MVTheme secondaryText];
     tagline.numberOfLines = 1;
 
@@ -310,7 +312,7 @@
     brand.translatesAutoresizingMaskIntoConstraints = NO;
     brand.startColor = [MVTheme accent];
     brand.endColor = [UIColor colorWithRed:0.45 green:0.30 blue:0.85 alpha:1.0];
-    UIFont *brandFont = [UIFont systemFontOfSize:30 weight:UIFontWeightHeavy];
+    UIFont *brandFont = [UIFont systemFontOfSize:26 weight:UIFontWeightHeavy];
     brand.font = brandFont;
     brand.text = @"MoodyVid";
 
@@ -345,14 +347,14 @@
 - (UIView *)makePlatformGrid {
     UIStackView *grid = [UIStackView new];
     grid.axis = UILayoutConstraintAxisVertical;
-    grid.spacing = 12;
+    grid.spacing = 10;
 
     // Two rows of four tiles; UICollectionView would be overkill here.
     for (NSInteger row = 0; row < 2; row++) {
         UIStackView *line = [UIStackView new];
         line.axis = UILayoutConstraintAxisHorizontal;
         line.distribution = UIStackViewDistributionFillEqually;
-        line.spacing = 12;
+        line.spacing = 10;
         for (NSInteger col = 0; col < 4; col++) {
             MVPlatform *p = self.platforms[row * 4 + col];
             [line addArrangedSubview:[self makePlatformTile:p]];
@@ -390,12 +392,12 @@
     [tile addTarget:self action:@selector(platformTapped:) forControlEvents:UIControlEventTouchUpInside];
 
     [NSLayoutConstraint activateConstraints:@[
-        [tile.heightAnchor constraintEqualToConstant:72],
+        [tile.heightAnchor constraintEqualToConstant:66],
         [icon.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
-        [icon.topAnchor constraintEqualToAnchor:tile.topAnchor constant:13],
-        [icon.widthAnchor constraintEqualToConstant:24],
-        [icon.heightAnchor constraintEqualToConstant:24],
-        [name.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:6],
+        [icon.topAnchor constraintEqualToAnchor:tile.topAnchor constant:12],
+        [icon.widthAnchor constraintEqualToConstant:22],
+        [icon.heightAnchor constraintEqualToConstant:22],
+        [name.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:5],
         [name.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:4],
         [name.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-4],
     ]];
@@ -618,11 +620,16 @@
         if (watched.state == MVDownloadStateWaiting) {
             [self_ showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
         } else if (watched.isActive) {
-            [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
-                               watched.progress * 100,
-                               [MVPaths formatSpeed:watched.speed],
-                               [MVPaths formatDuration:watched.eta]]
-                        color:[MVTheme secondaryText]];
+            if (watched.progress > 0) {
+                [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
+                                   watched.progress * 100,
+                                   [MVPaths formatSpeed:watched.speed],
+                                   [MVPaths formatDuration:watched.eta]]
+                            color:[MVTheme secondaryText]];
+            } else {
+                // Pre-download phase (DNS, metadata); make the wait feel alive.
+                [self_ showStatus:[MVLang t:@"Connecting…"] color:[MVTheme secondaryText]];
+            }
         }
     }];
 }

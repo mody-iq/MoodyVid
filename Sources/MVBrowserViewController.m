@@ -126,7 +126,7 @@ static NSString *const kMessageHandler = @"moodyvid";
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [MVTheme background];
+    self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"Browser"];
 
     [self buildWebView];
