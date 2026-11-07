@@ -4,6 +4,7 @@
 #import "MVLang.h"
 #import "MVTheme.h"
 #import "MVDownloadStore.h"
+#import "MVDownloadEngine.h"
 
 typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeName = 0,
@@ -34,6 +35,10 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
                                                             style:UIBarButtonItemStylePlain
                                                            target:self action:@selector(showSortMenu)];
     self.navigationItem.rightBarButtonItems = @[newFolder, sort];
+
+    UILongPressGestureRecognizer *longPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
+    [self.tableView addGestureRecognizer:longPress];
 
     self.storageLabel = [UILabel new];
     self.storageLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
@@ -165,7 +170,14 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         long long size = [attrs[NSFileSize] longLongValue];
         NSDate *date = attrs[NSFileModificationDate];
         NSString *ext = path.pathExtension.lowercaseString;
-        content.image = [UIImage systemImageNamed:[self symbolForExtension:ext]];
+        NSString *thumbPath = [self thumbnailForPath:path];
+        if (thumbPath) {
+            content.image = [UIImage imageWithContentsOfFile:thumbPath];
+            content.imageProperties.maximumSize = CGSizeMake(88, 50);
+            content.imageProperties.cornerRadius = 8;
+        } else {
+            content.image = [UIImage systemImageNamed:[self symbolForExtension:ext]];
+        }
         content.secondaryText = [NSString stringWithFormat:@"%@  ·  %@",
                                  [MVPaths formatBytes:size],
                                  [NSDateFormatter localizedStringFromDate:date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]];
@@ -257,6 +269,122 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
         [self refresh];
     }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)longPressRow:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    CGPoint point = [gesture locationInView:self.tableView];
+    NSIndexPath *indexPath = [self.tableView indexPathForRowAtPoint:point];
+    if (!indexPath) return;
+    NSString *name = [self entries][indexPath.row];
+    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    [self showFileMenuForPath:path];
+}
+
+- (void)showFileMenuForPath:(NSString *)path {
+    NSString *name = path.lastPathComponent;
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:name
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    BOOL isDir = NO;
+    [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
+    NSString *ext = path.pathExtension.lowercaseString;
+    BOOL playable = [@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext];
+
+    if (!isDir && playable) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            AVPlayerViewController *player = [AVPlayerViewController new];
+            player.player = [AVPlayer playerWithURL:[NSURL fileURLWithPath:path]];
+            [player.player play];
+            [self presentViewController:player animated:YES completion:nil];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] saveToPhotos:path completion:^(NSString *fp, NSString *err) {
+                if (fp && !err) {
+                    [self alert:@"MoodyVid" message:[MVLang t:@"Saved to Photos"]];
+                } else if (err) {
+                    [self alert:[MVLang t:@"Failed"] message:err];
+                }
+            }];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIActivityViewController *share = [[UIActivityViewController alloc]
+            initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+        [self presentViewController:share animated:YES completion:nil];
+    }]];
+    if (!isDir) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Rename"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self promptRenamePath:path];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [self confirmDeletePath:path];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)confirmDeletePath:(NSString *)path {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Delete this file?"]
+                                                                  message:[MVLang t:@"This cannot be undone."]
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        [self forgetRecordAtPath:path];
+        [self refresh];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)promptRenamePath:(NSString *)path {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Rename"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *f) {
+        f.text = path.lastPathComponent.stringByDeletingPathExtension;
+        f.semanticContentAttribute = MVLang.shared.isRTL ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Rename"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *name = alert.textFields.firstObject.text;
+        if (!name.length) return;
+        NSString *target = [[path stringByDeletingLastPathComponent]
+                            stringByAppendingPathComponent:[name stringByAppendingPathExtension:path.pathExtension]];
+        NSError *err = nil;
+        if ([NSFileManager.defaultManager moveItemAtPath:path toPath:target error:&err]) {
+            for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+                if ([r.path isEqualToString:path]) {
+                    r.path = target;
+                    [MVDownloadStore.shared update:r];
+                }
+            }
+            [self refresh];
+        } else {
+            [self alert:[MVLang t:@"Failed"] message:err.localizedDescription ?: [MVLang t:@"Unknown error"]];
+        }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (NSString *)thumbnailForPath:(NSString *)path {
+    for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+        if (r.thumbnail.length && [r.path isEqualToString:path] &&
+            [NSFileManager.defaultManager fileExistsAtPath:r.thumbnail]) {
+            return r.thumbnail;
+        }
+    }
+    return nil;
+}
+
+- (void)alert:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 

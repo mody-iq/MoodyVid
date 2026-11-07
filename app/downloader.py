@@ -172,6 +172,7 @@ def download(url, quality="best", _task=""):
             return json.dumps({
                 "path": filename,
                 "title": info.get("title", ""),
+                "thumbnail": info.get("thumbnail", ""),
                 "ext": info.get("ext", ""),
                 "height": info.get("height") or 0,
                 "audio": quality == "audio" and not _has_video(info),

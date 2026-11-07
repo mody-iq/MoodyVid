@@ -1,6 +1,8 @@
 #import "MVPaths.h"
 #include <math.h>
 
+NSString *const MVPathsThumbsDir = @"moodyvid-thumbs";
+
 @implementation MVPaths
 
 + (NSString *)documents {
@@ -14,8 +16,16 @@
 }
 
 + (NSString *)cache {
+    return [self cachesDir:@"ytdlp-cache"];
+}
+
++ (NSString *)thumbs {
+    return [self cachesDir:MVPathsThumbsDir];
+}
+
++ (NSString *)cachesDir:(NSString *)name {
     NSString *base = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *dir = [base stringByAppendingPathComponent:@"ytdlp-cache"];
+    NSString *dir = [base stringByAppendingPathComponent:name];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     return dir;
 }

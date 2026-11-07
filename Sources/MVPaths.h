@@ -2,6 +2,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// The name of the sub-folder of Caches that holds thumbnail jpegs.
+FOUNDATION_EXPORT NSString *const MVPathsThumbsDir;
+
 /// Shared filesystem locations, so the ObjC side and the Python engine agree on
 /// where downloads live. Must match `MV_DOCUMENTS` in MVPython.m.
 @interface MVPaths : NSObject

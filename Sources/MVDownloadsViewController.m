@@ -8,8 +8,9 @@
 
 static NSString *const kDoneCell = @"MVDoneCell";
 
-// One row: title, subtitle, and a progress bar for active downloads.
+// One row: thumbnail, title, subtitle, and a progress bar for active downloads.
 @interface MVDownloadCell : UITableViewCell
+@property (nonatomic, strong) UIImageView *thumbView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UIProgressView *progressBar;
@@ -23,6 +24,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
         self.backgroundColor = UIColor.clearColor;
         self.contentView.backgroundColor = UIColor.clearColor;
         self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        _thumbView = [UIImageView new];
+        _thumbView.contentMode = UIViewContentModeScaleAspectFill;
+        _thumbView.layer.cornerRadius = 8;
+        _thumbView.layer.masksToBounds = YES;
+        _thumbView.clipsToBounds = YES;
+        _thumbView.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.12];
+        _thumbView.translatesAutoresizingMaskIntoConstraints = NO;
 
         _titleLabel = [UILabel new];
         _titleLabel.numberOfLines = 2;
@@ -40,17 +49,25 @@ static NSString *const kDoneCell = @"MVDoneCell";
         _progressBar.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.20];
         _progressBar.translatesAutoresizingMaskIntoConstraints = NO;
 
+        [self.contentView addSubview:_thumbView];
         [self.contentView addSubview:_titleLabel];
         [self.contentView addSubview:_subtitleLabel];
         [self.contentView addSubview:_progressBar];
 
+        [self.thumbView.widthAnchor constraintEqualToConstant:88].active = YES;
+        [self.thumbView.heightAnchor constraintEqualToConstant:50].active = YES;
+
         [NSLayoutConstraint activateConstraints:@[
-            [_titleLabel.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:18],
+            [_thumbView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14],
+            [_thumbView.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_thumbView.trailingAnchor constant:12],
             [_titleLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-18],
             [_titleLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:12],
 
             [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
             [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14],
             [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:3],
 
             [_progressBar.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
@@ -64,6 +81,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)configureWithRecord:(MVDownloadRecord *)record {
     self.titleLabel.text = record.title.length ? record.title : record.url;
+
+    if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {
+        UIImage *img = [UIImage imageWithContentsOfFile:record.thumbnail];
+        self.thumbView.image = img ?: [UIImage systemImageNamed:@"play.rectangle.fill"];
+        self.thumbView.tintColor = [MVTheme secondaryText];
+    } else {
+        self.thumbView.image = [UIImage systemImageNamed:@"play.rectangle.fill"];
+        self.thumbView.tintColor = [MVTheme secondaryText];
+    }
 
     BOOL showsProgress = record.isActive || record.state == MVDownloadStateWaiting;
     self.progressBar.hidden = !showsProgress;
@@ -108,8 +134,6 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @property (nonatomic, strong) UILabel *emptyLabel;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
-@property (nonatomic, strong) UISegmentedControl *segments;
-@property (nonatomic, assign) NSInteger segmentIndex;
 @end
 
 @implementation MVDownloadsViewController
@@ -127,6 +151,9 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.tableView.rowHeight = UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight = 96;
     [self.tableView registerClass:MVDownloadCell.class forCellReuseIdentifier:kDoneCell];
+    UILongPressGestureRecognizer *longPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
+    [self.tableView addGestureRecognizer:longPress];
     [self.view addSubview:self.tableView];
 
     self.emptyLabel = [UILabel new];
@@ -137,15 +164,6 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.emptyLabel];
 
-    // Active | Downloaded, as in the design.
-    self.segments = [[UISegmentedControl alloc] initWithItems:@[[MVLang t:@"Active"], [MVLang t:@"Completed"]]];
-    self.segments.translatesAutoresizingMaskIntoConstraints = NO;
-    self.segments.selectedSegmentIndex = 0;
-    self.segmentIndex = 0;
-    self.segments.selectedSegmentTintColor = [MVTheme accent];
-    [self.segments addTarget:self action:@selector(segmentChanged) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:self.segments];
-
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
     self.search.obscuresBackgroundDuringPresentation = NO;
@@ -155,11 +173,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.definesPresentationContext = YES;
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.segments.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
-        [self.segments.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [self.segments.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-
-        [self.tableView.topAnchor constraintEqualToAnchor:self.segments.bottomAnchor constant:8],
+        [self.tableView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
@@ -172,25 +186,21 @@ static NSString *const kDoneCell = @"MVDoneCell";
     }
 }
 
-- (void)segmentChanged {
-    self.segmentIndex = self.segments.selectedSegmentIndex;
-    [self.tableView reloadData];
-}
-
 - (void)refresh {
     self.title = [MVLang t:@"Downloads"];
-    [self.segments setTitle:[MVLang t:@"Active"] forSegmentAtIndex:0];
-    [self.segments setTitle:[MVLang t:@"Completed"] forSegmentAtIndex:1];
-    self.emptyLabel.text = self.segmentIndex == 0 ? [MVLang t:@"No active downloads"] : [MVLang t:@"No completed downloads"];
+    self.emptyLabel.text = [MVLang t:@"No downloads yet"];
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
     [self.tableView reloadData];
 }
 
 - (NSArray<MVDownloadRecord *> *)records {
-    // The two segments partition the list: in-flight jobs versus finished ones.
-    NSArray *all = self.segmentIndex == 0
-        ? MVDownloadStore.shared.activeRecords
-        : MVDownloadStore.shared.finishedRecords;
+    // One list, newest first, with whatever is still downloading pinned to the
+    // top so it is the first thing seen. There is no Active/Completed split any
+    // more: a row shows its own progress bar while it is still running.
+    NSArray *all = [MVDownloadStore.shared.records sortedArrayUsingComparator:^NSComparisonResult(MVDownloadRecord *a, MVDownloadRecord *b) {
+        if (a.isActive != b.isActive) return a.isActive ? NSOrderedAscending : NSOrderedDescending;
+        return a.createdAt > b.createdAt ? NSOrderedAscending : NSOrderedDescending;
+    }];
     if (!self.filter.length) return all;
     NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(MVDownloadRecord *r, NSDictionary *b) {
         NSString *hay = [NSString stringWithFormat:@"%@ %@", r.title ?: @"", r.url ?: @""];
@@ -207,8 +217,6 @@ static NSString *const kDoneCell = @"MVDoneCell";
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSArray *records = [self records];
     self.emptyLabel.hidden = records.count > 0;
-    self.emptyLabel.text = self.segmentIndex == 0
-        ? [MVLang t:@"No active downloads"] : [MVLang t:@"No completed downloads"];
     return records.count;
 }
 
@@ -245,6 +253,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
+- (void)longPressRow:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    CGPoint point = [gesture locationInView:self.tableView];
+    NSIndexPath *indexPath = [self.tableView indexPathForRowAtPoint:point];
+    if (!indexPath) return;
+    [self showMenuForRecord:[self records][indexPath.row]
+                 sourceView:[self.tableView cellForRowAtIndexPath:indexPath]];
+}
+
 - (void)showMenuForRecord:(MVDownloadRecord *)record sourceView:(UIView *)source {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:record.title
                                                                   message:nil
@@ -252,6 +269,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
     if (record.state == MVDownloadStateCompleted && record.path.length) {
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [self playFile:record.path];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] saveToPhotos:record.path completion:^(NSString *fp, NSString *err) {
+                if (fp && !err) {
+                    [self alert:[MVLang t:@"Saved"] message:[MVLang t:@"Saved to Photos"]];
+                } else if (err) {
+                    [self alert:[MVLang t:@"Failed"] message:err];
+                }
+            }];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             UIActivityViewController *share = [[UIActivityViewController alloc]

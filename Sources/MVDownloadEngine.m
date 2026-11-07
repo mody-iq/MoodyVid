@@ -20,11 +20,6 @@ static const NSUInteger kMaxConcurrent = 2;
 @implementation MVDownloadJob
 @end
 
-@interface MVDownloadEngine ()
-- (BOOL)isVideoFile:(NSString *)path;
-- (void)saveToPhotos:(NSString *)filePath completion:(void (^)(NSString *filePath, NSString *error))completion;
-@end
-
 @implementation MVDownloadEngine {
     NSMutableDictionary<NSString *, NSTimer *> *_pollers;
     NSMutableArray<MVDownloadJob *> *_queue;
@@ -52,6 +47,34 @@ static const NSUInteger kMaxConcurrent = 2;
 }
 
 - (NSUInteger)runningCount { return _running.count; }
+
+#pragma mark - Thumbnails
+
+- (void)setThumbnail:(NSString *)thumbURL forURL:(NSString *)url {
+    if (!thumbURL.length || !url.length) return;
+    NSURL *source = [NSURL URLWithString:thumbURL];
+    if (!source) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSData *data = [NSData dataWithContentsOfURL:source timeoutInterval:15];
+        if (!data.length) return;
+        UIImage *image = [UIImage imageWithData:data];
+        if (!image) return;
+        NSString *name = [NSString stringWithFormat:@"%@.jpg",
+                          [[url dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]];
+        NSString *target = [[MVPaths thumbs] stringByAppendingPathComponent:name];
+        NSData *jpeg = UIImageJPEGRepresentation(image, 0.7);
+        if (![jpeg writeToFile:target atomically:YES]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+                if ([r.url isEqualToString:url] && !r.thumbnail) {
+                    r.thumbnail = target;
+                    [MVDownloadStore.shared update:r];
+                }
+            }
+        });
+    });
+}
+
 
 #pragma mark - Queue
 
@@ -142,6 +165,10 @@ static const NSUInteger kMaxConcurrent = 2;
     // The engine's own metadata beats what we had from the URL.
     NSString *title = result[@"title"];
     if ([title isKindOfClass:NSString.class] && title.length) record.title = title;
+    NSString *thumb = result[@"thumbnail"];
+    if ([thumb isKindOfClass:NSString.class] && thumb.length && record.url.length) {
+        [self setThumbnail:thumb forURL:record.url];
+    }
     record.path = path;
     record.progress = 1.0;
     record.speed = 0;
@@ -152,15 +179,9 @@ static const NSUInteger kMaxConcurrent = 2;
     [[MVPython shared] forgetTask:job.identifier];
     [self notifyFinished:record];
 
-    // The slot is free as soon as the bytes are on disk; saving to Photos is
-    // slow and should not hold the queue up.
+    // The slot is free as soon as the bytes are on disk.
     [self pump];
-
-    if ([self isVideoFile:path]) {
-        [self saveToPhotos:path completion:completion];
-    } else if (completion) {
-        completion(path, nil);
-    }
+    if (completion) completion(path, nil);
 }
 
 - (void)cancelDownload:(NSString *)identifier {
