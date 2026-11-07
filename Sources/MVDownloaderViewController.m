@@ -103,6 +103,7 @@
 @property (nonatomic, strong) UIButton *qualityButton;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIProgressView *progressView;
+@property (nonatomic, strong) UIActivityIndicatorView *busyView;
 @property (nonatomic, strong) UILabel *platformsTitle;
 @property (nonatomic, copy) NSString *selectedQuality;
 @property (nonatomic, strong) NSArray<MVPlatform *> *platforms;
@@ -233,6 +234,12 @@
     self.statusLabel.textColor = [MVTheme secondaryText];
     [linkCard addSubview:self.statusLabel];
 
+    self.busyView = [UIActivityIndicatorView new];
+    self.busyView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.busyView.hidesWhenStopped = YES;
+    self.busyView.color = [MVTheme accent];
+    [linkCard addSubview:self.busyView];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.urlField.topAnchor constraintEqualToAnchor:linkCard.topAnchor constant:14],
         [self.urlField.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
@@ -264,6 +271,11 @@
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
         [self.statusLabel.bottomAnchor constraintEqualToAnchor:linkCard.bottomAnchor constant:-16],
+
+        [self.busyView.leadingAnchor constraintEqualToAnchor:self.statusLabel.trailingAnchor constant:8],
+        [self.busyView.centerYAnchor constraintEqualToAnchor:self.statusLabel.centerYAnchor],
+        [self.busyView.widthAnchor constraintEqualToConstant:18],
+        [self.busyView.heightAnchor constraintEqualToConstant:18],
     ]];
     [stack addArrangedSubview:linkCard];
 
@@ -625,6 +637,7 @@
         self_.progressView.progress = (float)watched.progress;
         if (watched.state == MVDownloadStateWaiting) {
             [self_ showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
+            [self_.busyView startAnimating];
         } else if (watched.isActive) {
             if (watched.progress > 0) {
                 [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
@@ -632,12 +645,17 @@
                                    [MVPaths formatSpeed:watched.speed],
                                    [MVPaths formatDuration:watched.eta]]
                             color:[MVTheme secondaryText]];
+                [self_.busyView stopAnimating];
             } else {
                 // Pre-download phase (DNS, metadata); make the wait feel alive.
                 [self_ showStatus:[MVLang t:@"Connecting…"] color:[MVTheme secondaryText]];
+                [self_.busyView startAnimating];
             }
+        } else {
+            [self_.busyView stopAnimating];
         }
     }];
+    [self.busyView stopAnimating];
 }
 
 - (void)stopWatching {

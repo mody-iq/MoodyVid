@@ -252,7 +252,7 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionAppearance: return 1;
         case MVMoreSectionWallpaper:  return 1;
         case MVMoreSectionStorage:    return 2;
-        case MVMoreSectionAbout:      return 1;
+        case MVMoreSectionAbout:      return 3;
         default: return 0;
     }
 }
@@ -291,11 +291,28 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    return section == MVMoreSectionAbout ? 40 : 2;
+    return section == MVMoreSectionAbout ? 60 : 2;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    return [UIView new];
+    if (section != MVMoreSectionAbout) return [UIView new];
+
+    UIView *box = [UIView new];
+    box.backgroundColor = UIColor.clearColor;
+
+    UILabel *label = [UILabel new];
+    label.text = [MVLang t:@"Made with love"];
+    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    label.textColor = [MVTheme secondaryText];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [box addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:20],
+        [label.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-20],
+        [label.topAnchor constraintEqualToAnchor:box.topAnchor constant:14],
+    ]];
+    return box;
 }
 
 /// The mask bits a row needs so all cells of one section merge into a single
@@ -352,11 +369,20 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
             }
             break;
         }
-        case MVMoreSectionAbout:
-        default: {
-            cell.titleLabel.text = [MVLang t:@"Version"];
-            cell.subtitleLabel.text = [self engineVersion];
-            [cell configureIcon:@"info.circle.fill" tint:[MVTheme accent]];
+        case MVMoreSectionAbout: {
+            if (indexPath.row == 0) {
+                cell.titleLabel.text = [MVLang t:@"Version"];
+                cell.subtitleLabel.text = [self engineVersion];
+                [cell configureIcon:@"info.circle.fill" tint:[MVTheme accent]];
+            } else if (indexPath.row == 1) {
+                cell.titleLabel.text = [MVLang t:@"Developer"];
+                cell.subtitleLabel.text = @"Mohammed-Mutar 🇮🇶";
+                [cell configureIcon:@"person.crop.circle.fill" tint:[MVTheme success]];
+            } else {
+                cell.titleLabel.text = [MVLang t:@"Contact"];
+                cell.subtitleLabel.text = @"Moh.mutar7@gmail.com";
+                [cell configureIcon:@"envelope.fill" tint:[MVTheme warning]];
+            }
             break;
         }
     }
@@ -379,9 +405,21 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionStorage:
             if (indexPath.row == 1) [self clearCache];
             break;
+        case MVMoreSectionAbout:
+            if (indexPath.row == 2) [self copyDeveloperEmail];
+            break;
         default:
             break;
     }
+}
+
+- (void)copyDeveloperEmail {
+    UIPasteboard.generalPasteboard.string = @"Moh.mutar7@gmail.com";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Copied"]
+                                                                  message:@"Moh.mutar7@gmail.com"
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)showLanguageMenu {

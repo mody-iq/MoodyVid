@@ -36,7 +36,9 @@ def _selector(quality):
 # hand out DASH-only streams (video and sound apart) for most videos. Try the
 # styles that still expose a combined file, in order, and remember the one that
 # worked so the next video starts there instead of repeating the failures.
-PLAYER_CLIENTS = [None, ["visionos", "web_embedded", "mweb"], ["android"], ["tv_simply", "web_safari"]]
+# "tv_simply" usually yields a combined stream in one fast round, so it is tried
+# first and the slow default client probe comes last.
+PLAYER_CLIENTS = [["tv_simply", "web_safari"], ["android"], ["visionos", "web_embedded", "mweb"], None]
 _good_client = [None, 0.0]
 _GOOD_CLIENT_TTL = 3600
 
@@ -264,7 +266,7 @@ def _download_once(yt_dlp, url, fmt, client, out_dir, native=None, task=""):
         # Resume the tail of an interrupted download instead of restarting it.
         "continue": True,
         # A blocked style should fail quickly so the next one is tried.
-        "socket_timeout": 15,
+        "socket_timeout": 8,
         "progress_hooks": [_progress_hook(native, task)],
     }
     if client:
@@ -306,8 +308,10 @@ def download_fragment(url, kind, quality="best", _task=""):
         if isinstance(quality, str) and quality.isdigit():
             h = int(quality)
             if h > 0: height = h
-        fmt = (f"bestvideo[height<={height}][ext=mp4]/bestvideo[height<={height}]"
-               f"/bestvideo[ext=mp4]/bestvideo")
+        # Prefer MP4 at every step so single-file downloads stay playable on
+        # iOS. WebM is considered only when the source offers nothing else.
+        fmt = (f"bestvideo[height<={height}][ext=mp4]/b[height<={height}][ext=mp4]/b[ext=mp4]"
+               f"/b[height<={height}][ext=webm]/bestvideo[height<={height}]")
 
     out_dir = _output_dir()
     try:
@@ -329,7 +333,7 @@ def download_fragment(url, kind, quality="best", _task=""):
                 "retries": 10,
                 "fragment_retries": 10,
                 "continue": True,
-                "socket_timeout": 15,
+                "socket_timeout": 8,
                 "progress_hooks": [_progress_hook(native, _task)],
             }
             if client:

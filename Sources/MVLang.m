@@ -186,6 +186,11 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Available": @"متاح",
             @"Copied": @"تم النسخ",
             @"Link copied": @"تم نسخ الرابط",
+            @"Developer": @"المطور",
+            @"Contact": @"التواصل",
+            @"Made with love": @"صُنع بـحب 🧡",
+            @"Can't play this file": @"لا يمكن تشغيل هذا الملف",
+            @"WebM and MKV aren't supported. You can still share or export it.": @"صيغتا WebM وMKV غير مدعومتين. يمكنك مع ذلك مشاركته أو تصديره.",
 
             // Wallpapers
             @"Wallpaper": @"الخلفية",

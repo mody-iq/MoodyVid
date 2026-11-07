@@ -556,8 +556,24 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     }
 
     NSString *ext = path.pathExtension.lowercaseString;
-    if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) {
+    if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"] containsObject:ext]) {
         [self playPathInQueue:path];
+    } else if ([@[@"webm", @"mkv"] containsObject:ext]) {
+        // iOS can't play these; offer sharing/export rather than freezing or
+        // silently doing nothing.
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:[MVLang t:@"Can't play this file"]
+                             message:[MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"]
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            UIActivityViewController *share = [[UIActivityViewController alloc]
+                initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+            [self presentViewController:share animated:YES completion:nil];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
     } else {
         UIActivityViewController *share = [[UIActivityViewController alloc]
             initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
@@ -745,7 +761,15 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 - (void)playPathInQueue:(NSString *)path {
     // The previous/next buttons in the player step through the visible rows of
-    // this folder, ignoring subfolders and non-video files.
+    // this folder, ignoring subfolders and non-video files. WebM/MKV are
+    // deliberately left out: AVPlayer cannot decode them, and swapping onto one
+    // makes the player hang while it tries to prepare the item.
+    static NSSet<NSString *> *playable;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        playable = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"]];
+    });
+
     NSArray<NSString *> *names = [self entries];
     NSString *dir = [self currentDirectory];
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
@@ -754,7 +778,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     for (NSUInteger i = 0; i < names.count; i++) {
         NSString *p = [dir stringByAppendingPathComponent:names[i]];
         NSString *ext = p.pathExtension.lowercaseString;
-        if (![@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) continue;
+        if (![playable containsObject:ext]) continue;
         [urls addObject:[NSURL fileURLWithPath:p]];
         [titles addObject:p.lastPathComponent.stringByDeletingPathExtension];
         if ([p isEqualToString:path]) index = (NSInteger)urls.count - 1;
