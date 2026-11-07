@@ -322,8 +322,8 @@
     // Keep the whole sentence on one line: shrink slightly instead of clipping
     // it to "حمّل الفيديوهات من أي...".
     tagline.adjustsFontSizeToFitWidth = YES;
-    tagline.minimumScaleFactor = 0.75;
-    tagline.lineBreakMode = NSLineBreakByTruncatingTail;
+    tagline.minimumScaleFactor = 0.7;
+    tagline.lineBreakMode = NSLineBreakByClipping;
 
     MVGradientLabel *brand = [MVGradientLabel new];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
@@ -352,12 +352,14 @@
     [NSLayoutConstraint activateConstraints:@[
         [row.topAnchor constraintEqualToAnchor:header.topAnchor],
         [row.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [row.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
+        // Fill the full width so the tagline always has room to show its whole
+        // sentence on one line.
+        [row.trailingAnchor constraintEqualToAnchor:header.trailingAnchor],
         [row.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
     ]];
 
-    // Let the layout squeeze the tagline if space is tight, then shrink its
-    // font to keep the whole sentence on one line instead of truncating it.
+    // Squeeze the tagline if space is tight, then shrink its font to keep the
+    // whole sentence on one line instead of truncating it.
     [tagline setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     return header;
 }
