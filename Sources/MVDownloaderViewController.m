@@ -66,9 +66,11 @@
     if (!context) return;
 
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    UIColor *start = self.startColor ?: [MVTheme accent];
+    UIColor *end = self.endColor ?: [MVTheme accent];
     CGGradientRef gradient = CGGradientCreateWithColors(space, (__bridge CFArrayRef)@[
-        (id)(self.startColor ?: [MVTheme accent]).CGColor,
-        (id)(self.endColor ?: [MVTheme accent].CGColor),
+        (id)start.CGColor,
+        (id)end.CGColor,
     ], NULL);
     NSDictionary *attrs = self.font ? @{NSFontAttributeName: self.font} : @{};
     CGSize size = [self.text sizeWithAttributes:attrs];
