@@ -172,6 +172,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Storage": @"التخزين",
             @"Clear cache": @"مسح الذاكرة المؤقتة",
             @"Cache cleared": @"تم مسح الذاكرة المؤقتة",
+            @"Tap to clear": @"اضغط للمسح",
             @"Security": @"الأمان",
             @"Passcode lock": @"قفل برمز",
             @"About": @"حول",

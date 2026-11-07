@@ -426,8 +426,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)sliderChanged:(UISlider *)slider {
     if (!_player.currentItem) return;
-    CMTime t = CMTimeMakeWithSeconds(slider.value, 600);
-    [_player seekToTime:t toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    // Fast jump (infinite tolerance): exact frame seeks issued dozens of times
+    // per second while dragging can pile up and freeze playback.
+    CMTime t = CMTimeMakeWithSeconds(slider.value, 1000);
+    [_player seekToTime:t toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
 }
 
 @end
@@ -554,8 +556,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)playPrevious {
     if (self.queue.count < 2) return;
+    CMTime cur = self.internalPlayer.currentTime;
     // Tap again at the start of the item to restart it, like most players.
-    if (self.internalPlayer.currentTime.value > 3 * self.internalPlayer.currentTime.timescale) {
+    // Guard against an item that is still preparing (indefinite time would
+    // otherwise be treated as "way past three seconds" and seek to a bogus spot).
+    if (!CMTIME_IS_INDEFINITE(cur) && cur.value > 3 * cur.timescale) {
         [self seekTo:0];
         return;
     }
@@ -601,17 +606,33 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)seekBy:(double)seconds {
-    if (!self.internalPlayer) return;
+    if (!self.internalPlayer || !self.internalPlayer.currentItem) return;
     CMTime cur = [self.internalPlayer currentTime];
+    // The item may still be preparing right after a replaceCurrentItem, when
+    // currentTime is indefinite (NaN) and a seekToTime with an invalid time
+    // blocks AVPlayer forever. Anything wrong means "stay put".
+    if (CMTIME_IS_INDEFINITE(cur) || CMTimeGetSeconds(cur) != CMTimeGetSeconds(cur)) return;
     double target = CMTimeGetSeconds(cur) + seconds;
-    if (target < 0) target = 0;
-    CMTime t = CMTimeMakeWithSeconds(target, 600);
-    [self.internalPlayer seekToTime:t toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
+    [self safeSeek:target];
 }
 
 - (void)seekTo:(double)seconds {
-    [self.internalPlayer seekToTime:CMTimeMakeWithSeconds(seconds, 600)
-                    toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    [self safeSeek:seconds];
+}
+
+/// The one seek used everywhere. It clamps to the item duration, guards against
+/// NaN/indefinite values (which would freeze AVPlayer), and uses infinite
+/// tolerances so the seek is a fast jump instead of a frame-exact decode.
+- (void)safeSeek:(double)seconds {
+    AVPlayerItem *item = self.internalPlayer.currentItem;
+    if (!item) return;
+    if (!(seconds == seconds)) return;  // NaN
+    double total = CMTimeGetSeconds(item.duration);
+    if (total > 0) seconds = MAX(0, MIN(seconds, total - 0.05));
+    if (seconds < 0) seconds = 0;
+    AVPlayer *p = self.internalPlayer;
+    [p seekToTime:CMTimeMakeWithSeconds(seconds, 1000)
+        toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
 }
 
 - (void)seekToSeconds:(double)seconds { [self seekTo:seconds]; }

@@ -33,6 +33,9 @@ FOUNDATION_EXPORT NSString *const MVPathsThumbsDir;
 /// Free space on the device, in bytes.
 + (long long)freeSpace;
 
+/// Total capacity of the device volume, in bytes.
++ (long long)totalSpace;
+
 @end
 
 NS_ASSUME_NONNULL_END

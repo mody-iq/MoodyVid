@@ -56,4 +56,9 @@ NSString *const MVPathsThumbsDir = @"moodyvid-thumbs";
     return [attrs[NSFileSystemFreeSize] longLongValue];
 }
 
++ (long long)totalSpace {
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfFileSystemForPath:[self documents] error:nil];
+    return [attrs[NSFileSystemSize] longLongValue];
+}
+
 @end
