@@ -1,5 +1,6 @@
 #import "MVPlayerCenter.h"
 #import <MediaPlayer/MediaPlayer.h>
+#import <AVKit/AVKit.h>
 #import "MVTheme.h"
 #import "MVLang.h"
 #import "MVPaths.h"
@@ -209,12 +210,14 @@ static CGFloat const kMiniBarHeight = 58;
     }
     self.bar.titleLabel.text = self.currentTitle.length ? self.currentTitle : [MVLang t:@"Now playing"];
     self.bar.pauseButton.selected = !self.isPlaying;
-    [NSLayoutConstraint activateConstraints:@[
-        [self.bar.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:10],
-        [self.bar.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-10],
-        [self.bar.bottomAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.bottomAnchor constant:-52],
-        [self.bar.heightAnchor constraintEqualToConstant:kMiniBarHeight],
-    ]];
+    if (!self.bar.constraints.count && self.bar.superview == window) {
+        [NSLayoutConstraint activateConstraints:@[
+            [self.bar.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:10],
+            [self.bar.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-10],
+            [self.bar.bottomAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.bottomAnchor constant:-52],
+            [self.bar.heightAnchor constraintEqualToConstant:kMiniBarHeight],
+        ]];
+    }
 }
 
 - (void)hideBar {
@@ -236,7 +239,8 @@ static CGFloat const kMiniBarHeight = 58;
             if (w.isKeyWindow) return w;
         }
     }
-    return UIApplication.sharedApplication.connectedScenes.allObjects.firstObject.windows.firstObject;
+    UIWindowScene *ws = (UIWindowScene *)UIApplication.sharedApplication.connectedScenes.allObjects.firstObject;
+    return ws.windows.firstObject;
 }
 
 - (void)syncProgress {
@@ -270,6 +274,11 @@ static CGFloat const kMiniBarHeight = 58;
 - (void)openFullPlayer {
     AVPlayerViewController *full = [AVPlayerViewController new];
     full.player = self.internalPlayer;
+    // The user asked for PiP as a way to keep the video visible over other
+    // apps; iOS 15+ honours it when the background mode is declared.
+    if (@available(iOS 15.0, *)) {
+        full.allowsPictureInPicturePlayback = YES;
+    }
     [full.player play];
     UIViewController *top = [self topViewController];
     if (top) {
