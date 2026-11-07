@@ -425,9 +425,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)forwardTapped { if (self.onSeekForward) self.onSeekForward(); }
 
 - (void)sliderChanged:(UISlider *)slider {
-    if (!_player.currentItem) return;
-    // Fast jump (infinite tolerance): exact frame seeks issued dozens of times
-    // per second while dragging can pile up and freeze playback.
+    AVPlayerItem *item = _player.currentItem;
+    if (!item) return;
+    // Fast jump (infinite tolerance) and drop any earlier seek so the dozens of
+    // ValueChanged events while dragging never stack up and freeze playback.
+    [item cancelPendingSeeks];
     CMTime t = CMTimeMakeWithSeconds(slider.value, 1000);
     [_player seekToTime:t toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
 }
@@ -448,6 +450,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 // "resume after dismissal" from an earlier presentation cannot fight the new
 // state (for example restarting a paused video the user actually stopped).
 @property (nonatomic) NSUInteger generation;
+// Last time an item was swapped. Rapid next/prev taps that land within this
+// window are dropped: swapping twice while the first item is still preparing
+// is another way to wedge AVPlayer.
+@property (nonatomic) NSTimeInterval lastLoadTime;
 // Remembers playback was running when an interruption began, so we can restart
 // it automatically when the interruption ends.
 @property (nonatomic) BOOL wasInterruptedWhilePlaying;
@@ -522,13 +528,17 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)loadItemAtIndex:(NSInteger)index {
     if (index < 0 || index >= (NSInteger)self.queue.count) return;
+    // Debounce item swaps.
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (_lastLoadTime > 0 && now - _lastLoadTime < 0.35) return;
+    _lastLoadTime = now;
+
     self.generation++;
     self.queueIndex = index;
     NSURL *url = self.queue[index];
     NSString *title = index < (NSInteger)self.queueTitles.count && self.queueTitles[index].length
         ? self.queueTitles[index]
         : url.lastPathComponent.stringByDeletingPathExtension;
-    self.currentTitle = title;
 
     [self ensureAudioSession];
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
@@ -541,6 +551,15 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
             [weakSelf syncProgress];
         }];
     }
+
+    // Cancel any seek still running on the old item before swapping it out:
+    // replacing an item while a seek is in flight is a documented way to hang
+    // the player (and with it, the main thread), and rapid prev/next taps
+    // would otherwise stack exactly that. `currentTitle` is told only after
+    // the swap so playback of the new item picks it up.
+    [self.internalPlayer pause];
+    [self.internalPlayer.currentItem cancelPendingSeeks];
+    self.currentTitle = title;
     [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
     [self.internalPlayer play];
     [self refreshMiniBar];
@@ -621,16 +640,18 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 /// The one seek used everywhere. It clamps to the item duration, guards against
-/// NaN/indefinite values (which would freeze AVPlayer), and uses infinite
-/// tolerances so the seek is a fast jump instead of a frame-exact decode.
+/// NaN/indefinite values (which would freeze AVPlayer), uses infinite
+/// tolerances so the seek is a fast jump instead of a frame-exact decode, and
+/// drops any earlier seek so rapid taps cannot stack up.
 - (void)safeSeek:(double)seconds {
-    AVPlayerItem *item = self.internalPlayer.currentItem;
+    AVPlayer *p = self.internalPlayer;
+    AVPlayerItem *item = p.currentItem;
     if (!item) return;
     if (!(seconds == seconds)) return;  // NaN
     double total = CMTimeGetSeconds(item.duration);
     if (total > 0) seconds = MAX(0, MIN(seconds, total - 0.05));
     if (seconds < 0) seconds = 0;
-    AVPlayer *p = self.internalPlayer;
+    [item cancelPendingSeeks];
     [p seekToTime:CMTimeMakeWithSeconds(seconds, 1000)
         toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
 }

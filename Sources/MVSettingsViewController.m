@@ -201,6 +201,16 @@ static CGFloat const kCorner = 18;
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refresh];
+    // The very first appearance lays the table out at zero width; reload once
+    // the frame is real so the rounded cards render correctly.
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_.tableView setNeedsLayout];
+        [self_.tableView layoutIfNeeded];
+        [self_.tableView reloadData];
+    });
 }
 
 - (void)refresh {
