@@ -318,8 +318,12 @@
     tagline.tag = 101;
     tagline.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     tagline.textColor = [MVTheme secondaryText];
-    tagline.numberOfLines = 2;
-    tagline.lineBreakMode = NSLineBreakByWordWrapping;
+    tagline.numberOfLines = 1;
+    // Keep the whole sentence on one line: shrink slightly instead of clipping
+    // it to "حمّل الفيديوهات من أي...".
+    tagline.adjustsFontSizeToFitWidth = YES;
+    tagline.minimumScaleFactor = 0.75;
+    tagline.lineBreakMode = NSLineBreakByTruncatingTail;
 
     MVGradientLabel *brand = [MVGradientLabel new];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
@@ -352,7 +356,8 @@
         [row.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
     ]];
 
-    // Keep the tagline single-line but allow it to shrink gracefully.
+    // Let the layout squeeze the tagline if space is tight, then shrink its
+    // font to keep the whole sentence on one line instead of truncating it.
     [tagline setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     return header;
 }

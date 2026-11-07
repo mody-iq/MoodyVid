@@ -163,6 +163,7 @@ static CGFloat const kCorner = 18;
 
 @interface MVSettingsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UIView *footerBar;
 @property (nonatomic, strong) UILabel *footerLabel;
 @end
 
@@ -187,26 +188,37 @@ static CGFloat const kCorner = 18;
     [self.tableView registerClass:MVSettingsCell.class forCellReuseIdentifier:kCell];
     [self.view addSubview:self.tableView];
 
-    // A credit line pinned to the bottom of the screen. It must sit outside the
-    // table so it never scrolls away: the About section is the last one, but
-    // users still scrolled it off while reading the rows above.
+    // A credit line anchored to the bottom of the screen. It lives in its own
+    // bar (with a background) outside the table, so it never scrolls and never
+    // looks like stray text floating over the rows.
+    self.footerBar = [UIView new];
+    self.footerBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyCardStyle:self.footerBar cornerRadius:0];
+    self.footerBar.layer.borderWidth = 0;
+    [self.view addSubview:self.footerBar];
+
     self.footerLabel = [UILabel new];
     self.footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.footerLabel.text = [MVLang t:@"Made with love"];
     self.footerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.footerLabel.textColor = [MVTheme secondaryText];
     self.footerLabel.textAlignment = NSTextAlignmentCenter;
-    [self.view addSubview:self.footerLabel];
+    [self.footerBar addSubview:self.footerLabel];
 
     [NSLayoutConstraint activateConstraints:@[
         [self.tableView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.footerBar.topAnchor],
 
-        [self.footerLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [self.footerLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
-        [self.footerLabel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-10],
+        [self.footerBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.footerBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.footerBar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+        [self.footerBar.heightAnchor constraintEqualToConstant:44],
+
+        [self.footerLabel.leadingAnchor constraintEqualToAnchor:self.footerBar.leadingAnchor constant:20],
+        [self.footerLabel.trailingAnchor constraintEqualToAnchor:self.footerBar.trailingAnchor constant:-20],
+        [self.footerLabel.centerYAnchor constraintEqualToAnchor:self.footerBar.centerYAnchor],
     ]];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh)
