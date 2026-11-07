@@ -457,6 +457,12 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 // Remembers playback was running when an interruption began, so we can restart
 // it automatically when the interruption ends.
 @property (nonatomic) BOOL wasInterruptedWhilePlaying;
+// Observers on the current item's status, so a file AVPlayer cannot decode
+// (AV1/VP9-in-mp4, a truncated download) is skipped instead of stalling.
+@property (nonatomic, strong, nullable) id itemStatusObserver;
+// Counts back-to-back auto-skips so a folder of undecodable files does not
+// cycle forever; reset whenever the user picks an item deliberately.
+@property (nonatomic) NSInteger consecutiveFailures;
 @end
 
 @implementation MVPlayerCenter
@@ -523,6 +529,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     self.queue = [urls copy];
     self.queueTitles = titles.count == urls.count ? [titles copy] : @[];
     self.queueIndex = index;
+    self.consecutiveFailures = 0;
     [self loadItemAtIndex:index];
 }
 
@@ -597,8 +604,43 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     [self.internalPlayer.currentItem cancelPendingSeeks];
     self.currentTitle = title;
     [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
+    [self watchItem:item forIndex:index];
     [self.internalPlayer play];
     [self refreshMiniBar];
+}
+
+/// Watches the freshly installed item. If AVPlayer cannot decode it (an
+/// AV1/VP9-in-mp4 stream, a truncated download) it reports failed or stalls
+/// with a nil error — either way we skip to the next item so the app never
+/// sits on a black frame.
+- (void)watchItem:(AVPlayerItem *)item forIndex:(NSInteger)index {
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    if (self.itemStatusObserver) [nc removeObserver:self.itemStatusObserver];
+
+    __weak typeof(self) weakSelf = self;
+    self.itemStatusObserver = [nc addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+                                              object:item queue:NSOperationQueue.mainQueue
+                                          usingBlock:^(NSNotification *note) {
+        [weakSelf itemFailedToPlay:index];
+    }];
+
+    // A status that never reaches "ready" means the decoder rejected the file.
+    // Give it a couple of seconds, then move on rather than hang on black.
+    NSUInteger gen = self.generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) self_ = weakSelf;
+        if (!self_ || self_.generation != gen) return;
+        if (self_.internalPlayer.currentItem != item) return;
+        if (item.status == AVPlayerItemStatusFailed) { [self_ itemFailedToPlay:index]; }
+    });
+}
+
+- (void)itemFailedToPlay:(NSInteger)index {
+    if (self.queue.count < 2) return;              // nothing else to try
+    if (index != self.queueIndex) return;          // a newer item already took over
+    if (self.consecutiveFailures >= (NSInteger)self.queue.count) return;  // all bad; stop cycling
+    self.consecutiveFailures++;
+    [self playNext];
 }
 
 /// Walks from the skipped URL to the nearest playable sibling in the queue,
@@ -623,6 +665,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)playNext {
     if (self.queue.count < 2) return;
+    self.consecutiveFailures = 0;
     NSInteger next = self.queueIndex + 1;
     if (next >= (NSInteger)self.queue.count) next = 0;
     [self loadItemAtIndex:next direction:1 attempts:0];
@@ -631,6 +674,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)playPrevious {
     if (self.queue.count < 2) return;
+    self.consecutiveFailures = 0;
     CMTime cur = self.internalPlayer.currentTime;
     // Tap again at the start of the item to restart it, like most players.
     // Guard against an item that is still preparing (indefinite time would
@@ -663,10 +707,15 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)stop {
     self.generation++;
+    if (self.itemStatusObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.itemStatusObserver];
+        self.itemStatusObserver = nil;
+    }
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = NO;
     self.queue = nil;
     self.queueTitles = nil;
+    self.consecutiveFailures = 0;
     [self hideBar];
 }
 
