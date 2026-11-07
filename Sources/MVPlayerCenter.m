@@ -161,7 +161,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 /// AVPlayerViewController, which pauses its player on dismissal), so the audio
 /// simply keeps playing when the sheet closes and the mini bar takes over —
 /// no resume polling, no audible gap.
-@interface MVFullPlayerViewController : UIViewController
+@interface MVFullPlayerViewController : UIViewController <UIGestureRecognizerDelegate>
 @property (nonatomic, strong, nullable) AVPlayer *player;
 @property (nonatomic, copy, nullable) void (^onClose)(void);
 @property (nonatomic, copy, nullable) void (^onPrev)(void);
@@ -181,6 +181,12 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     UIButton *_nextButton;
     UIButton *_backButton;
     UIButton *_forwardButton;
+    UIButton *_closeButton;
+    UIView *_glass;
+    UIStackView *_row;
+    NSArray<UIView *> *_chrome;
+    BOOL _chromeHidden;
+    NSTimer *_hideTimer;
     AVPlayer * _Nullable _player;
     id _periodicObserver;
 }
@@ -214,12 +220,12 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_titleLabel];
 
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    [close setImage:[UIImage systemImageNamed:@"chevron.down"] forState:UIControlStateNormal];
-    close.tintColor = [MVTheme text];
-    close.translatesAutoresizingMaskIntoConstraints = NO;
-    [close addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:close];
+    _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_closeButton setImage:[UIImage systemImageNamed:@"chevron.down"] forState:UIControlStateNormal];
+    _closeButton.tintColor = [MVTheme text];
+    _closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_closeButton addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_closeButton];
 
     _timeLabel = [UILabel new];
     _timeLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
@@ -258,22 +264,35 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     row.translatesAutoresizingMaskIntoConstraints = NO;
     for (UIButton *b in controls) [row addArrangedSubview:b];
     [self.view addSubview:row];
+    _row = row;
 
     // Glass control bar behind the transport row.
     UIView *glass = [UIView new];
     glass.translatesAutoresizingMaskIntoConstraints = NO;
     [MVTheme applyCardStyle:glass cornerRadius:22];
     [self.view insertSubview:glass belowSubview:row];
+    _glass = glass;
+
+    // Everything that hides on a tap, like every other video player: the title,
+    // the close button, the scrubber, the times and the whole transport bar.
+    _chrome = @[_titleLabel, _closeButton, _timeLabel, _slider, glass, row];
+
+    // Tap anywhere on the picture to hide/show the controls. The gesture must not
+    // swallow taps meant for the buttons, so it ignores touches on them.
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleChrome)];
+    tap.delegate = self;
+    tap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:tap];
 
     [NSLayoutConstraint activateConstraints:@[
         [_titleLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:18],
         [_titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:56],
         [_titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-56],
 
-        [close.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [close.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
-        [close.widthAnchor constraintEqualToConstant:40],
-        [close.heightAnchor constraintEqualToConstant:40],
+        [_closeButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [_closeButton.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_closeButton.widthAnchor constraintEqualToConstant:40],
+        [_closeButton.heightAnchor constraintEqualToConstant:40],
 
         [row.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [row.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-34],
@@ -342,6 +361,8 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self syncPlayIcon];
+    // Start with the controls visible, then let them fade like a normal player.
+    [self scheduleChromeHide];
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
@@ -353,6 +374,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)dealloc {
+    [_hideTimer invalidate];
     if (_periodicObserver) {
         [_player removeTimeObserver:_periodicObserver];
     }
@@ -410,6 +432,56 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)closeTapped {
     if (self.onClose) self.onClose();
     [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+#pragma mark - Chrome show/hide
+
+/// Tapping the picture toggles the controls, and they fade away on their own
+/// while playing — the behaviour every video player has and this one was missing.
+- (void)toggleChrome {
+    if (_chromeHidden) {
+        [self setChromeHidden:NO];
+        [self scheduleChromeHide];
+    } else {
+        [self setChromeHidden:YES];
+    }
+}
+
+- (void)setChromeHidden:(BOOL)hidden {
+    if (_chromeHidden == hidden) return;
+    _chromeHidden = hidden;
+    [self cancelChromeHide];
+    [UIView animateWithDuration:0.25 animations:^{
+        for (UIView *v in self->_chrome) v.alpha = hidden ? 0 : 1;
+    }];
+    if (!hidden) [self scheduleChromeHide];
+}
+
+/// Hides the controls again a few seconds after they appear, but only while the
+/// video is actually playing — pausing keeps them up so the user can scrub.
+- (void)scheduleChromeHide {
+    [self cancelChromeHide];
+    __weak typeof(self) weakSelf = self;
+    _hideTimer = [NSTimer scheduledTimerWithTimeInterval:4.0 repeats:NO block:^(NSTimer *t) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        if (self_->_player.rate != 0) [self_ setChromeHidden:YES];
+    }];
+}
+
+- (void)cancelChromeHide {
+    [_hideTimer invalidate];
+    _hideTimer = nil;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
+    // A tap that lands on a control must not also toggle the chrome.
+    UIView *v = touch.view;
+    while (v) {
+        if ([v isKindOfClass:UIControl.class]) return NO;
+        v = v.superview;
+    }
+    return YES;
 }
 
 - (void)playTapped {
@@ -636,6 +708,14 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
     if (!self.internalPlayer) {
         self.internalPlayer = [AVPlayer new];
+        // Without this, iOS pauses *video* playback the moment the app leaves the
+        // foreground (the default "automatic" policy stops audiovisual content).
+        // Audio-only was fine, which is why the lock screen showed controls while
+        // the picture had already frozen. Ask the system to keep going instead.
+        if (@available(iOS 15.0, *)) {
+            self.internalPlayer.audiovisualBackgroundPlaybackPolicy =
+                AVPlayerAudiovisualBackgroundPlaybackPolicyContinuesIfPossible;
+        }
         __weak typeof(self) weakSelf = self;
         self.timeObserver = [self.internalPlayer addPeriodicTimeObserverForInterval:CMTimeMakeWithSeconds(0.25, 600)
                                                                              queue:dispatch_get_main_queue()

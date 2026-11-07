@@ -36,6 +36,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 @property (nonatomic, strong) UIButton *forwardButton;
 @property (nonatomic, strong) UIButton *nextButton;
 @property (nonatomic, strong) UIButton *cardCloseButton;
+@property (nonatomic, strong) UIButton *expandButton;
 @property (nonatomic, strong) UISlider *cardSlider;
 @property (nonatomic, strong) UILabel *cardTimeLabel;
 @property (nonatomic, assign) BOOL cardOpen;
@@ -256,6 +257,18 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [self.cardCloseButton addTarget:self action:@selector(closeInlinePlayer) forControlEvents:UIControlEventTouchUpInside];
     [self.playerCard addSubview:self.cardCloseButton];
 
+    // Opens the same playback full screen, where the controls can hide and the
+    // picture is much bigger than this inline card allows.
+    self.expandButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.expandButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.expandButton setImage:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"] forState:UIControlStateNormal];
+    self.expandButton.tintColor = [MVTheme text];
+    self.expandButton.backgroundColor = [[MVTheme background] colorWithAlphaComponent:0.35];
+    self.expandButton.layer.cornerRadius = 15;
+    self.expandButton.clipsToBounds = YES;
+    [self.expandButton addTarget:self action:@selector(expandInlinePlayer) forControlEvents:UIControlEventTouchUpInside];
+    [self.playerCard addSubview:self.expandButton];
+
     UILayoutPriority inner = UILayoutPriorityDefaultHigh;
     NSLayoutConstraint *surfaceTop = [self.videoSurface.topAnchor constraintEqualToAnchor:self.playerCard.topAnchor constant:12];
     surfaceTop.priority = inner;
@@ -277,6 +290,11 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [self.cardCloseButton.centerYAnchor constraintEqualToAnchor:self.videoSurface.topAnchor constant:16],
         [self.cardCloseButton.widthAnchor constraintEqualToConstant:30],
         [self.cardCloseButton.heightAnchor constraintEqualToConstant:30],
+
+        [self.expandButton.centerYAnchor constraintEqualToAnchor:self.cardCloseButton.centerYAnchor],
+        [self.expandButton.trailingAnchor constraintEqualToAnchor:self.cardCloseButton.leadingAnchor constant:-8],
+        [self.expandButton.widthAnchor constraintEqualToConstant:30],
+        [self.expandButton.heightAnchor constraintEqualToConstant:30],
 
         [self.nowTitleLabel.topAnchor constraintEqualToAnchor:self.videoSurface.bottomAnchor constant:10],
         [self.nowTitleLabel.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:16],
@@ -382,9 +400,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     // Height derived from the card's real width so there is no empty band
     // under the transport on very wide phones.
-    CGFloat contentW = self.headerView.bounds.size.width - 32.0;
-    if (contentW <= 0) contentW = 320.0;
-    self.cardHeight.constant = contentW * 9.0 / 16.0 + 148.0;
+    [self updateCardHeight];
     [self.headerView layoutIfNeeded];
     [self sizeHeaderToFit];
     [self cardStateChanged];
@@ -441,6 +457,13 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [[MVPlayerCenter shared] showFloatingBar];
 }
 
+/// Moves the inline playback to the full-screen player, where the picture is
+/// larger and the controls can be hidden. The card stays open underneath, so
+/// dismissing the full player returns to the same inline view.
+- (void)expandInlinePlayer {
+    [[MVPlayerCenter shared] presentCurrentPlayer];
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     // Moving to another tab or folder: playback continues via the mini bar so
@@ -450,12 +473,34 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     }
 }
 
+/// Recomputes the card height from the current width. Called on open and again
+/// whenever the view resizes, because rotation changes the width and a stale
+/// 9:16 height would leave a gap (or clip the transport) after the turn.
+- (void)updateCardHeight {
+    if (!self.cardOpen) return;
+    CGFloat contentW = self.headerView.bounds.size.width - 32.0;
+    if (contentW <= 0) contentW = self.view.bounds.size.width - 32.0;
+    if (contentW <= 0) contentW = 320.0;
+    self.cardHeight.constant = contentW * 9.0 / 16.0 + 148.0;
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     for (CALayer *layer in [self.view.layer.sublayers copy]) {
         if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
     }
     if (self.videoLayer) self.videoLayer.frame = self.videoSurface.bounds;
+
+    // A rotation changes the width: resize the card and re-fit the header so the
+    // video keeps its 16:9 shape and the transport stays attached to it.
+    if (self.cardOpen) {
+        CGFloat before = self.cardHeight.constant;
+        [self updateCardHeight];
+        if (fabs(before - self.cardHeight.constant) > 0.5) {
+            [self.headerView layoutIfNeeded];
+            [self sizeHeaderToFit];
+        }
+    }
 }
 
 /// The header is sized by its bottom constraint, so the table needs an explicit
