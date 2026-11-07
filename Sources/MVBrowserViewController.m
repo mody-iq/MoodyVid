@@ -4,6 +4,7 @@
 #import "MVTheme.h"
 #import "MVPaths.h"
 #import "MVDownloadEngine.h"
+#import "MVPlayerCenter.h"
 #import <WebKit/WebKit.h>
 
 /// Injected into every page. It finds the most promising playing video and adds
@@ -63,6 +64,7 @@ static NSString *const kMessageHandler = @"moodyvid";
 @property (nonatomic, strong) UIButton *forwardButton;
 @property (nonatomic, strong) UIButton *favoriteButton;
 @property (nonatomic, strong) UIButton *downloadButton;
+@property (nonatomic, strong) UIButton *minimizeButton;
 @property (nonatomic, strong) UIStackView *foundBar;
 @property (nonatomic, strong) UILabel *foundLabel;
 @property (nonatomic, copy, nullable) NSString *foundURL;
@@ -76,7 +78,116 @@ static NSString *const kMessageHandler = @"moodyvid";
 @property (nonatomic, copy, nullable) NSString *initialURL;
 /// YES when this instance is a popup opened by a page, which gets a Close button.
 @property (nonatomic) BOOL isPopup;
+/// Where the page was scrolled to when the user minimized it, so returning to
+/// the parked browser lands on the same spot instead of the top.
+@property (nonatomic) double savedScrollY;
+
+- (void)minimize;
++ (void)restoreParked;
++ (void)discardParked;
++ (void)showParkedCard;
++ (void)hideParkedCard;
++ (void)moveParkedCardForPlayer;
++ (nullable UIViewController *)topPresenter;
 @end
+
+#pragma mark - Parked (minimized) browser
+
+/// The floating chip that stands in for a browser the user minimized. Tapping it
+/// brings the same page back; it is the browser's answer to the player's mini bar.
+@interface MVBrowserParkedCard : UIView <UIGestureRecognizerDelegate>
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, copy, nullable) void (^onTap)(void);
+@property (nonatomic, copy, nullable) void (^onClose)(void);
+@end
+
+@implementation MVBrowserParkedCard
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.backgroundColor = [MVTheme glassCard];
+        self.layer.cornerRadius = 16;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.layer.borderWidth = 0.5;
+        self.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.18].CGColor;
+        self.layer.shadowColor = UIColor.blackColor.CGColor;
+        self.layer.shadowOpacity = 0.3;
+        self.layer.shadowRadius = 12;
+        self.layer.shadowOffset = CGSizeMake(0, 5);
+
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:
+                                     [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+        glass.frame = self.bounds;
+        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        glass.layer.cornerRadius = 16;
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        glass.layer.masksToBounds = YES;
+        [self insertSubview:glass atIndex:0];
+
+        UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"globe"]];
+        icon.tintColor = [MVTheme accent];
+        icon.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:icon];
+
+        _titleLabel = [UILabel new];
+        _titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        _titleLabel.textColor = [MVTheme text];
+        _titleLabel.numberOfLines = 1;
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:_titleLabel];
+
+        UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+        [close setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+        close.tintColor = [MVTheme secondaryText];
+        close.translatesAutoresizingMaskIntoConstraints = NO;
+        [close addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:close];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14],
+            [icon.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [icon.widthAnchor constraintEqualToConstant:22],
+            [icon.heightAnchor constraintEqualToConstant:22],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:10],
+            [_titleLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:close.leadingAnchor constant:-8],
+
+            [close.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
+            [close.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [close.widthAnchor constraintEqualToConstant:32],
+            [close.heightAnchor constraintEqualToConstant:32],
+
+            [self.heightAnchor constraintEqualToConstant:52],
+        ]];
+
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)];
+        tap.delegate = self;
+        [self addGestureRecognizer:tap];
+    }
+    return self;
+}
+
+- (void)tapped { if (self.onTap) self.onTap(); }
+- (void)closeTapped { if (self.onClose) self.onClose(); }
+
+/// The tap that restores the browser must not also fire when the user aimed at
+/// the close button, otherwise a close would immediately reopen the page.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
+    return ![touch.view isKindOfClass:UIControl.class];
+}
+
+@end
+
+/// The one browser parked at a time, plus its card. Kept as file statics because
+/// a parked browser outlives the view controller that was dismissed to park it.
+static MVBrowserViewController *gParkedBrowser = nil;
+static UINavigationController *gParkedNav = nil;
+static MVBrowserParkedCard *gParkedCard = nil;
+static NSLayoutConstraint *gParkedCardBottom = nil;
+static id gParkedObserver = nil;
+
 
 @implementation MVBrowserViewController
 
@@ -113,16 +224,159 @@ static NSString *const kMessageHandler = @"moodyvid";
 #pragma mark - Presentation
 
 + (void)presentFrom:(UIViewController *)presenter url:(NSString *)url {
-    MVBrowserViewController *browser = [MVBrowserViewController new];
     NSString *address = url;
     if (![address containsString:@"://"] && address.length) {
         address = [@"https://" stringByAppendingString:address];
     }
+
+    // If a page is already parked, bring it back rather than opening a second
+    // browser on top of it — that is what the minimize button promised the user.
+    // Tapping a *different* site reuses the same browser and just navigates it.
+    if (gParkedBrowser) {
+        [MVBrowserViewController restoreParked];
+        NSString *current = gParkedBrowser.web.URL.absoluteString ?: @"";
+        if (address.length && ![address isEqualToString:current]) {
+            [gParkedBrowser loadAddress:address];
+        }
+        return;
+    }
+
+    MVBrowserViewController *browser = [MVBrowserViewController new];
     browser.initialURL = address;
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:browser];
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
     [presenter presentViewController:nav animated:YES completion:nil];
 }
+
+#pragma mark - Minimize / restore
+
+/// Minimizes the browser: the page keeps running in the background, a small chip
+/// stands in for it, and tapping that chip returns to the exact same page and
+/// scroll position. This is the browser's twin of the player's mini bar.
+- (void)minimize {
+    // Remember where the page was so the restore lands in the same place.
+    [self.web evaluateJavaScript:@"window.scrollY || 0" completionHandler:^(id result, NSError *error) {
+        if ([result isKindOfClass:NSNumber.class]) self.savedScrollY = [result doubleValue];
+    }];
+
+    gParkedBrowser = self;
+    gParkedNav = self.navigationController;
+
+    [self dismissViewControllerAnimated:YES completion:^{
+        [MVBrowserViewController showParkedCard];
+    }];
+}
+
+/// Re-presents the parked browser with its page intact.
++ (void)restoreParked {
+    MVBrowserViewController *browser = gParkedBrowser;
+    if (!browser) return;
+
+    UINavigationController *nav = gParkedNav ?: [[UINavigationController alloc] initWithRootViewController:browser];
+    [MVBrowserViewController hideParkedCard];
+
+    UIViewController *presenter = [MVBrowserViewController topPresenter];
+    if (!presenter) return;
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    [presenter presentViewController:nav animated:YES completion:^{
+        // Scroll back to where the user left off.
+        double y = browser.savedScrollY;
+        if (y > 0) {
+            NSString *js = [NSString stringWithFormat:@"window.scrollTo(0, %f);", y];
+            [browser.web evaluateJavaScript:js completionHandler:nil];
+        }
+    }];
+}
+
+/// Fully closes the parked browser and releases it.
++ (void)discardParked {
+    MVBrowserViewController *browser = gParkedBrowser;
+    [browser.web evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
+                  completionHandler:nil];
+    [MVBrowserViewController hideParkedCard];
+    gParkedBrowser = nil;
+    gParkedNav = nil;
+}
+
++ (UIViewController *)topPresenter {
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
+    }
+    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+
+    UIViewController *top = window.rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    return top;
+}
+
++ (void)showParkedCard {
+    if (!gParkedBrowser) return;
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
+    }
+    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+    if (!window) return;
+
+    if (!gParkedCard) {
+        gParkedCard = [[MVBrowserParkedCard alloc] initWithFrame:CGRectZero];
+        gParkedCard.onTap = ^{ [MVBrowserViewController restoreParked]; };
+        gParkedCard.onClose = ^{ [MVBrowserViewController discardParked]; };
+    }
+    NSString *title = gParkedBrowser.web.title;
+    if (!title.length) title = gParkedBrowser.web.URL.host ?: [MVLang t:@"Browser"];
+    gParkedCard.titleLabel.text = title;
+
+    if (gParkedCard.superview != window) {
+        [gParkedCard removeFromSuperview];
+        [window addSubview:gParkedCard];
+        gParkedCardBottom = [gParkedCard.bottomAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.bottomAnchor constant:-54];
+        [NSLayoutConstraint activateConstraints:@[
+            [gParkedCard.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:10],
+            [gParkedCard.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-10],
+            gParkedCardBottom,
+        ]];
+    }
+    [MVBrowserViewController moveParkedCardForPlayer];
+    gParkedCard.hidden = NO;
+    gParkedCard.alpha = 0;
+    [UIView animateWithDuration:0.2 animations:^{ gParkedCard.alpha = 1; }];
+
+    // Watch the player so the two floating bars never sit on top of each other.
+    if (!gParkedObserver) {
+        gParkedObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVPlayerBarVisibilityDidChangeNotification
+                                                                        object:nil queue:NSOperationQueue.mainQueue
+                                                                    usingBlock:^(NSNotification *note) {
+            [MVBrowserViewController moveParkedCardForPlayer];
+        }];
+    }
+}
+
+/// Lifts the parked card above the player's mini bar when that bar is on screen.
++ (void)moveParkedCardForPlayer {
+    if (!gParkedCardBottom) return;
+    BOOL playerUp = MVPlayerCenter.shared.floatingBarVisible;
+    gParkedCardBottom.constant = playerUp ? -146 : -54;
+    [gParkedCard.superview layoutIfNeeded];
+}
+
++ (void)hideParkedCard {
+    if (!gParkedCard) return;
+    MVBrowserParkedCard *card = gParkedCard;
+    [UIView animateWithDuration:0.2 animations:^{
+        card.alpha = 0;
+    } completion:^(BOOL done) {
+        [card removeFromSuperview];
+    }];
+}
+
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -140,6 +394,15 @@ static NSString *const kMessageHandler = @"moodyvid";
             [[UIBarButtonItem alloc] initWithTitle:[MVLang t:@"Close"]
                                             style:UIBarButtonItemStylePlain
                                            target:self action:@selector(close)];
+    } else {
+        // Same idea as the chevron on the video player: shrink the browser into a
+        // floating chip and keep the page alive, so coming back lands on the very
+        // same page instead of reloading from the top.
+        UIBarButtonItem *minimize = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]
+                                                                     style:UIBarButtonItemStylePlain
+                                                                    target:self action:@selector(minimize)];
+        minimize.accessibilityLabel = [MVLang t:@"Minimize"];
+        self.navigationItem.leftBarButtonItem = minimize;
     }
 
     if (self.initialURL.length) [self loadAddress:self.initialURL];
@@ -147,6 +410,9 @@ static NSString *const kMessageHandler = @"moodyvid";
 }
 
 - (void)close {
+    // A deliberate close throws the parked browser away too, so it cannot pop
+    // back later as a stale chip.
+    if (gParkedBrowser == self) [MVBrowserViewController discardParked];
     // Stop the page's own playback so it does not keep running behind the app.
     [self.web evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
                completionHandler:nil];

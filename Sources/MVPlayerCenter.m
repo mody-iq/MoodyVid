@@ -9,6 +9,8 @@ static CGFloat const kMiniBarHeight = 80;
 static CGFloat const kMiniThumb = 46;
 static CGFloat const kSeekSeconds = 15.0;
 
+NSNotificationName const MVPlayerBarVisibilityDidChangeNotification = @"MVPlayerBarVisibilityDidChangeNotification";
+
 /// A small tinted icon button used in the mini bar.
 static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -828,6 +830,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         ]];
     }
     self.bar.alpha = 1;
+    [NSNotificationCenter.defaultCenter postNotificationName:MVPlayerBarVisibilityDidChangeNotification object:self];
 }
 
 - (void)hideBar {
@@ -836,11 +839,14 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         self.bar.alpha = 0;
     } completion:^(BOOL done) {
         if (self.bar.superview) [self.bar removeFromSuperview];
+        [NSNotificationCenter.defaultCenter postNotificationName:MVPlayerBarVisibilityDidChangeNotification object:self];
     }];
 }
 
 - (void)hideFloatingBar { [self hideBar]; }
 - (void)showFloatingBar { [self showBar]; }
+
+- (BOOL)floatingBarVisible { return self.bar.superview != nil && self.bar.alpha > 0.01; }
 
 - (UIWindow *)keyWindow {
     UIWindow *candidate = nil;

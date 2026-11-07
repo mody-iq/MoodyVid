@@ -3,6 +3,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// Posted whenever the floating mini bar is shown or hidden, so other floating
+/// UI (for example the parked in-app browser) can move out of its way.
+FOUNDATION_EXPORT NSNotificationName const MVPlayerBarVisibilityDidChangeNotification;
+
 /// A single, always-on AVPlayer owned by the app rather than by one screen.
 ///
 /// Playback started from Downloads or Files keeps playing while the user moves
@@ -46,6 +50,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// YES when there is more than one item, so previous/next are meaningful.
 @property (nonatomic, readonly) BOOL hasQueue;
 @property (nonatomic, readonly) NSInteger queueIndex;
+
+/// YES while the floating mini bar is actually on screen. Other floating UI
+/// (like the parked in-app browser) uses this to move out of its way.
+@property (nonatomic, readonly) BOOL floatingBarVisible;
 
 /// Skips by the player's fixed step (used by the 15-second buttons).
 - (void)seekForward;
