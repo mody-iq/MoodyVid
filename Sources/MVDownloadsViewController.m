@@ -484,7 +484,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)playFile:(MVDownloadRecord *)record {
     // Hand the whole visible list to the player so its previous/next buttons
-    // move through the downloads. Only finished rows with a file are playable.
+    // move through the downloads. Only finished rows with a playable file are
+    // included — WebM/MKV would hang AVPlayer when next/prev landed on them.
+    static NSSet<NSString *> *playable;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        playable = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"]];
+    });
+
     NSArray<MVDownloadRecord *> *records = [self records];
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
     NSMutableArray<NSString *> *titles = [NSMutableArray array];
@@ -492,11 +499,23 @@ static NSString *const kDoneCell = @"MVDoneCell";
     for (NSUInteger i = 0; i < records.count; i++) {
         MVDownloadRecord *r = records[i];
         if (r.state != MVDownloadStateCompleted || r.path.length == 0) continue;
+        if (![playable containsObject:r.path.pathExtension.lowercaseString]) continue;
         [urls addObject:[NSURL fileURLWithPath:r.path]];
         [titles addObject:r.title.length ? r.title : r.path.lastPathComponent.stringByDeletingPathExtension];
         if (r == record) index = (NSInteger)urls.count - 1;
     }
-    if (!urls.count) return;
+    if (!urls.count) {
+        NSString *ext = record.path.pathExtension.lowercaseString;
+        if ([ext isEqualToString:@"webm"] || [ext isEqualToString:@"mkv"]) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:[MVLang t:@"Can't play this file"]
+                                 message:[MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+        return;
+    }
 
     [[MVPlayerCenter shared] playQueue:urls titles:titles fromIndex:index];
     if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {
