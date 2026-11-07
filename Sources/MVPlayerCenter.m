@@ -565,6 +565,8 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
                                                    name:AVAudioSessionInterruptionNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleRouteChange:)
                                                    name:AVAudioSessionRouteChangeNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleEnterBackground:)
+                                                   name:UIApplicationDidEnterBackgroundNotification object:nil];
     }
     return self;
 }
@@ -1032,6 +1034,16 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         [self.internalPlayer pause];
         self.bar.pauseButton.selected = YES;
     }
+}
+
+/// On the way out, make sure the session is still active and the player is still
+/// running. iOS can deactivate the session as the app suspends; re-asserting it
+/// here is what keeps the audio going once the app is in the background.
+- (void)handleEnterBackground:(NSNotification *)note {
+    if (!self.isPlaying) return;
+    [self ensureAudioSession];
+    [self.internalPlayer play];
+    [self updateNowPlayingInfo];
 }
 
 - (void)openFullPlayer {
