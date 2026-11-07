@@ -333,6 +333,8 @@ static id gParkedObserver = nil;
     NSString *title = gParkedBrowser.web.title;
     if (!title.length) title = gParkedBrowser.web.URL.host ?: [MVLang t:@"Browser"];
     gParkedCard.titleLabel.text = title;
+    gParkedCard.accessibilityLabel = title;
+    gParkedCard.accessibilityHint = [MVLang t:@"Tap to return to the page"];
 
     if (gParkedCard.superview != window) {
         [gParkedCard removeFromSuperview];
