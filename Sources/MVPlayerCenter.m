@@ -527,18 +527,105 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)loadItemAtIndex:(NSInteger)index {
+    [self loadItemAtIndex:index direction:0 attempts:0];
+}
+
+/// Purely file-extension based: the formats AVPlayer can actually decode.
+/// Anything else (WebM, MKV, …) must never reach replaceCurrentItem, which
+/// blocks the main thread forever when the player cannot handle the file.
++ (NSArray<NSString *> *)playableExtensions {
+    return @[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"];
+}
+
++ (BOOL)urlIsPlayable:(NSURL *)url {
+    NSString *ext = url.pathExtension.lowercaseString;
+    if (!ext.length) return YES;  // unknown container; let the async precheck judge
+    return [[self playableExtensions] containsObject:ext];
+}
+
+- (void)loadItemAtIndex:(NSInteger)index direction:(NSInteger)direction attempts:(NSUInteger)attempts {
     if (index < 0 || index >= (NSInteger)self.queue.count) return;
+    // A runaway fallback loop must not spin forever on a fully broken queue.
+    if (attempts > (NSUInteger)self.queue.count + 1) { [self refreshMiniBar]; return; }
+
+    NSURL *url = self.queue[index];
+
+    // Hard stop for containers AVPlayer cannot decode: skip to the neighbour
+    // instead of hanging the app.
+    if (![MVPlayerCenter urlIsPlayable:url]) {
+        [self loadNextPlayable:url direction:direction attempts:attempts + 1];
+        return;
+    }
+
     // Debounce item swaps.
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     if (_lastLoadTime > 0 && now - _lastLoadTime < 0.35) return;
     _lastLoadTime = now;
 
     self.generation++;
+    NSUInteger gen = self.generation;
     self.queueIndex = index;
-    NSURL *url = self.queue[index];
     NSString *title = index < (NSInteger)self.queueTitles.count && self.queueTitles[index].length
         ? self.queueTitles[index]
         : url.lastPathComponent.stringByDeletingPathExtension;
+
+    [self ensureAudioSession];
+
+    // The files are local, so inspect the container asynchronously first.
+    // If it turns out to be corrupt or otherwise unplayable, skip it the same
+    // way we skip disallowed extensions — we must never hand AVPlayer an item
+    // it cannot open, because replaceCurrentItemWithPlayerItem then blocks the
+    // main thread and the whole app.
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    __weak typeof(self) weakSelf = self;
+    [asset loadValuesAsynchronouslyForKeys:@[@"playable", @"tracks"] completionHandler:^{
+        typeof(self) self_ = weakSelf;
+        if (!self_ || self_.generation != gen) return;  // superseded
+        NSError *err = nil;
+        [asset statusOfValueForKey:@"playable" error:&err];
+        BOOL usable = !err && asset.isPlayable && asset.tracks.count > 0;
+        if (!usable) {
+            // Not decodable after all: skip to the next candidate rather than
+            // hand AVPlayer an item that would hang the main thread.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self_ loadNextPlayable:url direction:direction attempts:attempts + 1];
+            });
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Double check the debounce still lets this swap through.
+            NSTimeInterval now2 = NSProcessInfo.processInfo.systemUptime;
+            if (self_.lastLoadTime > 0 && now2 - self_.lastLoadTime < 0.35) return;
+            if (self_.generation != gen) return;
+            [self_ swapToItemAtIndex:index title:title url:url];
+        });
+    }];
+}
+
+/// Walks from the given URL to the first playable sibling in the same queue,
+/// clockwise or counter-clockwise, then loads it.
+- (void)loadNextPlayable:(NSURL *)skippedURL direction:(NSInteger)direction attempts:(NSUInteger)attempts {
+    NSInteger n = (NSInteger)self.queue.count;
+    if (n < 1) { [self refreshMiniBar]; return; }
+    NSInteger start = [self.queue indexOfObject:skippedURL];
+    if (start == NSNotFound) start = self.queueIndex;
+    for (NSInteger step = 1; step <= n; step++) {
+        NSInteger idx;
+        if (direction > 0) idx = (start + step) % n;
+        else if (direction < 0) idx = (start - step % n + n) % n;
+        else idx = (start + step) % n;
+        if (idx == start) continue;
+        NSURL *candidate = self.queue[idx];
+        if ([MVPlayerCenter urlIsPlayable:candidate]) {
+            [self loadItemAtIndex:idx direction:direction attempts:attempts];
+            return;
+        }
+    }
+    [self refreshMiniBar];
+}
+
+- (void)swapToItemAtIndex:(NSInteger)index title:(NSString *)title url:(NSURL *)url {
+    if (index != self.queueIndex) self.generation++;
 
     [self ensureAudioSession];
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
@@ -569,7 +656,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     if (self.queue.count < 2) return;
     NSInteger next = self.queueIndex + 1;
     if (next >= (NSInteger)self.queue.count) next = 0;
-    [self loadItemAtIndex:next];
+    [self loadItemAtIndex:next direction:1 attempts:0];
     [self refreshMiniBar];
 }
 
@@ -585,7 +672,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     }
     NSInteger prev = self.queueIndex - 1;
     if (prev < 0) prev = (NSInteger)self.queue.count - 1;
-    [self loadItemAtIndex:prev];
+    [self loadItemAtIndex:prev direction:-1 attempts:0];
     [self refreshMiniBar];
 }
 

@@ -163,6 +163,7 @@ static CGFloat const kCorner = 18;
 
 @interface MVSettingsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UILabel *footerLabel;
 @end
 
 @implementation MVSettingsViewController
@@ -181,15 +182,31 @@ static CGFloat const kCorner = 18;
     self.tableView.delegate = self;
     self.tableView.rowHeight = 62;
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    self.tableView.contentInset = UIEdgeInsetsMake(0, 0, 40, 0);
+    self.tableView.contentInset = UIEdgeInsetsMake(0, 0, 64, 0);
     self.tableView.tableFooterView = [UIView new];
     [self.tableView registerClass:MVSettingsCell.class forCellReuseIdentifier:kCell];
     [self.view addSubview:self.tableView];
+
+    // A credit line pinned to the bottom of the screen. It must sit outside the
+    // table so it never scrolls away: the About section is the last one, but
+    // users still scrolled it off while reading the rows above.
+    self.footerLabel = [UILabel new];
+    self.footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.footerLabel.text = [MVLang t:@"Made with love"];
+    self.footerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.footerLabel.textColor = [MVTheme secondaryText];
+    self.footerLabel.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:self.footerLabel];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.tableView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [self.footerLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
+        [self.footerLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [self.footerLabel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-10],
     ]];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh)
@@ -216,6 +233,8 @@ static CGFloat const kCorner = 18;
 - (void)refresh {
     self.title = [MVLang t:@"More"];
     [MVTheme applyWallpaperTo:self.view];
+    self.footerLabel.text = [MVLang t:@"Made with love"];
+    self.footerLabel.textColor = [MVTheme secondaryText];
     [self.tableView reloadData];
 }
 
@@ -291,28 +310,11 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    return section == MVMoreSectionAbout ? 60 : 2;
+    return 2;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    if (section != MVMoreSectionAbout) return [UIView new];
-
-    UIView *box = [UIView new];
-    box.backgroundColor = UIColor.clearColor;
-
-    UILabel *label = [UILabel new];
-    label.text = [MVLang t:@"Made with love"];
-    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-    label.textColor = [MVTheme secondaryText];
-    label.textAlignment = NSTextAlignmentCenter;
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    [box addSubview:label];
-    [NSLayoutConstraint activateConstraints:@[
-        [label.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:20],
-        [label.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-20],
-        [label.topAnchor constraintEqualToAnchor:box.topAnchor constant:14],
-    ]];
-    return box;
+    return [UIView new];
 }
 
 /// The mask bits a row needs so all cells of one section merge into a single

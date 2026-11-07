@@ -36,9 +36,9 @@ def _selector(quality):
 # hand out DASH-only streams (video and sound apart) for most videos. Try the
 # styles that still expose a combined file, in order, and remember the one that
 # worked so the next video starts there instead of repeating the failures.
-# "tv_simply" usually yields a combined stream in one fast round, so it is tried
-# first and the slow default client probe comes last.
-PLAYER_CLIENTS = [["tv_simply", "web_safari"], ["android"], ["visionos", "web_embedded", "mweb"], None]
+# "android" cracks the combined mp4 in one fast round on real traffic; the
+# other sets are kept only as fallbacks. The slow default probe is last.
+PLAYER_CLIENTS = [["android"], ["tv_simply", "web_safari"], ["visionos", "web_embedded", "mweb"], None]
 _good_client = [None, 0.0]
 _GOOD_CLIENT_TTL = 3600
 

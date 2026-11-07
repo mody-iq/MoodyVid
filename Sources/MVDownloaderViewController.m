@@ -318,7 +318,8 @@
     tagline.tag = 101;
     tagline.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     tagline.textColor = [MVTheme secondaryText];
-    tagline.numberOfLines = 1;
+    tagline.numberOfLines = 2;
+    tagline.lineBreakMode = NSLineBreakByWordWrapping;
 
     MVGradientLabel *brand = [MVGradientLabel new];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
