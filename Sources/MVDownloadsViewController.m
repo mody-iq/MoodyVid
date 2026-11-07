@@ -1,5 +1,6 @@
 #import "MVDownloadsViewController.h"
 #import <AVKit/AVKit.h>
+#import "MVPlayerCenter.h"
 #import "MVDownloadStore.h"
 #import "MVDownloadEngine.h"
 #import "MVPaths.h"
@@ -309,10 +310,8 @@ static NSString *const kDoneCell = @"MVDoneCell";
         [self alert:[MVLang t:@"Failed"] message:[MVLang t:@"No files"]];
         return;
     }
-    AVPlayerViewController *player = [AVPlayerViewController new];
-    player.player = [AVPlayer playerWithURL:[NSURL fileURLWithPath:path]];
-    [player.player play];
-    [self presentViewController:player animated:YES completion:nil];
+    [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
+                                title:path.lastPathComponent.stringByDeletingPathExtension];
 }
 
 - (void)promptRename:(MVDownloadRecord *)record {

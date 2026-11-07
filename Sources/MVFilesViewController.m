@@ -1,5 +1,6 @@
 #import "MVFilesViewController.h"
 #import <AVKit/AVKit.h>
+#import "MVPlayerCenter.h"
 #import "MVPaths.h"
 #import "MVLang.h"
 #import "MVTheme.h"
@@ -213,10 +214,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     NSString *ext = path.pathExtension.lowercaseString;
     if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) {
-        AVPlayerViewController *player = [AVPlayerViewController new];
-        player.player = [AVPlayer playerWithURL:[NSURL fileURLWithPath:path]];
-        [player.player play];
-        [self presentViewController:player animated:YES completion:nil];
+        [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
+                                    title:path.lastPathComponent.stringByDeletingPathExtension];
     } else {
         UIActivityViewController *share = [[UIActivityViewController alloc]
             initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
@@ -294,10 +293,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     if (!isDir && playable) {
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            AVPlayerViewController *player = [AVPlayerViewController new];
-            player.player = [AVPlayer playerWithURL:[NSURL fileURLWithPath:path]];
-            [player.player play];
-            [self presentViewController:player animated:YES completion:nil];
+            [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
+                                        title:path.lastPathComponent.stringByDeletingPathExtension];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [[MVDownloadEngine shared] saveToPhotos:path completion:^(NSString *fp, NSString *err) {

@@ -100,6 +100,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"1080p": @"1080p",
             @"720p": @"720p",
             @"480p": @"480p",
+            @"Now playing": @"جارٍ التشغيل",
             @"Saved": @"تم الحفظ",
             @"Saved to Photos": @"تم الحفظ في تطبيق الصور",
             @"Choose quality": @"اختر الجودة",
