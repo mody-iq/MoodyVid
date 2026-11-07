@@ -9,13 +9,110 @@
 
 static NSString *const kDoneCell = @"MVDoneCell";
 
-// One row: thumbnail, title, subtitle, and a progress bar for active downloads.
+// The round button at the end of a row: a progress ring with a stop square while
+// the download runs, and a plain icon once it has finished.
+@interface MVRowActionButton : UIButton
+- (void)showProgress:(double)progress;
+- (void)showIcon:(NSString *)symbolName;
+@end
+
+@implementation MVRowActionButton {
+    CAShapeLayer *_track;
+    CAShapeLayer *_ring;
+    UIView *_stop;
+    UIImageView *_icon;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:CGRectMake(0, 0, 44, 44)])) {
+        _track = [CAShapeLayer layer];
+        _track.fillColor = UIColor.clearColor.CGColor;
+        _track.lineWidth = 2.5;
+        [self.layer addSublayer:_track];
+
+        _ring = [CAShapeLayer layer];
+        _ring.fillColor = UIColor.clearColor.CGColor;
+        _ring.lineWidth = 2.5;
+        _ring.lineCap = kCALineCapRound;
+        _ring.strokeEnd = 0;
+        [self.layer addSublayer:_ring];
+
+        _stop = [UIView new];
+        _stop.frame = CGRectMake(0, 0, 10, 10);
+        _stop.layer.cornerRadius = 2;
+        _stop.userInteractionEnabled = NO;
+        [self addSubview:_stop];
+
+        _icon = [UIImageView new];
+        _icon.frame = CGRectMake(0, 0, 32, 32);
+        _icon.contentMode = UIViewContentModeCenter;
+        _icon.userInteractionEnabled = NO;
+        [self addSubview:_icon];
+    }
+    return self;
+}
+
+- (void)showProgress:(double)progress {
+    _icon.hidden = YES;
+    _stop.hidden = NO;
+    _track.hidden = NO;
+    _ring.hidden = NO;
+    // A small sliver stays visible so a download that just started still looks alive.
+    _ring.strokeEnd = MAX(0.04, MIN(1.0, progress));
+    [self setNeedsLayout];
+}
+
+- (void)showIcon:(NSString *)symbolName {
+    _icon.hidden = NO;
+    _stop.hidden = YES;
+    _track.hidden = YES;
+    _ring.hidden = YES;
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightRegular];
+    _icon.image = [UIImage systemImageNamed:symbolName withConfiguration:config];
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGPoint center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    UIBezierPath *circle = [UIBezierPath bezierPathWithArcCenter:center
+                                                          radius:14
+                                                      startAngle:-M_PI_2
+                                                        endAngle:M_PI * 1.5
+                                                       clockwise:YES];
+    UIColor *accent = [[MVTheme accent] resolvedColorWithTraitCollection:self.traitCollection];
+    UIColor *track = [[[MVTheme secondaryText] colorWithAlphaComponent:0.30]
+                      resolvedColorWithTraitCollection:self.traitCollection];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _track.frame = self.bounds;
+    _ring.frame = self.bounds;
+    _track.path = circle.CGPath;
+    _ring.path = circle.CGPath;
+    _track.strokeColor = track.CGColor;
+    _ring.strokeColor = accent.CGColor;
+    [CATransaction commit];
+
+    _stop.backgroundColor = accent;
+    _stop.center = center;
+    _icon.tintColor = [MVTheme secondaryText];
+    _icon.center = center;
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self setNeedsLayout];
+}
+
+@end
+
+// One row, as in a plain file list: the title, a line under it, and the round
+// button at the end.
 @interface MVDownloadCell : UITableViewCell
-@property (nonatomic, strong) UIImageView *thumbView;
-@property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) UILabel *subtitleLabel;
-@property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UIProgressView *progressBar;
+@property (nonatomic, strong) MVRowActionButton *actionButton;
+@property (nonatomic, copy, nullable) void (^onAction)(void);
 - (void)configureWithRecord:(MVDownloadRecord *)record;
 @end
 
@@ -25,126 +122,80 @@ static NSString *const kDoneCell = @"MVDoneCell";
     if ((self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier])) {
         self.backgroundColor = UIColor.clearColor;
         self.contentView.backgroundColor = UIColor.clearColor;
-        self.selectionStyle = UITableViewCellSelectionStyleNone;
 
-        _thumbView = [UIImageView new];
-        _thumbView.contentMode = UIViewContentModeScaleAspectFill;
-        _thumbView.layer.cornerRadius = 8;
-        _thumbView.layer.masksToBounds = YES;
-        _thumbView.clipsToBounds = YES;
-        _thumbView.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.12];
-        _thumbView.translatesAutoresizingMaskIntoConstraints = NO;
+        UIView *highlight = [UIView new];
+        highlight.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.15];
+        self.selectedBackgroundView = highlight;
 
-        _titleLabel = [UILabel new];
-        _titleLabel.numberOfLines = 2;
-        _titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        _titleLabel.textColor = [MVTheme text];
-        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        self.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        self.textLabel.textColor = [MVTheme text];
+        self.textLabel.numberOfLines = 1;
+        self.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
-        _subtitleLabel = [UILabel new];
-        _subtitleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
-        _subtitleLabel.textColor = [MVTheme secondaryText];
-        _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        self.detailTextLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        self.detailTextLabel.numberOfLines = 1;
 
-        _statusLabel = [UILabel new];
-        _statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        _statusLabel.textColor = [MVTheme secondaryText];
-        _statusLabel.textAlignment = NSTextAlignmentRight;
-        _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-
-        _progressBar = [UIProgressView new];
-        _progressBar.progressTintColor = [MVTheme accent];
-        _progressBar.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.20];
-        _progressBar.translatesAutoresizingMaskIntoConstraints = NO;
-
-        [self.contentView addSubview:_thumbView];
-        [self.contentView addSubview:_titleLabel];
-        [self.contentView addSubview:_subtitleLabel];
-        [self.contentView addSubview:_statusLabel];
-        [self.contentView addSubview:_progressBar];
-
-        [self.thumbView.widthAnchor constraintEqualToConstant:96].active = YES;
-        [self.thumbView.heightAnchor constraintEqualToConstant:96].active = YES;
-
-        [NSLayoutConstraint activateConstraints:@[
-            [_thumbView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14],
-            [_thumbView.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
-            [_thumbView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10],
-
-            [_statusLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14],
-            [_statusLabel.centerYAnchor constraintEqualToAnchor:_thumbView.centerYAnchor],
-
-            [_titleLabel.leadingAnchor constraintEqualToAnchor:_thumbView.trailingAnchor constant:12],
-            [_titleLabel.trailingAnchor constraintEqualToAnchor:_statusLabel.leadingAnchor constant:-8],
-            [_titleLabel.topAnchor constraintEqualToAnchor:_thumbView.topAnchor constant:4],
-
-            [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
-            [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
-            [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:3],
-
-            [_progressBar.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
-            [_progressBar.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
-            [_progressBar.topAnchor constraintEqualToAnchor:_subtitleLabel.bottomAnchor constant:8],
-            [_progressBar.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-12],
-        ]];
+        _actionButton = [[MVRowActionButton alloc] initWithFrame:CGRectZero];
+        [_actionButton addTarget:self action:@selector(actionTapped) forControlEvents:UIControlEventTouchUpInside];
+        self.accessoryView = _actionButton;
     }
     return self;
 }
 
-- (void)configureWithRecord:(MVDownloadRecord *)record {
-    self.titleLabel.text = record.title.length ? record.title : record.url;
+- (void)actionTapped {
+    if (self.onAction) self.onAction();
+}
 
-    if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {
-        UIImage *img = [UIImage imageWithContentsOfFile:record.thumbnail];
-        self.thumbView.image = img ?: [UIImage systemImageNamed:@"play.rectangle.fill"];
-        self.thumbView.tintColor = [MVTheme secondaryText];
-    } else {
-        self.thumbView.image = [UIImage systemImageNamed:@"play.rectangle.fill"];
-        self.thumbView.tintColor = [MVTheme secondaryText];
+/// "1.6 MB of 11.0 MB". Each size is wrapped in direction isolates so the numbers
+/// and units stay in the right order inside an Arabic line.
++ (NSString *)sizesTextForRecord:(MVDownloadRecord *)record {
+    if (record.totalBytes <= 0) {
+        return [NSString stringWithFormat:@"%.0f%%", record.progress * 100];
     }
+    long long done = (long long)llround(record.progress * (double)record.totalBytes);
+    NSString *of = MVLang.shared.isRTL ? @"من" : @"of";
+    return [NSString stringWithFormat:@"\u2068%@\u2069 %@ \u2068%@\u2069",
+            [MVPaths formatBytes:done], of, [MVPaths formatBytes:record.totalBytes]];
+}
 
-    BOOL showsProgress = record.isActive || record.state == MVDownloadStateWaiting;
-    self.progressBar.hidden = !showsProgress;
-    self.statusLabel.hidden = showsProgress;
+- (void)configureWithRecord:(MVDownloadRecord *)record {
+    self.textLabel.text = record.title.length ? record.title : record.url;
+    self.textLabel.textColor = [MVTheme text];
 
+    UIColor *normal = [[MVTheme text] colorWithAlphaComponent:0.85];
     switch (record.state) {
         case MVDownloadStateWaiting:
-            self.subtitleLabel.text = [MVLang t:@"Waiting"];
-            self.statusLabel.text = @"";
-            self.progressBar.progress = 0;
+            self.detailTextLabel.text = [MVLang t:@"Waiting"];
+            self.detailTextLabel.textColor = [MVTheme secondaryText];
+            [self.actionButton showProgress:0];
             break;
-        case MVDownloadStateActive: {
-            // Percent, speed and ETA are what make the bar feel alive.
-            NSMutableArray *parts = [NSMutableArray array];
-            [parts addObject:[NSString stringWithFormat:@"%.0f%%", record.progress * 100]];
-            if (record.speed > 0) [parts addObject:[MVPaths formatSpeed:record.speed]];
-            if (record.eta > 0) [parts addObject:[NSString stringWithFormat:@"ETA %@", [MVPaths formatDuration:record.eta]]];
-            if (record.totalBytes > 0) [parts addObject:[MVPaths formatBytes:record.totalBytes]];
-            self.subtitleLabel.text = [parts componentsJoinedByString:@"  ·  "];
-            self.progressBar.progress = record.progress;
+        case MVDownloadStateActive:
+            self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
+            self.detailTextLabel.textColor = normal;
+            [self.actionButton showProgress:record.progress];
             break;
-        }
         case MVDownloadStateCompleted:
-            self.subtitleLabel.text = record.totalBytes > 0
-                ? [MVPaths formatBytes:record.totalBytes]
-                : [MVLang t:@"Completed"];
-            self.statusLabel.text = [MVLang t:@"Completed"];
-            self.statusLabel.textColor = [MVTheme success];
+            self.detailTextLabel.text = [MVLang t:@"Completed"];
+            self.detailTextLabel.textColor = normal;
+            [self.actionButton showIcon:@"square.and.arrow.down"];
             break;
         case MVDownloadStateFailed:
-            self.subtitleLabel.text = [NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
-                                       record.error ?: [MVLang t:@"Unknown error"]];
+            self.detailTextLabel.text = [NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
+                                         record.error ?: [MVLang t:@"Unknown error"]];
+            self.detailTextLabel.textColor = [MVTheme danger];
+            [self.actionButton showIcon:@"exclamationmark.circle"];
             break;
         case MVDownloadStateCancelled:
-            self.subtitleLabel.text = [MVLang t:@"Cancel"];
-            self.statusLabel.text = @"";
+            self.detailTextLabel.text = [MVLang t:@"Cancel"];
+            self.detailTextLabel.textColor = [MVTheme secondaryText];
+            [self.actionButton showIcon:@"square.and.arrow.down"];
             break;
     }
-    self.subtitleLabel.textColor = record.state == MVDownloadStateFailed
-        ? [MVTheme danger] : [MVTheme secondaryText];
-    if (record.state != MVDownloadStateCompleted && !showsProgress) {
-        self.statusLabel.textColor = [MVTheme secondaryText];
-    }
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.onAction = nil;
 }
 
 @end
@@ -155,6 +206,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
 @property (nonatomic) BOOL editingMode;
+@property (nonatomic, copy) NSArray<NSString *> *shownIdentifiers;
 @end
 
 @implementation MVDownloadsViewController
@@ -164,13 +216,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.view.backgroundColor = [MVTheme background];
     self.title = [MVLang t:@"Downloads"];
 
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.backgroundColor = UIColor.clearColor;
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 96;
+    self.tableView.estimatedRowHeight = 64;
+    self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.35];
+    self.tableView.tableFooterView = [UIView new];
     [self.tableView registerClass:MVDownloadCell.class forCellReuseIdentifier:kDoneCell];
     UILongPressGestureRecognizer *longPress =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
@@ -205,7 +259,9 @@ static NSString *const kDoneCell = @"MVDoneCell";
         [self.emptyLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
     ]];
 
-    for (NSString *name in @[MVDownloadStoreDidChangeNotification, MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(storeDidChange)
+                                               name:MVDownloadStoreDidChangeNotification object:nil];
+    for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
     }
 }
@@ -214,7 +270,34 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.title = [MVLang t:@"Downloads"];
     self.emptyLabel.text = [MVLang t:@"No downloads yet"];
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
+    [self reloadList];
+}
+
+- (void)reloadList {
+    self.shownIdentifiers = [[self records] valueForKey:@"identifier"];
     [self.tableView reloadData];
+}
+
+/// Progress arrives four times a second. Reloading the whole table that often
+/// would cancel a tap on the stop button halfway through, so when the same rows
+/// are still in the same order only the visible cells are refreshed in place.
+- (void)storeDidChange {
+    NSArray<MVDownloadRecord *> *now = [self records];
+    BOOL sameRows = (now.count == self.shownIdentifiers.count);
+    for (NSUInteger i = 0; sameRows && i < now.count; i++) {
+        if (![now[i].identifier isEqualToString:self.shownIdentifiers[i]]) sameRows = NO;
+    }
+    if (!sameRows) {
+        [self reloadList];
+        return;
+    }
+    for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows) {
+        MVDownloadCell *cell = (MVDownloadCell *)[self.tableView cellForRowAtIndexPath:indexPath];
+        if ([cell isKindOfClass:MVDownloadCell.class] && indexPath.row < (NSInteger)now.count) {
+            [cell configureWithRecord:now[indexPath.row]];
+        }
+    }
+    self.emptyLabel.hidden = now.count > 0;
 }
 
 - (NSArray<MVDownloadRecord *> *)records {
@@ -235,7 +318,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     self.filter = searchController.searchBar.text ?: @"";
-    [self.tableView reloadData];
+    [self reloadList];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -246,7 +329,20 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     MVDownloadCell *cell = [tableView dequeueReusableCellWithIdentifier:kDoneCell forIndexPath:indexPath];
-    [cell configureWithRecord:[self records][indexPath.row]];
+    MVDownloadRecord *record = [self records][indexPath.row];
+    [cell configureWithRecord:record];
+
+    // The round button cancels a running download; on a finished row it opens
+    // the same menu as tapping the row.
+    __weak typeof(self) weakSelf = self;
+    __weak MVDownloadCell *weakCell = cell;
+    cell.onAction = ^{
+        if (record.isActive) {
+            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+        } else {
+            [weakSelf showMenuForRecord:record sourceView:weakCell];
+        }
+    };
     return cell;
 }
 
@@ -390,7 +486,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
     [self.tableView setEditing:self.editingMode animated:YES];
     self.navigationItem.rightBarButtonItem.title = self.editingMode ? [MVLang t:@"Done"] : [MVLang t:@"Edit"];
     if (!self.editingMode) {
-        [self.tableView reloadData];
+        [self reloadList];
     }
 }
 
