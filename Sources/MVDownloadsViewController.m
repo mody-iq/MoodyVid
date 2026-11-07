@@ -170,9 +170,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
             [self.actionButton showProgress:0];
             break;
         case MVDownloadStateActive:
-            // Pre-download phase (DNS, metadata): no bytes yet, so show a
-            // meaningful status instead of a frozen 0%.
-            if (record.progress <= 0 && record.totalBytes <= 0) {
+            // The engine stores a transient phase message ("Merging…",
+            // "Converting…") in `error` while a post-download step runs; the
+            // record is still active, so the row shows it as its status.
+            if (record.error.length && record.totalBytes > 0 && record.progress >= 1.0) {
+                self.detailTextLabel.text = record.error;
+            } else if (record.progress <= 0 && record.totalBytes <= 0) {
+                // Pre-download phase (DNS, metadata): no bytes yet, so show a
+                // meaningful status instead of a frozen 0%.
                 self.detailTextLabel.text = [MVLang t:@"Connecting…"];
             } else {
                 self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
@@ -209,6 +214,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @interface MVDownloadsViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *emptyLabel;
+@property (nonatomic, strong) UILabel *queueLabel;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
 @property (nonatomic) BOOL editingMode;
@@ -232,6 +238,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.35];
     self.tableView.tableFooterView = [UIView new];
     [self.tableView registerClass:MVDownloadCell.class forCellReuseIdentifier:kDoneCell];
+    // A slim header that shows how many items are still waiting, so the queue
+    // reads like a list instead of a mystery: "3 waiting · 2 downloading".
+    self.queueLabel = [UILabel new];
+    self.queueLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    self.queueLabel.textColor = [MVTheme secondaryText];
+    self.queueLabel.textAlignment = NSTextAlignmentCenter;
+    self.queueLabel.frame = CGRectMake(0, 0, 320, 28);
+    self.tableView.tableHeaderView = self.queueLabel;
     UILongPressGestureRecognizer *longPress =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
     [self.tableView addGestureRecognizer:longPress];
@@ -296,7 +310,28 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)reloadList {
     self.shownIdentifiers = [[self records] valueForKey:@"identifier"];
+    [self updateQueueLabel];
     [self.tableView reloadData];
+}
+
+/// The queue summary line above the rows: how many are still downloading and
+/// how many are waiting their turn. Hidden entirely when nothing is running.
+- (void)updateQueueLabel {
+    NSArray<MVDownloadRecord *> *all = MVDownloadStore.shared.records;
+    NSUInteger active = 0, waiting = 0;
+    for (MVDownloadRecord *r in all) {
+        if (r.state == MVDownloadStateActive) active++;
+        if (r.state == MVDownloadStateWaiting) waiting++;
+    }
+    NSString *text = @"";
+    if (active || waiting) {
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        if (active) [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)active, [MVLang t:@"downloading"]]];
+        if (waiting) [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)waiting, [MVLang t:@"waiting"]]];
+        text = [parts componentsJoinedByString:@" · "];
+    }
+    self.queueLabel.text = text;
+    self.queueLabel.hidden = text.length == 0;
 }
 
 /// Progress arrives four times a second. Reloading the whole table that often
@@ -312,6 +347,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
         [self reloadList];
         return;
     }
+    [self updateQueueLabel];
     for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows) {
         MVDownloadCell *cell = (MVDownloadCell *)[self.tableView cellForRowAtIndexPath:indexPath];
         if ([cell isKindOfClass:MVDownloadCell.class] && indexPath.row < (NSInteger)now.count) {

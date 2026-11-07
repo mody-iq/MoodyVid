@@ -284,6 +284,74 @@ def _downloaded_path(ydl, info):
     return path if path and os.path.exists(path) else None
 
 
+def download_fragment(url, kind, quality="best", _task=""):
+    """Downloads ONE stream (kind="video" or "audio") to a single file.
+
+    iOS has no ffmpeg, so higher qualities cannot be merged inside yt-dlp. The
+    app instead downloads the video stream and the audio stream separately
+    (progressive) and muxes them natively with AVFoundation. This function
+    returns just the one fragment; the native side combines the pair.
+    """
+    try:
+        import yt_dlp
+    except Exception as e:
+        return _error(f"yt-dlp not available: {e}")
+
+    _use_bundled_certificates()
+
+    if kind == "audio":
+        fmt = "bestaudio[ext=m4a]/bestaudio/best[ext=m4a]/best"
+    else:
+        height = 2160
+        if isinstance(quality, str) and quality.isdigit():
+            h = int(quality)
+            if h > 0: height = h
+        fmt = (f"bestvideo[height<={height}][ext=mp4]/bestvideo[height<={height}]"
+               f"/bestvideo[ext=mp4]/bestvideo")
+
+    out_dir = _output_dir()
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        return _error(f"cannot create the download folder: {e}")
+
+    native = _native()
+    for client in _client_order():
+        if _is_cancelled(native, _task):
+            return _error("cancelled")
+        try:
+            opts = {
+                "format": fmt,
+                "outtmpl": os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "retries": 10,
+                "fragment_retries": 10,
+                "continue": True,
+                "socket_timeout": 15,
+                "progress_hooks": [_progress_hook(native, _task)],
+            }
+            if client:
+                opts["extractor_args"] = {"youtube": {"player_client": client}}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                path = _downloaded_path(ydl, info)
+            if path:
+                _good_client[0], _good_client[1] = client, time.time()
+                return json.dumps({
+                    "path": path,
+                    "title": info.get("title", ""),
+                    "thumbnail": info.get("thumbnail", ""),
+                    "ext": path.lower().rsplit(".", 1)[-1] if "." in path else "",
+                }, ensure_ascii=False)
+        except _Cancelled:
+            return _error("cancelled")
+        except Exception as e:
+            continue
+    return _error("the stream could not be downloaded")
+
+
 def _has_video(info):
     return any(f.get("vcodec") not in (None, "none")
                for f in info.get("requested_formats") or [info])

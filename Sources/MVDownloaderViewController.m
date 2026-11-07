@@ -454,9 +454,13 @@
 
 - (void)updateQualityTitle {
     NSString *label;
-    if ([self.selectedQuality isEqualToString:@"720p"]) label = [MVLang t:@"Up to 720p"];
+    if ([self.selectedQuality isEqualToString:@"1080"] || [self.selectedQuality isEqualToString:@"1440"] || [self.selectedQuality isEqualToString:@"2160"]) {
+        label = [MVLang t:@"1080p HD"];
+    }
+    else if ([self.selectedQuality isEqualToString:@"720p"]) label = [MVLang t:@"Up to 720p"];
     else if ([self.selectedQuality isEqualToString:@"480p"]) label = [MVLang t:@"Up to 480p"];
     else if ([self.selectedQuality isEqualToString:@"audio"]) label = [MVLang t:@"Audio only (M4A)"];
+    else if ([self.selectedQuality isEqualToString:@"mp3"]) label = [MVLang t:@"MP3 (audio)"];
     else label = [MVLang t:@"Best available"];
     [self.qualityButton setTitle:[NSString stringWithFormat:@"%@: %@", [MVLang t:@"Quality"], label]
                         forState:UIControlStateNormal];
@@ -532,9 +536,11 @@
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
     NSArray<NSArray *> *options = @[
         @[@"Best available", @"best"],
+        @[@"1080p HD", @"1080"],
         @[@"Up to 720p", @"720p"],
         @[@"Up to 480p", @"480p"],
         @[@"Audio only (M4A)", @"audio"],
+        @[@"MP3 (audio)", @"mp3"],
     ];
     for (NSArray *option in options) {
         NSString *quality = option[1];
