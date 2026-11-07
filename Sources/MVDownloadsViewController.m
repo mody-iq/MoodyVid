@@ -14,6 +14,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @property (nonatomic, strong) UIImageView *thumbView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIProgressView *progressBar;
 - (void)configureWithRecord:(MVDownloadRecord *)record;
 @end
@@ -45,6 +46,12 @@ static NSString *const kDoneCell = @"MVDoneCell";
         _subtitleLabel.textColor = [MVTheme secondaryText];
         _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
+        _statusLabel = [UILabel new];
+        _statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        _statusLabel.textColor = [MVTheme secondaryText];
+        _statusLabel.textAlignment = NSTextAlignmentRight;
+        _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
         _progressBar = [UIProgressView new];
         _progressBar.progressTintColor = [MVTheme accent];
         _progressBar.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.20];
@@ -53,22 +60,26 @@ static NSString *const kDoneCell = @"MVDoneCell";
         [self.contentView addSubview:_thumbView];
         [self.contentView addSubview:_titleLabel];
         [self.contentView addSubview:_subtitleLabel];
+        [self.contentView addSubview:_statusLabel];
         [self.contentView addSubview:_progressBar];
 
-        [self.thumbView.widthAnchor constraintEqualToConstant:88].active = YES;
-        [self.thumbView.heightAnchor constraintEqualToConstant:50].active = YES;
+        [self.thumbView.widthAnchor constraintEqualToConstant:96].active = YES;
+        [self.thumbView.heightAnchor constraintEqualToConstant:96].active = YES;
 
         [NSLayoutConstraint activateConstraints:@[
             [_thumbView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14],
             [_thumbView.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+            [_thumbView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10],
+
+            [_statusLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14],
+            [_statusLabel.centerYAnchor constraintEqualToAnchor:_thumbView.centerYAnchor],
 
             [_titleLabel.leadingAnchor constraintEqualToAnchor:_thumbView.trailingAnchor constant:12],
-            [_titleLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-18],
-            [_titleLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:12],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:_statusLabel.leadingAnchor constant:-8],
+            [_titleLabel.topAnchor constraintEqualToAnchor:_thumbView.topAnchor constant:4],
 
             [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
             [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
-            [_titleLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14],
             [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:3],
 
             [_progressBar.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
@@ -94,10 +105,12 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
     BOOL showsProgress = record.isActive || record.state == MVDownloadStateWaiting;
     self.progressBar.hidden = !showsProgress;
+    self.statusLabel.hidden = showsProgress;
 
     switch (record.state) {
         case MVDownloadStateWaiting:
             self.subtitleLabel.text = [MVLang t:@"Waiting"];
+            self.statusLabel.text = @"";
             self.progressBar.progress = 0;
             break;
         case MVDownloadStateActive: {
@@ -115,6 +128,8 @@ static NSString *const kDoneCell = @"MVDoneCell";
             self.subtitleLabel.text = record.totalBytes > 0
                 ? [MVPaths formatBytes:record.totalBytes]
                 : [MVLang t:@"Completed"];
+            self.statusLabel.text = [MVLang t:@"Completed"];
+            self.statusLabel.textColor = [MVTheme success];
             break;
         case MVDownloadStateFailed:
             self.subtitleLabel.text = [NSString stringWithFormat:@"%@: %@", [MVLang t:@"Failed"],
@@ -122,10 +137,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
             break;
         case MVDownloadStateCancelled:
             self.subtitleLabel.text = [MVLang t:@"Cancel"];
+            self.statusLabel.text = @"";
             break;
     }
     self.subtitleLabel.textColor = record.state == MVDownloadStateFailed
         ? [MVTheme danger] : [MVTheme secondaryText];
+    if (record.state != MVDownloadStateCompleted && !showsProgress) {
+        self.statusLabel.textColor = [MVTheme secondaryText];
+    }
 }
 
 @end
@@ -135,6 +154,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @property (nonatomic, strong) UILabel *emptyLabel;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
+@property (nonatomic) BOOL editingMode;
 @end
 
 @implementation MVDownloadsViewController
@@ -171,6 +191,9 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
     self.navigationItem.searchController = self.search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:[MVLang t:@"Edit"] style:UIBarButtonItemStylePlain
+        target:self action:@selector(toggleEditMode)];
     self.definesPresentationContext = YES;
 
     [NSLayoutConstraint activateConstraints:@[
@@ -229,6 +252,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.editingMode) return;
     [self showMenuForRecord:[self records][indexPath.row] sourceView:[tableView cellForRowAtIndexPath:indexPath]];
 }
 
@@ -269,7 +293,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
     if (record.state == MVDownloadStateCompleted && record.path.length) {
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self playFile:record.path];
+            [self playFile:record];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [[MVDownloadEngine shared] saveToPhotos:record.path completion:^(NSString *fp, NSString *err) {
@@ -305,13 +329,21 @@ static NSString *const kDoneCell = @"MVDoneCell";
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)playFile:(NSString *)path {
+- (void)playFile:(MVDownloadRecord *)record {
+    NSString *path = record.path;
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
         [self alert:[MVLang t:@"Failed"] message:[MVLang t:@"No files"]];
         return;
     }
     [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
                                 title:path.lastPathComponent.stringByDeletingPathExtension];
+    if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {
+        UIImage *art = [UIImage imageWithContentsOfFile:record.thumbnail];
+        if (art) [[MVPlayerCenter shared] setThumbnailImage:art];
+    }
+    // The user tapped "Play": bring the video player up right away. The mini
+    // bar remains for when they dismiss it.
+    [[MVPlayerCenter shared] presentCurrentPlayer];
 }
 
 - (void)promptRename:(MVDownloadRecord *)record {
@@ -350,6 +382,40 @@ static NSString *const kDoneCell = @"MVDoneCell";
         [MVDownloadStore.shared remove:record];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+
+- (void)toggleEditMode {
+    self.editingMode = !self.editingMode;
+    [self.tableView setEditing:self.editingMode animated:YES];
+    self.navigationItem.rightBarButtonItem.title = self.editingMode ? [MVLang t:@"Done"] : [MVLang t:@"Edit"];
+    if (!self.editingMode) {
+        [self.tableView reloadData];
+    }
+}
+
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    return YES;
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return UITableViewCellEditingStyleDelete;
+}
+
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+                                            forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle != UITableViewCellEditingStyleDelete) return;
+    MVDownloadRecord *record = [self records][indexPath.row];
+    if (record.isActive) {
+        [[MVDownloadEngine shared] cancelDownload:record.identifier];
+    } else {
+        if (record.path.length) [[NSFileManager defaultManager] removeItemAtPath:record.path error:nil];
+        [MVDownloadStore.shared remove:record];
+    }
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return [MVLang t:@"Delete"];
 }
 
 - (void)alert:(NSString *)title message:(NSString *)message {

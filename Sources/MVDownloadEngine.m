@@ -4,6 +4,7 @@
 #import "MVLang.h"
 #import <Photos/Photos.h>
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <UserNotifications/UserNotifications.h>
 
 /// Two at a time keeps the CPU and the network busy without starving the UI
@@ -186,6 +187,9 @@ static const NSUInteger kMaxConcurrent = 2;
     if ([thumb isKindOfClass:NSString.class] && thumb.length && record.url.length) {
         [self setThumbnail:thumb forURL:record.url];
     }
+    // The yt-dlp covers are web shots; the local frame keeps the row looking
+    // like a real video library and works when the cover fetch fails.
+    [self makeVideoThumb:path forURL:record.url];
     record.path = path;
     record.progress = 1.0;
     record.speed = 0;
@@ -338,7 +342,9 @@ static const NSUInteger kMaxConcurrent = 2;
                 [self saveToPhotos:filePath completion:completion];
             } else if (completion) {
                 // The file is on disk, so the download itself succeeded.
-                completion(filePath, [MVLang t:@"Saved to Files but not to Photos: permission denied"]);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(filePath, [MVLang t:@"Saved to Files but not to Photos: permission denied"]);
+                });
             }
         }];
         return;
@@ -346,12 +352,62 @@ static const NSUInteger kMaxConcurrent = 2;
     [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
         [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:[NSURL fileURLWithPath:filePath]];
     } completionHandler:^(BOOL success, NSError *err) {
-        if (!completion) return;
-        if (success) completion(filePath, nil);
-        else completion(filePath, [NSString stringWithFormat:@"%@: %@",
-                                  [MVLang t:@"Saved to Files but not to Photos"],
-                                  err.localizedDescription ?: [MVLang t:@"Unknown error"]]);
+        // This completion arrives on a Photos-library queue; anyone showing an
+        // alert reads the result, so marshal it back to the main queue first.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!completion) return;
+            if (success) completion(filePath, nil);
+            else completion(filePath, [NSString stringWithFormat:@"%@: %@",
+                                      [MVLang t:@"Saved to Files but not to Photos"],
+                                      err.localizedDescription ?: [MVLang t:@"Unknown error"]]);
+        });
     }];
+}
+
+
+/// Writes a square frame from the video itself (like the row artwork in the
+/// Downloads list). AVAssetImageGenerator is thread-safe and fast enough to run
+/// on a background queue; the URL and record are looked up again on the main
+/// thread so stale objects are never touched.
+- (void)makeVideoThumb:(NSString *)path forURL:(NSString *)url {
+    if (!path.length || !url.length) return;
+    NSURL *fileURL = [NSURL fileURLWithPath:path];
+    AVURLAsset *asset = [AVURLAsset assetWithURL:fileURL];
+    AVAssetImageGenerator *gen = [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+    gen.appliesPreferredTrackTransform = YES;
+    gen.maximumSize = CGSizeMake(360, 360);
+    // yt-dlp output has no duration metadata until the file is fully written by
+    // the time we get here it is, but a zero-time frame is the safe pick.
+    CMTime at = CMTimeMakeWithSeconds(1, 600);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *err = nil;
+        CGImageRef cg = [gen copyCGImageAtTime:at actualTime:NULL error:&err];
+        if (err || !cg) return;
+        UIImage *full = [UIImage imageWithCGImage:cg];
+        CGImageRelease(cg);
+        // Square crop from the top; avatars in the list are square.
+        CGFloat side = MIN(full.size.width, full.size.height);
+        CGRect crop = CGRectMake((full.size.width - side) / 2, 0, side, side);
+        CGImageRef ccg = CGImageCreateWithImageInRect(full.CGImage, crop);
+        if (!ccg) return;
+        UIImage *square = [UIImage imageWithCGImage:ccg];
+        CGImageRelease(ccg);
+        NSData *jpeg = UIImageJPEGRepresentation(square, 0.85);
+        if (!jpeg.length) return;
+
+        NSString *name = [NSString stringWithFormat:@"%@-local.jpg",
+                          [[url dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]];
+        NSString *target = [[MVPaths thumbs] stringByAppendingPathComponent:name];
+        [jpeg writeToFile:target atomically:YES];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+                if ([r.url isEqualToString:url] && !r.thumbnail) {
+                    r.thumbnail = target;
+                    [MVDownloadStore.shared update:r];
+                }
+            }
+        });
+    });
 }
 
 @end

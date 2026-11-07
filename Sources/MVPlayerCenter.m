@@ -3,15 +3,15 @@
 #import <AVKit/AVKit.h>
 #import "MVTheme.h"
 #import "MVLang.h"
-#import "MVPaths.h"
 
-/// The bar is hosted in the key window, above every screen, so navigating between
-/// tabs cannot push it away.
-static CGFloat const kMiniBarHeight = 58;
+/// The mini bar that stays above every screen while something is playing.
+static CGFloat const kMiniBarHeight = 64;
+static CGFloat const kMiniThumb = 44;
 
 @interface MVFloatingPlayerBar : UIView
 @property (nonatomic, strong) UIImageView *thumbView;
 @property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UIButton *pauseButton;
 @property (nonatomic, strong) UIButton *closeButton;
 @property (nonatomic, strong) UIProgressView *progress;
@@ -21,21 +21,35 @@ static CGFloat const kMiniBarHeight = 58;
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.backgroundColor = [MVTheme card];
+        self.layer.cornerRadius = 14;
+        self.layer.borderWidth = 0.5;
+        self.layer.borderColor = [MVTheme cardBorder].CGColor;
+        self.layer.shadowColor = UIColor.blackColor.CGColor;
+        self.layer.shadowOpacity = 0.25;
+        self.layer.shadowRadius = 10;
+        self.layer.shadowOffset = CGSizeMake(0, 4);
+        self.clipsToBounds = NO;
+
         _thumbView = [UIImageView new];
         _thumbView.contentMode = UIViewContentModeScaleAspectFill;
-        _thumbView.layer.cornerRadius = 6;
+        _thumbView.layer.cornerRadius = 8;
         _thumbView.layer.masksToBounds = YES;
         _thumbView.clipsToBounds = YES;
-        _thumbView.image = [UIImage systemImageNamed:@"play.rectangle.fill"];
-        _thumbView.tintColor = [MVTheme secondaryText];
-        _thumbView.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.12];
         _thumbView.translatesAutoresizingMaskIntoConstraints = NO;
 
         _titleLabel = [UILabel new];
         _titleLabel.numberOfLines = 1;
-        _titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        _titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
         _titleLabel.textColor = [MVTheme text];
         _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _subtitleLabel = [UILabel new];
+        _subtitleLabel.numberOfLines = 1;
+        _subtitleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        _subtitleLabel.textColor = [MVTheme secondaryText];
+        _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
         _pauseButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [_pauseButton setImage:[UIImage systemImageNamed:@"pause.fill"] forState:UIControlStateNormal];
@@ -44,7 +58,7 @@ static CGFloat const kMiniBarHeight = 58;
         _pauseButton.translatesAutoresizingMaskIntoConstraints = NO;
 
         _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_closeButton setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
+        [_closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
         _closeButton.tintColor = [MVTheme secondaryText];
         _closeButton.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -55,30 +69,35 @@ static CGFloat const kMiniBarHeight = 58;
 
         [self addSubview:_thumbView];
         [self addSubview:_titleLabel];
+        [self addSubview:_subtitleLabel];
         [self addSubview:_pauseButton];
         [self addSubview:_closeButton];
         [self addSubview:_progress];
 
         [NSLayoutConstraint activateConstraints:@[
-            [_thumbView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10],
+            [_thumbView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
             [_thumbView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-            [_thumbView.widthAnchor constraintEqualToConstant:76],
-            [_thumbView.heightAnchor constraintEqualToConstant:42],
+            [_thumbView.widthAnchor constraintEqualToConstant:kMiniThumb],
+            [_thumbView.heightAnchor constraintEqualToConstant:kMiniThumb],
 
-            [_titleLabel.leadingAnchor constraintEqualToAnchor:_thumbView.trailingAnchor constant:10],
-            [_titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:12],
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_thumbView.trailingAnchor constant:12],
+            [_titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:11],
             [_titleLabel.trailingAnchor constraintEqualToAnchor:_pauseButton.leadingAnchor constant:-8],
+
+            [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+            [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
+            [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:2],
 
             [_progress.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
             [_progress.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
-            [_progress.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:6],
+            [_progress.topAnchor constraintEqualToAnchor:_subtitleLabel.bottomAnchor constant:6],
 
-            [_pauseButton.trailingAnchor constraintEqualToAnchor:_closeButton.leadingAnchor constant:-4],
+            [_pauseButton.trailingAnchor constraintEqualToAnchor:_closeButton.leadingAnchor constant:-8],
             [_pauseButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
             [_pauseButton.widthAnchor constraintEqualToConstant:34],
             [_pauseButton.heightAnchor constraintEqualToConstant:34],
 
-            [_closeButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
+            [_closeButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
             [_closeButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
             [_closeButton.widthAnchor constraintEqualToConstant:30],
             [_closeButton.heightAnchor constraintEqualToConstant:30],
@@ -89,15 +108,12 @@ static CGFloat const kMiniBarHeight = 58;
 
 @end
 
-@interface MVPlayerCenter ()
+@interface MVPlayerCenter () <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) AVPlayer *internalPlayer;
 @property (nonatomic, copy, nullable) NSString *currentTitle;
 @property (nonatomic, strong) MVFloatingPlayerBar *bar;
 @property (nonatomic, strong) id timeObserver;
 @property (nonatomic) BOOL audioSessionReady;
-@end
-
-@interface MVPlayerCenter () <AVAudioSessionDelegate>
 @end
 
 @implementation MVPlayerCenter
@@ -115,12 +131,11 @@ static CGFloat const kMiniBarHeight = 58;
         [_bar.pauseButton addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [_bar.closeButton addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openFullPlayer)];
+        tap.delegate = self;
         [_bar addGestureRecognizer:tap];
         [self registerRemoteCommands];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleInterruption:)
                                                    name:AVAudioSessionInterruptionNotification object:nil];
-        // If something louder happens (a phone call, another app), playback has
-        // already stopped; do not fight it, just refresh the floating bar.
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleRouteChange:)
                                                    name:AVAudioSessionRouteChangeNotification object:nil];
     }
@@ -146,8 +161,6 @@ static CGFloat const kMiniBarHeight = 58;
 - (void)ensureAudioSession {
     if (self.audioSessionReady) return;
     self.audioSessionReady = YES;
-    // Category Playback is what lets audio continue when the app moves into the
-    // background and the screen locks (background mode: audio).
     NSError *err = nil;
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:&err];
     [[AVAudioSession sharedInstance] setActive:YES error:nil];
@@ -156,7 +169,8 @@ static CGFloat const kMiniBarHeight = 58;
 - (void)playURL:(NSURL *)url title:(NSString *)title {
     [self ensureAudioSession];
 
-    self.currentTitle = [title copy];
+    self.currentTitle = title.length ? [title copy] : url.lastPathComponent.stringByDeletingPathExtension;
+    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
     if (!self.internalPlayer) {
         self.internalPlayer = [AVPlayer new];
         __weak typeof(self) weakSelf = self;
@@ -166,10 +180,15 @@ static CGFloat const kMiniBarHeight = 58;
             [weakSelf syncProgress];
         }];
     }
-    [self.internalPlayer replaceCurrentItemWithPlayerItem:[AVPlayerItem playerItemWithURL:url]];
+    [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
     [self.internalPlayer play];
+    [self refreshMiniBar];
     [self showBar];
-    [self syncProgress];
+}
+
+- (void)pause {
+    [self.internalPlayer pause];
+    self.bar.pauseButton.selected = YES;
 }
 
 - (void)toggle {
@@ -195,29 +214,39 @@ static CGFloat const kMiniBarHeight = 58;
 
 - (AVPlayer *)player { return self.internalPlayer; }
 
+- (void)setThumbnailImage:(UIImage *)image {
+    self.bar.thumbView.image = image;
+}
+
 #pragma mark - Floating bar
 
-- (void)showBar {
-    UIWindow *window = [self keyWindow];
-    if (!window) return;
-    if (self.bar.superview) {
-        if (self.bar.superview != window) {
-            [self.bar removeFromSuperview];
-            [window addSubview:self.bar];
-        }
-    } else {
-        [window addSubview:self.bar];
-    }
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+       shouldReceiveTouch:(UITouch *)touch {
+    // The mini bar itself opens the player; the two buttons do not.
+    if (touch.view == self.bar.pauseButton || touch.view == self.bar.closeButton) return NO;
+    return YES;
+}
+
+- (void)refreshMiniBar {
     self.bar.titleLabel.text = self.currentTitle.length ? self.currentTitle : [MVLang t:@"Now playing"];
+    self.bar.subtitleLabel.text = self.isPlaying ? [MVLang t:@"Playing"] : [MVLang t:@"Paused"];
     self.bar.pauseButton.selected = !self.isPlaying;
-    if (!self.bar.constraints.count && self.bar.superview == window) {
+}
+
+- (void)showBar {
+    UIWindow *window = self.bar.window ?: [self keyWindow];
+    if (!window) return;
+    if (self.bar.superview != window) {
+        if (self.bar.superview) [self.bar removeFromSuperview];
+        [window addSubview:self.bar];
         [NSLayoutConstraint activateConstraints:@[
             [self.bar.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:10],
             [self.bar.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-10],
-            [self.bar.bottomAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.bottomAnchor constant:-52],
+            [self.bar.bottomAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.bottomAnchor constant:-54],
             [self.bar.heightAnchor constraintEqualToConstant:kMiniBarHeight],
         ]];
     }
+    self.bar.alpha = 1;
 }
 
 - (void)hideBar {
@@ -230,33 +259,29 @@ static CGFloat const kMiniBarHeight = 58;
 }
 
 - (UIWindow *)keyWindow {
-    UIWindow *window = self.bar.window;
-    if (window) return window;
+    UIWindow *candidate = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         UIWindowScene *ws = (UIWindowScene *)scene;
+        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
         for (UIWindow *w in ws.windows) {
             if (w.isKeyWindow) return w;
+            if (!candidate) candidate = w;
         }
     }
-    UIWindowScene *ws = (UIWindowScene *)UIApplication.sharedApplication.connectedScenes.allObjects.firstObject;
-    return ws.windows.firstObject;
+    return candidate;
 }
 
 - (void)syncProgress {
     if (!self.internalPlayer) return;
-    double total = CMTimeGetSeconds(self.internalPlayer.currentItem.duration);
+    AVPlayerItem *item = self.internalPlayer.currentItem;
+    double total = CMTimeGetSeconds(item.duration);
     double pos = CMTimeGetSeconds(self.internalPlayer.currentTime);
-    if (total > 0) {
-        self.bar.progress.progress = pos / total;
-    } else {
-        self.bar.progress.progress = 0;
-    }
+    self.bar.progress.progress = (total > 0 && !isnan(pos / total)) ? pos / total : 0;
 }
 
 - (void)handleInterruption:(NSNotification *)note {
-    NSDictionary *userInfo = note.userInfo;
-    NSNumber *type = userInfo[AVAudioSessionInterruptionTypeKey];
+    NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
     if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
         [self.internalPlayer pause];
         self.bar.pauseButton.selected = YES;
@@ -272,10 +297,9 @@ static CGFloat const kMiniBarHeight = 58;
 }
 
 - (void)openFullPlayer {
+    [self ensureAudioSession];
     AVPlayerViewController *full = [AVPlayerViewController new];
     full.player = self.internalPlayer;
-    // The user asked for PiP as a way to keep the video visible over other
-    // apps; iOS 15+ honours it when the background mode is declared.
     if (@available(iOS 15.0, *)) {
         full.allowsPictureInPicturePlayback = YES;
     }
@@ -286,8 +310,20 @@ static CGFloat const kMiniBarHeight = 58;
     }
 }
 
+- (void)presentCurrentPlayer {
+    // Called from the row menu / long-press sheet: that sheet is still
+    // dismissing when this runs, and iOS silently drops a presentViewController
+    // while a presentation is in progress (the classic "audio but no player").
+    // Wait for the dismissal to finish, then present. The mini-bar tap uses
+    // -openFullPlayer directly and is unaffected.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self openFullPlayer];
+    });
+}
+
 - (UIViewController *)topViewController {
     UIViewController *root = self.keyWindow.rootViewController;
+    if (!root) return nil;
     while (root.presentedViewController) root = root.presentedViewController;
     return root;
 }

@@ -216,6 +216,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) {
         [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
                                     title:path.lastPathComponent.stringByDeletingPathExtension];
+        [[MVPlayerCenter shared] presentCurrentPlayer];
     } else {
         UIActivityViewController *share = [[UIActivityViewController alloc]
             initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
@@ -295,6 +296,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
                                         title:path.lastPathComponent.stringByDeletingPathExtension];
+            [[MVPlayerCenter shared] presentCurrentPlayer];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [[MVDownloadEngine shared] saveToPhotos:path completion:^(NSString *fp, NSString *err) {

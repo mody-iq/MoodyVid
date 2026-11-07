@@ -22,6 +22,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Stops playback and clears the small floating bar.
 - (void)stop;
 
+/// Presents the native full-screen player if playback has started.
+- (void)presentCurrentPlayer;
+
+/// Replaces the artwork shown in the floating mini-bar.
+- (void)setThumbnailImage:(UIImage *)image;
+
 @property (nonatomic, readonly, getter=isPlaying) BOOL playing;
 @property (nonatomic, readonly, nullable) AVPlayer *player;
 @property (nonatomic, readonly, nullable) NSString *currentTitle;
