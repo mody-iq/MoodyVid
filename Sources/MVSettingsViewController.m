@@ -5,9 +5,166 @@
 #import "MVPython.h"
 
 static NSString *const kCell = @"MVCell";
+static CGFloat const kCorner = 18;
+
+@interface MVSettingsCell : UITableViewCell
+@property (nonatomic, strong) UIView *cardView;
+@property (nonatomic, strong) UIImageView *leadingIcon;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UIView *iconBack;
+@property (nonatomic, strong) UIImageView *chevronView;
+@property (nonatomic, strong) UIView *rightView;    // custom trailing accessory (swatch/mode)
+@property (nonatomic) UIRectCorner maskedCorners;
+@end
+
+/// A settings row: tinted icon chip + title + subtitle + chevron, sitting on a
+/// rounded inset card so each section reads as one modern panel.
+@implementation MVSettingsCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
+        self.backgroundColor = UIColor.clearColor;
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        self.backgroundView = [UIView new];
+        self.backgroundView.backgroundColor = UIColor.clearColor;
+
+        _cardView = [UIView new];
+        _cardView.translatesAutoresizingMaskIntoConstraints = NO;
+        _cardView.backgroundColor = [MVTheme glassCard];
+        _cardView.layer.cornerCurve = kCACornerCurveContinuous;
+        _cardView.layer.borderWidth = 0.5;
+        _cardView.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.35].CGColor;
+        [self.contentView addSubview:_cardView];
+
+        _iconBack = [UIView new];
+        _iconBack.translatesAutoresizingMaskIntoConstraints = NO;
+        _iconBack.layer.cornerRadius = 10;
+        _iconBack.layer.masksToBounds = YES;
+        [_cardView addSubview:_iconBack];
+
+        _leadingIcon = [UIImageView new];
+        _leadingIcon.translatesAutoresizingMaskIntoConstraints = NO;
+        _leadingIcon.contentMode = UIViewContentModeScaleAspectFit;
+        _leadingIcon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIFontWeightSemibold];
+        [_cardView addSubview:_leadingIcon];
+
+        _titleLabel = [UILabel new];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+        _titleLabel.textColor = [MVTheme text];
+        _titleLabel.numberOfLines = 1;
+        [_cardView addSubview:_titleLabel];
+
+        _subtitleLabel = [UILabel new];
+        _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _subtitleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        _subtitleLabel.textColor = [MVTheme secondaryText];
+        _subtitleLabel.numberOfLines = 1;
+        [_cardView addSubview:_subtitleLabel];
+
+        // Container for a trailing accessory (wallpaper swatch or mode label).
+        // It lives inside the card so it can sit before the chevron.
+        _rightView = [UIView new];
+        _rightView.translatesAutoresizingMaskIntoConstraints = NO;
+        [_cardView addSubview:_rightView];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_cardView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14],
+            [_cardView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14],
+            [_cardView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:2],
+            [_cardView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-2],
+
+            [_iconBack.leadingAnchor constraintEqualToAnchor:_cardView.leadingAnchor constant:12],
+            [_iconBack.centerYAnchor constraintEqualToAnchor:_cardView.centerYAnchor],
+            [_iconBack.widthAnchor constraintEqualToConstant:38],
+            [_iconBack.heightAnchor constraintEqualToConstant:38],
+
+            [_leadingIcon.centerXAnchor constraintEqualToAnchor:_iconBack.centerXAnchor],
+            [_leadingIcon.centerYAnchor constraintEqualToAnchor:_iconBack.centerYAnchor],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconBack.trailingAnchor constant:14],
+            [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_rightView.leadingAnchor constant:-10],
+            [_titleLabel.centerYAnchor constraintEqualToAnchor:_cardView.centerYAnchor],
+
+            [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+            [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:1],
+            [_subtitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_cardView.trailingAnchor constant:-58],
+
+            [_rightView.trailingAnchor constraintEqualToAnchor:_cardView.trailingAnchor constant:-42],
+            [_rightView.centerYAnchor constraintEqualToAnchor:_cardView.centerYAnchor],
+            [_rightView.widthAnchor constraintGreaterThanOrEqualToConstant:34],
+        ]];
+    }
+    return self;
+}
+
+- (void)setMaskedCorners:(UIRectCorner)maskedCorners {
+    _maskedCorners = maskedCorners;
+    [self applyMask];
+}
+
+- (void)applyMask {
+    UIRectCorner corners = _maskedCorners;
+    if (corners == 0) {
+        _cardView.layer.cornerRadius = kCorner;
+        _cardView.layer.mask = nil;
+        return;
+    }
+    _cardView.layer.cornerRadius = 0;
+    CGRect b = _cardView.bounds;
+    if (CGRectIsEmpty(b)) b = CGRectMake(0, 0, 320, 60);
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:b
+                                               byRoundingCorners:corners
+                                                     cornerRadii:CGSizeMake(kCorner, kCorner)];
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    mask.path = path.CGPath;
+    mask.frame = b;
+    _cardView.layer.mask = mask;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self applyMask];
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    _maskedCorners = 0;
+    _cardView.layer.mask = nil;
+    _cardView.layer.cornerRadius = kCorner;
+    [_chevronView removeFromSuperview];
+    _chevronView = nil;
+    for (UIView *v in _rightView.subviews) [v removeFromSuperview];
+}
+
+- (void)setHasChevron:(BOOL)has {
+    if (!has) return;
+    if (!_chevronView) {
+        _chevronView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"]];
+        _chevronView.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIFontWeightSemibold];
+        _chevronView.tintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.6];
+        _chevronView.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.cardView addSubview:_chevronView];
+        [NSLayoutConstraint activateConstraints:@[
+            [_chevronView.trailingAnchor constraintEqualToAnchor:self.cardView.trailingAnchor constant:-16],
+            [_chevronView.centerYAnchor constraintEqualToAnchor:self.cardView.centerYAnchor],
+        ]];
+    }
+}
+
+- (void)configureIcon:(NSString *)symbol tint:(UIColor *)tint {
+    self.leadingIcon.image = [UIImage systemImageNamed:symbol];
+    self.leadingIcon.tintColor = tint;
+    self.iconBack.backgroundColor = [tint colorWithAlphaComponent:0.16];
+}
+
+@end
 
 @interface MVSettingsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UIView *footerBar;
+@property (nonatomic, strong) UILabel *footerLabel;
 @end
 
 @implementation MVSettingsViewController
@@ -17,18 +174,51 @@ static NSString *const kCell = @"MVCell";
     self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"More"];
 
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    // Each section is a separate rounded card, so the plain list is just the
+    // scrolling surface; the cells carry their own inset, rounded cards.
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.backgroundColor = UIColor.clearColor;
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
-    [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:kCell];
+    self.tableView.rowHeight = 62;
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    self.tableView.contentInset = UIEdgeInsetsMake(0, 0, 64, 0);
+    self.tableView.tableFooterView = [UIView new];
+    [self.tableView registerClass:MVSettingsCell.class forCellReuseIdentifier:kCell];
     [self.view addSubview:self.tableView];
+
+    // A credit line anchored to the bottom of the screen. It lives in its own
+    // bar (with a background) outside the table, so it never scrolls and never
+    // looks like stray text floating over the rows.
+    self.footerBar = [UIView new];
+    self.footerBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyCardStyle:self.footerBar cornerRadius:0];
+    self.footerBar.layer.borderWidth = 0;
+    [self.view addSubview:self.footerBar];
+
+    self.footerLabel = [UILabel new];
+    self.footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.footerLabel.text = [MVLang t:@"Made with love"];
+    self.footerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.footerLabel.textColor = [MVTheme secondaryText];
+    self.footerLabel.textAlignment = NSTextAlignmentCenter;
+    [self.footerBar addSubview:self.footerLabel];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.tableView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.footerBar.topAnchor],
+
+        [self.footerBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.footerBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.footerBar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+        [self.footerBar.heightAnchor constraintEqualToConstant:44],
+
+        [self.footerLabel.leadingAnchor constraintEqualToAnchor:self.footerBar.leadingAnchor constant:20],
+        [self.footerLabel.trailingAnchor constraintEqualToAnchor:self.footerBar.trailingAnchor constant:-20],
+        [self.footerLabel.centerYAnchor constraintEqualToAnchor:self.footerBar.centerYAnchor],
     ]];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh)
@@ -40,11 +230,23 @@ static NSString *const kCell = @"MVCell";
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refresh];
+    // The very first appearance lays the table out at zero width; reload once
+    // the frame is real so the rounded cards render correctly.
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_.tableView setNeedsLayout];
+        [self_.tableView layoutIfNeeded];
+        [self_.tableView reloadData];
+    });
 }
 
 - (void)refresh {
     self.title = [MVLang t:@"More"];
     [MVTheme applyWallpaperTo:self.view];
+    self.footerLabel.text = [MVLang t:@"Made with love"];
+    self.footerLabel.textColor = [MVTheme secondaryText];
     [self.tableView reloadData];
 }
 
@@ -81,59 +283,124 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionAppearance: return 1;
         case MVMoreSectionWallpaper:  return 1;
         case MVMoreSectionStorage:    return 2;
-        case MVMoreSectionAbout:      return 1;
+        case MVMoreSectionAbout:      return 3;
         default: return 0;
     }
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case MVMoreSectionLanguage:   return nil;
-        case MVMoreSectionAppearance: return nil;
-        case MVMoreSectionWallpaper:  return nil;
         case MVMoreSectionStorage:    return [MVLang t:@"Storage"];
         case MVMoreSectionAbout:      return [MVLang t:@"About"];
         default: return nil;
     }
 }
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCell forIndexPath:indexPath];
-    UIListContentConfiguration *content = [UIListContentConfiguration valueCellConfiguration];
-    content.textProperties.color = [MVTheme text];
-    content.secondaryTextProperties.color = [MVTheme secondaryText];
-    cell.accessoryView = nil;
-    cell.accessoryType = UITableViewCellAccessoryNone;
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    return title.length ? 44 : 16;
+}
 
-    if (indexPath.section == MVMoreSectionLanguage) {
-        content.text = [MVLang t:@"Language"];
-        content.secondaryText = [MVLang displayNameForCode:MVLang.shared.code];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    } else if (indexPath.section == MVMoreSectionAppearance) {
-        content.text = [MVLang t:@"Appearance"];
-        cell.accessoryView = [self modeLabel];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    } else if (indexPath.section == MVMoreSectionWallpaper) {
-        content.text = [MVLang t:@"Wallpaper"];
-        // Current wallpaper name plus a small preview swatch.
-        NSString *key = MVTheme.wallpaperName;
-        content.secondaryText = [MVLang t:[self wallpaperLabelForKey:key]];
-        cell.accessoryView = [self wallpaperSwatchViewForName:key];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    } else if (indexPath.section == MVMoreSectionStorage) {
-        if (indexPath.row == 0) {
-            content.text = [MVLang t:@"Storage"];
-            content.secondaryText = [NSString stringWithFormat:@"%@ %@", [MVPaths formatBytes:[MVPaths freeSpace]], [MVLang t:@"available"]];
-        } else {
-            content.text = [MVLang t:@"Clear cache"];
-            content.secondaryText = [MVPaths formatBytes:[self cacheSize]];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    UIView *box = [UIView new];
+    box.backgroundColor = UIColor.clearColor;
+    if (!title.length) return box;
+
+    UILabel *label = [UILabel new];
+    label.text = title.uppercaseString;
+    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    label.textColor = [MVTheme secondaryText];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [box addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:30],
+        [label.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-30],
+        [label.centerYAnchor constraintEqualToAnchor:box.centerYAnchor],
+    ]];
+    return box;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    return 2;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    return [UIView new];
+}
+
+/// The mask bits a row needs so all cells of one section merge into a single
+/// card: the first row rounds the top corners, the last rounds the bottom.
+- (void)applyCardStyleToCell:(MVSettingsCell *)cell section:(NSInteger)section row:(NSInteger)row {
+    NSInteger rows = [self tableView:self.tableView numberOfRowsInSection:section];
+    UIRectCorner corners = 0;
+    if (row == 0)            corners |= UIRectCornerTopLeft | UIRectCornerTopRight;
+    if (row == rows - 1)     corners |= UIRectCornerBottomLeft | UIRectCornerBottomRight;
+    cell.maskedCorners = corners;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    MVSettingsCell *cell = [tableView dequeueReusableCellWithIdentifier:kCell forIndexPath:indexPath];
+    [cell setHasChevron:NO];
+
+    switch (indexPath.section) {
+        case MVMoreSectionLanguage: {
+            cell.titleLabel.text = [MVLang t:@"Language"];
+            cell.subtitleLabel.text = [MVLang displayNameForCode:MVLang.shared.code];
+            [cell configureIcon:@"globe" tint:[MVTheme accent]];
+            [cell setHasChevron:YES];
+            break;
         }
-    } else {
-        content.text = [MVLang t:@"Version"];
-        content.secondaryText = [self engineVersion];
+        case MVMoreSectionAppearance: {
+            cell.titleLabel.text = [MVLang t:@"Appearance"];
+            cell.subtitleLabel.text = [self modeName];
+            [self attachToRight:cell view:[self modeBadge]];
+            [cell configureIcon:@"paintpalette.fill" tint:[MVTheme warning]];
+            [cell setHasChevron:YES];
+            break;
+        }
+        case MVMoreSectionWallpaper: {
+            cell.titleLabel.text = [MVLang t:@"Wallpaper"];
+            cell.subtitleLabel.text = [MVLang t:[self wallpaperLabelForKey:MVTheme.wallpaperName]];
+            [self attachToRight:cell view:[self wallpaperSwatchViewForName:MVTheme.wallpaperName]];
+            [cell configureIcon:@"photo.on.rectangle.angled" tint:[MVTheme success]];
+            [cell setHasChevron:YES];
+            break;
+        }
+        case MVMoreSectionStorage: {
+            if (indexPath.row == 0) {
+                cell.titleLabel.text = [MVLang t:@"Storage"];
+                cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ • %@ %@",
+                                           [MVPaths formatBytes:[MVPaths totalSpace]],
+                                           [MVPaths formatBytes:[MVPaths freeSpace]],
+                                           [MVLang t:@"available"]];
+                [cell configureIcon:@"internaldrive.fill" tint:[MVTheme accentSoft]];
+            } else {
+                cell.titleLabel.text = [MVLang t:@"Clear cache"];
+                cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ — %@", [MVPaths formatBytes:[self cacheSize]], [MVLang t:@"Tap to clear"]];
+                [cell configureIcon:@"trash.fill" tint:[MVTheme danger]];
+                [cell setHasChevron:YES];
+            }
+            break;
+        }
+        case MVMoreSectionAbout: {
+            if (indexPath.row == 0) {
+                cell.titleLabel.text = [MVLang t:@"Version"];
+                cell.subtitleLabel.text = [self engineVersion];
+                [cell configureIcon:@"info.circle.fill" tint:[MVTheme accent]];
+            } else if (indexPath.row == 1) {
+                cell.titleLabel.text = [MVLang t:@"Developer"];
+                cell.subtitleLabel.text = @"Mohammed-Mutar 🇮🇶";
+                [cell configureIcon:@"person.crop.circle.fill" tint:[MVTheme success]];
+            } else {
+                cell.titleLabel.text = [MVLang t:@"Contact"];
+                cell.subtitleLabel.text = @"Moh.mutar7@gmail.com";
+                [cell configureIcon:@"envelope.fill" tint:[MVTheme warning]];
+            }
+            break;
+        }
     }
-    cell.contentConfiguration = content;
+    [self applyCardStyleToCell:cell section:indexPath.section row:indexPath.row];
     return cell;
 }
 
@@ -152,9 +419,21 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionStorage:
             if (indexPath.row == 1) [self clearCache];
             break;
+        case MVMoreSectionAbout:
+            if (indexPath.row == 2) [self copyDeveloperEmail];
+            break;
         default:
             break;
     }
+}
+
+- (void)copyDeveloperEmail {
+    UIPasteboard.generalPasteboard.string = @"Moh.mutar7@gmail.com";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Copied"]
+                                                                  message:@"Moh.mutar7@gmail.com"
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)showLanguageMenu {
@@ -250,18 +529,43 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     return labels[key] ?: key;
 }
 
-// The label that shows the current theme next to the "Appearance" row.
-- (UIView *)modeLabel {
-    UILabel *label = [UILabel new];
+- (NSString *)modeName {
     switch (MVTheme.shared.mode) {
-        case MVThemeModeDark:  label.text = [MVLang t:@"Dark"];  break;
-        case MVThemeModeLight: label.text = [MVLang t:@"Light"]; break;
-        default:               label.text = [MVLang t:@"System"]; break;
+        case MVThemeModeDark:  return [MVLang t:@"Dark"];
+        case MVThemeModeLight: return [MVLang t:@"Light"];
+        default:               return [MVLang t:@"System"];
     }
-    label.font = [UIFont systemFontOfSize:15];
-    label.textColor = [MVTheme secondaryText];
-    [label sizeToFit];
-    return label;
+}
+
+/// Puts the given accessory into the cell's trailing slot, centering it.
+- (void)attachToRight:(MVSettingsCell *)cell view:(UIView *)view {
+    view.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.rightView addSubview:view];
+    [NSLayoutConstraint activateConstraints:@[
+        [view.centerXAnchor constraintEqualToAnchor:cell.rightView.centerXAnchor],
+        [view.centerYAnchor constraintEqualToAnchor:cell.rightView.centerYAnchor],
+    ]];
+}
+
+/// The pill that shows the current appearance mode next to "Appearance".
+- (UIView *)modeBadge {
+    UILabel *label = [UILabel new];
+    label.text = self.modeName;
+    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    label.textColor = UIColor.whiteColor;
+    UIView *badge = [[UIView alloc] initWithFrame:CGRectZero];
+    badge.backgroundColor = [MVTheme accent];
+    badge.layer.cornerRadius = 11;
+    [badge addSubview:label];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [label.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor],
+        [label.leadingAnchor constraintEqualToAnchor:badge.leadingAnchor constant:12],
+        [label.trailingAnchor constraintEqualToAnchor:badge.trailingAnchor constant:-12],
+        [badge.heightAnchor constraintEqualToConstant:24],
+    ]];
+    return badge;
 }
 
 // A small reusable preview swatch (gradient or rendered pattern).

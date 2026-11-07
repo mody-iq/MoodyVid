@@ -2,6 +2,7 @@
 #import "MVPython.h"
 #import "MVPaths.h"
 #import "MVLang.h"
+#import "MVMediaConverter.h"
 #import <Photos/Photos.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -121,6 +122,21 @@ static const NSUInteger kMaxConcurrent = 2;
     [self updateBackgroundTask];
 }
 
+/// True for the height qualities that need a separate video + audio stream
+/// merged back together (1080p and up on YouTube are usually two streams).
++ (BOOL)isMergedQuality:(NSString *)quality {
+    if (!quality.length) return NO;
+    if ([quality isEqualToString:@"mp3"]) return NO;
+    if ([quality isEqualToString:@"audio"]) return NO;
+    NSInteger h = quality.integerValue;
+    return h >= 1080;
+}
+
+/// True when the download produces a single file handled by the regular path.
++ (BOOL)isSimpleQuality:(NSString *)quality {
+    return !([self isMergedQuality:quality] || [quality isEqualToString:@"mp3"]);
+}
+
 - (void)startJob:(MVDownloadJob *)job {
     MVDownloadRecord *record = [self recordFor:job.identifier];
     record.state = MVDownloadStateActive;
@@ -129,6 +145,17 @@ static const NSUInteger kMaxConcurrent = 2;
     _running[job.identifier] = job;
     [self startPolling:record];
 
+    if ([MVDownloadEngine isMergedQuality:job.quality]) {
+        [self startMergedJob:job];
+    } else if ([job.quality isEqualToString:@"mp3"]) {
+        [self startAudioToMP3Job:job];
+    } else {
+        [self startSimpleJob:job];
+    }
+}
+
+/// Single combined stream: the existing flow, unchanged.
+- (void)startSimpleJob:(MVDownloadJob *)job {
     __weak typeof(self) weakSelf = self;
     [[MVPython shared] call:@"downloader" function:@"download" args:@[job.url, job.quality]
                        task:job.identifier
@@ -137,6 +164,97 @@ static const NSUInteger kMaxConcurrent = 2;
         if (!self_) return;
         [self_ finishJob:job result:result error:error];
     }];
+}
+
+/// Questionable — two fragments then mux. Keeps a single record and a single
+/// progress ring across the whole run.
+- (void)startMergedJob:(MVDownloadJob *)job {
+    MVDownloadRecord *record = [self recordFor:job.identifier];
+    [self setTransient:record message:nil];
+
+    __weak typeof(self) weakSelf = self;
+    // 1) Video stream only.
+    [[MVPython shared] call:@"downloader" function:@"download_fragment"
+                       args:@[job.url, @"video", job.quality]
+                       task:job.identifier
+                 completion:^(NSDictionary *videoResult, NSString *vErr) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!videoResult || [videoResult[@"path"] length] == 0) {
+            [self_ finishJob:job result:nil error:vErr ?: [MVLang t:@"Unknown error"]];
+            return;
+        }
+        // 2) Audio stream only.
+        [[MVPython shared] call:@"downloader" function:@"download_fragment"
+                           args:@[job.url, @"audio", @"best"]
+                           task:job.identifier
+                     completion:^(NSDictionary *audioResult, NSString *aErr) {
+            typeof(self) self_ = weakSelf;
+            if (!self_) return;
+            NSString *videoPath = videoResult[@"path"];
+            NSString *audioPath = audioResult[@"path"];
+            if (!audioPath.length) {
+                [NSFileManager.defaultManager removeItemAtPath:videoPath error:nil];
+                [self_ finishJob:job result:nil error:aErr ?: [MVLang t:@"Unknown error"]];
+                return;
+            }
+            [self_ setTransient:[self_ recordFor:job.identifier] message:[MVLang t:@"Merging…"]];
+            // 3) Native remux.
+            NSString *outPath = [[videoPath stringByDeletingPathExtension]
+                                 stringByAppendingPathExtension:@"mp4"];
+            [MVMediaConverter muxVideo:videoPath audio:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
+                typeof(self) self_ = weakSelf;
+                if (!self_) return;
+                if (ok) {
+                    NSDictionary *merged = @{@"path": outPath, @"title": videoResult[@"title"] ?: @"",
+                                             @"thumbnail": videoResult[@"thumbnail"] ?: @""};
+                    [self_ finishJob:job result:merged error:nil];
+                } else {
+                    [self_ finishJob:job result:nil error:err ?: [MVLang t:@"Merge failed"]];
+                }
+            }];
+        }];
+    }];
+}
+
+/// Downloads the best audio stream and encodes it into an MP3.
+- (void)startAudioToMP3Job:(MVDownloadJob *)job {
+    __weak typeof(self) weakSelf = self;
+    [[MVPython shared] call:@"downloader" function:@"download_fragment"
+                       args:@[job.url, @"audio", @"best"]
+                       task:job.identifier
+                 completion:^(NSDictionary *result, NSString *error) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        if (!result || [result[@"path"] length] == 0) {
+            [self_ finishJob:job result:nil error:error ?: [MVLang t:@"Unknown error"]];
+            return;
+        }
+        NSString *audioPath = result[@"path"];
+        NSString *outPath = [[audioPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp3"];
+        [self_ setTransient:[self_ recordFor:job.identifier] message:[MVLang t:@"Converting…"]];
+        [MVMediaConverter convertToMP3:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
+            typeof(self) self_ = weakSelf;
+            if (!self_) return;
+            NSString *finalPath = outPath;
+            if (!ok && ![NSFileManager.defaultManager fileExistsAtPath:outPath]) {
+                // No encoder built in this binary: keep the un-converted file.
+                finalPath = audioPath;
+            }
+            NSDictionary *audio = @{@"path": finalPath, @"title": result[@"title"] ?: @"",
+                                    @"thumbnail": result[@"thumbnail"] ?: @"",
+                                    @"ext": finalPath.pathExtension.lowercaseString ?: @"mp3"};
+            [self_ finishJob:job result:audio error:nil];
+        }];
+    }];
+}
+
+/// Stores a transient status message the row shows while a post-download step
+/// (mux, encode) runs. The `error` field is cleared when the job completes.
+- (void)setTransient:(MVDownloadRecord *)record message:(NSString * _Nullable)message {
+    if (!record) return;
+    record.error = message;
+    [MVDownloadStore.shared update:record];
 }
 
 - (void)finishJob:(MVDownloadJob *)job result:(NSDictionary *)result error:(NSString *)error {
@@ -194,6 +312,7 @@ static const NSUInteger kMaxConcurrent = 2;
     record.progress = 1.0;
     record.speed = 0;
     record.eta = 0;
+    record.error = nil;  // drop the transient "Merging…"/"Converting…" phase text
     record.totalBytes = [self fileSize:path];
     record.state = MVDownloadStateCompleted;
     [MVDownloadStore.shared update:record];

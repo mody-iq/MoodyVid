@@ -18,18 +18,26 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *emptyLabel;
 @property (nonatomic, strong) UILabel *storageLabel;
+@property (nonatomic, strong) UIView *headerView;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
 @property (nonatomic) MVSortMode sortMode;
 
-// Inline player card: videos play here, inside the tab, instead of a black
-// full-screen modal.
+// Inline player: videos play here, inside the tab page, instead of a black
+// full-screen modal. It carries the same transport as the floating mini bar
+// (previous / 15s back / play-pause / 15s forward / next) plus a scrubber.
 @property (nonatomic, strong) UIView *playerCard;
 @property (nonatomic, strong) UIView *videoSurface;
 @property (nonatomic, strong) AVPlayerLayer *videoLayer;
 @property (nonatomic, strong) UILabel *nowTitleLabel;
+@property (nonatomic, strong) UIButton *prevButton;
+@property (nonatomic, strong) UIButton *backButton;
 @property (nonatomic, strong) UIButton *playPauseButton;
+@property (nonatomic, strong) UIButton *forwardButton;
+@property (nonatomic, strong) UIButton *nextButton;
 @property (nonatomic, strong) UIButton *cardCloseButton;
+@property (nonatomic, strong) UISlider *cardSlider;
+@property (nonatomic, strong) UILabel *cardTimeLabel;
 @property (nonatomic, assign) BOOL cardOpen;
 @property (nonatomic, strong) NSLayoutConstraint *cardHeight;
 @property (nonatomic, strong) id cardObserver;
@@ -51,23 +59,31 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
                                                            target:self action:@selector(showSortMenu)];
     self.navigationItem.rightBarButtonItems = @[newFolder, sort];
 
-    UILongPressGestureRecognizer *longPress =
-        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
-    [self.tableView addGestureRecognizer:longPress];
-
     self.storageLabel = [UILabel new];
-    self.storageLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    self.storageLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     self.storageLabel.textColor = [MVTheme secondaryText];
     self.storageLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.storageLabel];
 
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    // A plain list, full-bleed under the translucent chrome, so it scrolls and
+    // feels like the rest of the system rather than a floating inset panel.
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.backgroundColor = UIColor.clearColor;
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
+    self.tableView.rowHeight = 60;
+    self.tableView.estimatedRowHeight = 60;
+    self.tableView.separatorInset = UIEdgeInsetsMake(0, 74, 0, 0);
+    self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.28];
+    self.tableView.tableFooterView = [UIView new];
     [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"MVFileCell"];
     [self.view addSubview:self.tableView];
+
+    // Must be added after the table exists, or the gesture is attached to nil.
+    UILongPressGestureRecognizer *longPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
+    [self.tableView addGestureRecognizer:longPress];
 
     self.emptyLabel = [UILabel new];
     self.emptyLabel.textColor = [MVTheme secondaryText];
@@ -80,23 +96,31 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.search.searchResultsUpdater = self;
     self.search.obscuresBackgroundDuringPresentation = NO;
     self.navigationItem.searchController = self.search;
-    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.navigationItem.hidesSearchBarWhenScrolling = YES;
     self.definesPresentationContext = YES;
 
     [self buildPlayerCard];
-    self.cardHeight = [self.playerCard.heightAnchor constraintEqualToConstant:0];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.storageLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
-        [self.storageLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:32],
-        [self.storageLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-32],
 
-        // Inline player card sits between the storage line and the list.
+    // The player and the storage line live in the table's header, so the video
+    // is part of the page and scrolls with it, rather than floating over it.
+    self.cardHeight = [self.playerCard.heightAnchor constraintEqualToConstant:0];
+    self.headerView = [UIView new];
+    [self.headerView addSubview:self.storageLabel];
+    [self.headerView addSubview:self.playerCard];
+    self.tableView.tableHeaderView = self.headerView;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.storageLabel.topAnchor constraintEqualToAnchor:self.headerView.topAnchor constant:4],
+        [self.storageLabel.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:20],
+        [self.storageLabel.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-20],
+
         [self.playerCard.topAnchor constraintEqualToAnchor:self.storageLabel.bottomAnchor constant:10],
-        [self.playerCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [self.playerCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [self.playerCard.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:16],
+        [self.playerCard.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-16],
+        [self.playerCard.bottomAnchor constraintEqualToAnchor:self.headerView.bottomAnchor constant:-8],
         self.cardHeight,
 
-        [self.tableView.topAnchor constraintEqualToAnchor:self.playerCard.bottomAnchor constant:8],
+        [self.tableView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
@@ -106,6 +130,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     ]];
     self.cardHeight.constant = 0;
     self.playerCard.hidden = YES;
+    [self sizeHeaderToFit];
 
     for (NSString *name in @[MVDownloadStoreDidChangeNotification, MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
@@ -177,78 +202,138 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.playerCard = [UIView new];
     self.playerCard.translatesAutoresizingMaskIntoConstraints = NO;
     self.playerCard.clipsToBounds = YES;
-    [MVTheme applyCardStyle:self.playerCard cornerRadius:18];
+    [MVTheme applyCardStyle:self.playerCard cornerRadius:20];
 
     self.videoSurface = [UIView new];
     self.videoSurface.translatesAutoresizingMaskIntoConstraints = NO;
-    self.videoSurface.backgroundColor = UIColor.blackColor;
+    self.videoSurface.backgroundColor = [[MVTheme background] colorWithAlphaComponent:0.25];
     self.videoSurface.layer.masksToBounds = YES;
-    self.videoSurface.layer.cornerRadius = 12;
+    self.videoSurface.layer.cornerRadius = 14;
+    self.videoSurface.layer.borderWidth = 0.5;
+    self.videoSurface.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.3].CGColor;
     [self.playerCard addSubview:self.videoSurface];
 
     self.nowTitleLabel = [UILabel new];
     self.nowTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.nowTitleLabel.numberOfLines = 2;
-    self.nowTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    self.nowTitleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
     self.nowTitleLabel.textColor = [MVTheme text];
     self.nowTitleLabel.text = [MVLang t:@"Now playing"];
     [self.playerCard addSubview:self.nowTitleLabel];
 
-    self.playPauseButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.playPauseButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.playPauseButton setImage:[UIImage systemImageNamed:@"pause.fill"] forState:UIControlStateNormal];
-    self.playPauseButton.tintColor = [MVTheme accent];
-    [self.playPauseButton addTarget:self action:@selector(toggleInlinePlay) forControlEvents:UIControlEventTouchUpInside];
-    [self.playerCard addSubview:self.playPauseButton];
+    self.cardSlider = [UISlider new];
+    self.cardSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    self.cardSlider.minimumTrackTintColor = [MVTheme accent];
+    self.cardSlider.maximumTrackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.3];
+    [self.cardSlider setThumbTintColor:[MVTheme accent]];
+    [self.cardSlider addTarget:self action:@selector(cardScrub) forControlEvents:UIControlEventValueChanged];
+    [self.cardSlider addTarget:self action:@selector(cardScrubEnd) forControlEvents:UIControlEventTouchUpInside];
+    [self.cardSlider addTarget:self action:@selector(cardScrubEnd) forControlEvents:UIControlEventTouchUpOutside];
+    [self.playerCard addSubview:self.cardSlider];
+
+    self.cardTimeLabel = [UILabel new];
+    self.cardTimeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.cardTimeLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular];
+    self.cardTimeLabel.textColor = [MVTheme secondaryText];
+    self.cardTimeLabel.text = @"0:00 / 0:00";
+    [self.playerCard addSubview:self.cardTimeLabel];
+
+    // Transport: prev / back 15 / play-pause / forward 15 / next, centered.
+    // Anchored from the centre so it stays balanced on any width.
+    self.prevButton = [self cardButton:@"backward.end.fill" action:@selector(inlinePrev)];
+    self.backButton = [self cardButton:@"gobackward.15" action:@selector(inlineBack)];
+    self.playPauseButton = [self cardButton:@"pause.fill" action:@selector(toggleInlinePlay)];
+    self.forwardButton = [self cardButton:@"goforward.15" action:@selector(inlineForward)];
+    self.nextButton = [self cardButton:@"forward.end.fill" action:@selector(inlineNext)];
 
     self.cardCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.cardCloseButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.cardCloseButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
-    self.cardCloseButton.tintColor = [MVTheme secondaryText];
+    self.cardCloseButton.tintColor = [[MVTheme text] colorWithAlphaComponent:0.7];
+    self.cardCloseButton.backgroundColor = [[MVTheme background] colorWithAlphaComponent:0.35];
+    self.cardCloseButton.layer.cornerRadius = 15;
+    self.cardCloseButton.clipsToBounds = YES;
     [self.cardCloseButton addTarget:self action:@selector(closeInlinePlayer) forControlEvents:UIControlEventTouchUpInside];
     [self.playerCard addSubview:self.cardCloseButton];
+
+    UILayoutPriority inner = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *surfaceTop = [self.videoSurface.topAnchor constraintEqualToAnchor:self.playerCard.topAnchor constant:12];
+    surfaceTop.priority = inner;
+    NSLayoutConstraint *collapseBottom = [self.nextButton.bottomAnchor constraintEqualToAnchor:self.playerCard.bottomAnchor constant:-10];
+    collapseBottom.priority = inner;
 
     NSLayoutConstraint *videoAspect = [self.videoSurface.heightAnchor
         constraintEqualToAnchor:self.videoSurface.widthAnchor multiplier:9.0/16.0];
     videoAspect.priority = UILayoutPriorityRequired;
 
-    // Inner vertical constraints are breakable so collapsing the card to a
-    // zero height (hidden) doesn't fight them.
-    UILayoutPriority inner = UILayoutPriorityDefaultHigh;
-
-    NSLayoutConstraint *surfaceTop = [self.videoSurface.topAnchor constraintEqualToAnchor:self.playerCard.topAnchor constant:12];
-    NSLayoutConstraint *labelTop = [self.nowTitleLabel.topAnchor constraintEqualToAnchor:self.videoSurface.bottomAnchor constant:10];
-    NSLayoutConstraint *labelBottom = [self.nowTitleLabel.bottomAnchor constraintEqualToAnchor:self.playerCard.bottomAnchor constant:-6];
-    NSLayoutConstraint *playCenter = [self.playPauseButton.centerYAnchor constraintEqualToAnchor:self.nowTitleLabel.centerYAnchor];
-    surfaceTop.priority = inner;
-    labelTop.priority = inner;
-    labelBottom.priority = inner;
-    playCenter.priority = inner;
-
-    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray array];
-    [constraints addObjectsFromArray:@[
+    // Transport spacing: five 36pt buttons (play 44) with 10pt gaps, centred.
+    [NSLayoutConstraint activateConstraints:@[
         [self.videoSurface.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:12],
         [self.videoSurface.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-12],
         videoAspect,
         surfaceTop,
 
-        [self.nowTitleLabel.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:16],
-        [self.nowTitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.playPauseButton.leadingAnchor constant:-12],
-        labelTop,
-        labelBottom,
-
-        [self.playPauseButton.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-12],
-        [self.playPauseButton.widthAnchor constraintEqualToConstant:40],
-        [self.playPauseButton.heightAnchor constraintEqualToConstant:40],
-        playCenter,
-
-        [self.cardCloseButton.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-8],
-        [self.cardCloseButton.topAnchor constraintEqualToAnchor:self.playerCard.topAnchor constant:8],
+        [self.cardCloseButton.centerXAnchor constraintEqualToAnchor:self.videoSurface.trailingAnchor constant:-16],
+        [self.cardCloseButton.centerYAnchor constraintEqualToAnchor:self.videoSurface.topAnchor constant:16],
         [self.cardCloseButton.widthAnchor constraintEqualToConstant:30],
         [self.cardCloseButton.heightAnchor constraintEqualToConstant:30],
+
+        [self.nowTitleLabel.topAnchor constraintEqualToAnchor:self.videoSurface.bottomAnchor constant:10],
+        [self.nowTitleLabel.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:16],
+        [self.nowTitleLabel.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-16],
+
+        [self.cardSlider.topAnchor constraintEqualToAnchor:self.nowTitleLabel.bottomAnchor constant:6],
+        [self.cardSlider.leadingAnchor constraintEqualToAnchor:self.playerCard.leadingAnchor constant:16],
+        [self.cardSlider.trailingAnchor constraintEqualToAnchor:self.playerCard.trailingAnchor constant:-16],
+
+        [self.cardTimeLabel.topAnchor constraintEqualToAnchor:self.cardSlider.bottomAnchor constant:2],
+        [self.cardTimeLabel.centerXAnchor constraintEqualToAnchor:self.playerCard.centerXAnchor],
+
+        // Transport chain, right-to-left, anchored at the centre.
+        [self.nextButton.centerYAnchor constraintEqualToAnchor:self.cardTimeLabel.bottomAnchor constant:14],
+        [self.nextButton.trailingAnchor constraintEqualToAnchor:self.playerCard.centerXAnchor constant:106],
+        [self.nextButton.widthAnchor constraintEqualToConstant:36],
+        [self.nextButton.heightAnchor constraintEqualToConstant:36],
+
+        [self.forwardButton.centerYAnchor constraintEqualToAnchor:self.nextButton.centerYAnchor],
+        [self.forwardButton.trailingAnchor constraintEqualToAnchor:self.nextButton.leadingAnchor constant:-10],
+        [self.forwardButton.widthAnchor constraintEqualToConstant:36],
+        [self.forwardButton.heightAnchor constraintEqualToConstant:36],
+
+        [self.playPauseButton.centerYAnchor constraintEqualToAnchor:self.nextButton.centerYAnchor],
+        [self.playPauseButton.trailingAnchor constraintEqualToAnchor:self.forwardButton.leadingAnchor constant:-10],
+        [self.playPauseButton.widthAnchor constraintEqualToConstant:44],
+        [self.playPauseButton.heightAnchor constraintEqualToConstant:44],
+
+        [self.backButton.centerYAnchor constraintEqualToAnchor:self.nextButton.centerYAnchor],
+        [self.backButton.trailingAnchor constraintEqualToAnchor:self.playPauseButton.leadingAnchor constant:-10],
+        [self.backButton.widthAnchor constraintEqualToConstant:36],
+        [self.backButton.heightAnchor constraintEqualToConstant:36],
+
+        [self.prevButton.centerYAnchor constraintEqualToAnchor:self.nextButton.centerYAnchor],
+        [self.prevButton.trailingAnchor constraintEqualToAnchor:self.backButton.leadingAnchor constant:-10],
+        [self.prevButton.widthAnchor constraintEqualToConstant:36],
+        [self.prevButton.heightAnchor constraintEqualToConstant:36],
+        [self.prevButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.playerCard.leadingAnchor constant:16],
+        collapseBottom,
     ]];
-    [NSLayoutConstraint activateConstraints:constraints];
-    [self.view addSubview:self.playerCard];
+}
+
+/// Builds a transport button sharing the player's look.
+- (UIButton *)cardButton:(NSString *)symbol action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    b.tintColor = [MVTheme text];
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [self.playerCard addSubview:b];
+    return b;
+}
+
+/// Picks the biggest play/pause image of all the transport buttons.
+- (UIImage *)playPauseImageForState:(BOOL)playing {
+    NSString *name = playing ? @"pause.fill" : @"play.fill";
+    return [UIImage systemImageNamed:name withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightSemibold]];
 }
 
 /// Refreshes the inline card when the shared player's state changes.
@@ -256,8 +341,30 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     if (!self.cardOpen) return;
     MVPlayerCenter *center = MVPlayerCenter.shared;
     self.nowTitleLabel.text = center.currentTitle.length ? center.currentTitle : [MVLang t:@"Now playing"];
-    UIImage *img = [UIImage systemImageNamed:center.isPlaying ? @"pause.fill" : @"play.fill"];
+    UIImage *img = center.isPlaying ? [self playPauseImageForState:YES] : [self playPauseImageForState:NO];
     [self.playPauseButton setImage:img forState:UIControlStateNormal];
+
+    // Update the scrubber + time, but not while the user is dragging it.
+    if (center.duration > 0) {
+        self.cardSlider.maximumValue = (float)center.duration;
+        if (!self.cardSlider.tracking) self.cardSlider.value = (float)center.currentTime;
+    }
+    self.cardTimeLabel.text = [NSString stringWithFormat:@"%@ / %@",
+                               [self cardClock:center.currentTime],
+                               [self cardClock:center.duration]];
+
+    // Dim previous/next when the queue has only one item.
+    BOOL hasQueue = center.hasQueue;
+    self.prevButton.enabled = hasQueue;
+    self.nextButton.enabled = hasQueue;
+    self.prevButton.alpha = hasQueue ? 1.0 : 0.4;
+    self.nextButton.alpha = hasQueue ? 1.0 : 0.4;
+}
+
+- (NSString *)cardClock:(double)s {
+    if (s <= 0) return @"0:00";
+    NSInteger total = (NSInteger)s;
+    return [NSString stringWithFormat:@"%ld:%02ld", (long)(total / 60), (long)(total % 60)];
 }
 
 - (void)openInlinePlayer {
@@ -266,8 +373,6 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.playerCard.hidden = NO;
 
     if (!self.videoLayer) {
-        // Lay the (shared) player into the surface once; further taps just
-        // refresh the title via the ticker and play the new item.
         self.videoLayer = [AVPlayerLayer playerLayerWithPlayer:center.player];
         self.videoLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         self.videoLayer.frame = self.videoSurface.bounds;
@@ -275,13 +380,14 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [self.videoSurface.layer addSublayer:self.videoLayer];
     }
 
-    // Height driven by the 16:9 video (full width minus insets) plus the title
-    // row below. ~290pt matches a full-width card at typical phone widths.
-    self.cardHeight.constant = 290;
-    [self.view layoutIfNeeded];
+    // Height derived from the card's real width so there is no empty band
+    // under the transport on very wide phones.
+    CGFloat contentW = self.headerView.bounds.size.width - 32.0;
+    if (contentW <= 0) contentW = 320.0;
+    self.cardHeight.constant = contentW * 9.0 / 16.0 + 148.0;
+    [self.headerView layoutIfNeeded];
+    [self sizeHeaderToFit];
     [self cardStateChanged];
-    // The card is the control while it's open; keep the mini bar out of the
-    // way. It comes back when the card closes.
     [center hideFloatingBar];
 
     if (!self.cardObserver) {
@@ -292,8 +398,6 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
             [weakSelf cardStateChanged];
         }];
     }
-    // Mirror the play/pause state while the card is open (the player has no
-    // KVO for its rate; the card closes before the ticker can go stale).
     [self.cardTicker invalidate];
     __weak typeof(self) weakSelf = self;
     self.cardTicker = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
@@ -311,13 +415,27 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [self cardStateChanged];
 }
 
+- (void)inlinePrev { [[MVPlayerCenter shared] playPrevious]; [self cardStateChanged]; }
+- (void)inlineNext { [[MVPlayerCenter shared] playNext]; [self cardStateChanged]; }
+- (void)inlineBack { [[MVPlayerCenter shared] seekBack]; [self cardStateChanged]; }
+- (void)inlineForward { [[MVPlayerCenter shared] seekForward]; [self cardStateChanged]; }
+
+- (void)cardScrub {
+    [[MVPlayerCenter shared] seekToSeconds:self.cardSlider.value];
+}
+
+- (void)cardScrubEnd {
+    [self cardStateChanged];
+}
+
 - (void)closeInlinePlayer {
     self.cardOpen = NO;
     self.cardHeight.constant = 0;
     [self.cardTicker invalidate];
     [self.videoLayer removeFromSuperlayer];
     self.videoLayer = nil;
-    [self.view layoutIfNeeded];
+    [self.headerView layoutIfNeeded];
+    [self sizeHeaderToFit];
     self.playerCard.hidden = YES;
     // Hand control back to the floating mini bar (playback itself continues).
     [[MVPlayerCenter shared] showFloatingBar];
@@ -338,6 +456,20 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
     }
     if (self.videoLayer) self.videoLayer.frame = self.videoSurface.bounds;
+}
+
+/// The header is sized by its bottom constraint, so the table needs an explicit
+/// height or it never shows the card/scroll offset correctly.
+- (void)sizeHeaderToFit {
+    UIView *header = self.tableView.tableHeaderView;
+    if (!header) return;
+    [header setNeedsLayout];
+    [header layoutIfNeeded];
+    CGRect frame = header.frame;
+    frame.size.height = [header systemLayoutSizeFittingSize:UILayoutFittingCompressedSize].height;
+    if (frame.size.height < 1) frame.size.height = 1;
+    header.frame = frame;
+    self.tableView.tableHeaderView = header;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
@@ -368,6 +500,10 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
     content.text = name;
     content.textProperties.color = [MVTheme text];
+    content.textProperties.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    content.secondaryTextProperties.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    content.imageProperties.reservedLayoutSize = CGSizeMake(50, 36);
+    content.imageProperties.maximumSize = CGSizeMake(50, 36);
 
     if (isDir) {
         content.image = [UIImage systemImageNamed:@"folder.fill"];
@@ -392,7 +528,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     content.secondaryTextProperties.color = [MVTheme secondaryText];
     content.imageProperties.tintColor = [MVTheme accent];
     cell.contentConfiguration = content;
-    cell.backgroundColor = [MVTheme card];
+    cell.backgroundColor = UIColor.clearColor;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
 }
 
@@ -419,8 +556,24 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     }
 
     NSString *ext = path.pathExtension.lowercaseString;
-    if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) {
+    if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"] containsObject:ext]) {
         [self playPathInQueue:path];
+    } else if ([@[@"webm", @"mkv"] containsObject:ext]) {
+        // iOS can't play these; offer sharing/export rather than freezing or
+        // silently doing nothing.
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:[MVLang t:@"Can't play this file"]
+                             message:[MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"]
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            UIActivityViewController *share = [[UIActivityViewController alloc]
+                initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+            [self presentViewController:share animated:YES completion:nil];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
     } else {
         UIActivityViewController *share = [[UIActivityViewController alloc]
             initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
@@ -608,7 +761,15 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 - (void)playPathInQueue:(NSString *)path {
     // The previous/next buttons in the player step through the visible rows of
-    // this folder, ignoring subfolders and non-video files.
+    // this folder, ignoring subfolders and non-video files. WebM/MKV are
+    // deliberately left out: AVPlayer cannot decode them, and swapping onto one
+    // makes the player hang while it tries to prepare the item.
+    static NSSet<NSString *> *playable;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        playable = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"]];
+    });
+
     NSArray<NSString *> *names = [self entries];
     NSString *dir = [self currentDirectory];
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
@@ -617,7 +778,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     for (NSUInteger i = 0; i < names.count; i++) {
         NSString *p = [dir stringByAppendingPathComponent:names[i]];
         NSString *ext = p.pathExtension.lowercaseString;
-        if (![@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) continue;
+        if (![playable containsObject:ext]) continue;
         [urls addObject:[NSURL fileURLWithPath:p]];
         [titles addObject:p.lastPathComponent.stringByDeletingPathExtension];
         if ([p isEqualToString:path]) index = (NSInteger)urls.count - 1;

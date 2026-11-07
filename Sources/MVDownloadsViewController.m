@@ -127,12 +127,12 @@ static NSString *const kDoneCell = @"MVDoneCell";
         highlight.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.15];
         self.selectedBackgroundView = highlight;
 
-        self.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        self.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
         self.textLabel.textColor = [MVTheme text];
         self.textLabel.numberOfLines = 1;
         self.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
-        self.detailTextLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        self.detailTextLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
         self.detailTextLabel.numberOfLines = 1;
 
         _actionButton = [[MVRowActionButton alloc] initWithFrame:CGRectZero];
@@ -170,7 +170,18 @@ static NSString *const kDoneCell = @"MVDoneCell";
             [self.actionButton showProgress:0];
             break;
         case MVDownloadStateActive:
-            self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
+            // The engine stores a transient phase message ("Merging…",
+            // "Converting…") in `error` while a post-download step runs; the
+            // record is still active, so the row shows it as its status.
+            if (record.error.length && record.totalBytes > 0 && record.progress >= 1.0) {
+                self.detailTextLabel.text = record.error;
+            } else if (record.progress <= 0 && record.totalBytes <= 0) {
+                // Pre-download phase (DNS, metadata): no bytes yet, so show a
+                // meaningful status instead of a frozen 0%.
+                self.detailTextLabel.text = [MVLang t:@"Connecting…"];
+            } else {
+                self.detailTextLabel.text = [MVDownloadCell sizesTextForRecord:record];
+            }
             self.detailTextLabel.textColor = normal;
             [self.actionButton showProgress:record.progress];
             break;
@@ -203,6 +214,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 @interface MVDownloadsViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *emptyLabel;
+@property (nonatomic, strong) UILabel *queueLabel;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
 @property (nonatomic) BOOL editingMode;
@@ -226,6 +238,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.35];
     self.tableView.tableFooterView = [UIView new];
     [self.tableView registerClass:MVDownloadCell.class forCellReuseIdentifier:kDoneCell];
+    // A slim header that shows how many items are still waiting, so the queue
+    // reads like a list instead of a mystery: "3 waiting · 2 downloading".
+    self.queueLabel = [UILabel new];
+    self.queueLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    self.queueLabel.textColor = [MVTheme secondaryText];
+    self.queueLabel.textAlignment = NSTextAlignmentCenter;
+    self.queueLabel.frame = CGRectMake(0, 0, 320, 28);
+    self.tableView.tableHeaderView = self.queueLabel;
     UILongPressGestureRecognizer *longPress =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
     [self.tableView addGestureRecognizer:longPress];
@@ -244,7 +264,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.search.obscuresBackgroundDuringPresentation = NO;
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
     self.navigationItem.searchController = self.search;
-    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.navigationItem.hidesSearchBarWhenScrolling = YES;
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:[MVLang t:@"Edit"] style:UIBarButtonItemStylePlain
         target:self action:@selector(toggleEditMode)];
@@ -290,7 +310,28 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)reloadList {
     self.shownIdentifiers = [[self records] valueForKey:@"identifier"];
+    [self updateQueueLabel];
     [self.tableView reloadData];
+}
+
+/// The queue summary line above the rows: how many are still downloading and
+/// how many are waiting their turn. Hidden entirely when nothing is running.
+- (void)updateQueueLabel {
+    NSArray<MVDownloadRecord *> *all = MVDownloadStore.shared.records;
+    NSUInteger active = 0, waiting = 0;
+    for (MVDownloadRecord *r in all) {
+        if (r.state == MVDownloadStateActive) active++;
+        if (r.state == MVDownloadStateWaiting) waiting++;
+    }
+    NSString *text = @"";
+    if (active || waiting) {
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        if (active) [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)active, [MVLang t:@"downloading"]]];
+        if (waiting) [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)waiting, [MVLang t:@"waiting"]]];
+        text = [parts componentsJoinedByString:@" · "];
+    }
+    self.queueLabel.text = text;
+    self.queueLabel.hidden = text.length == 0;
 }
 
 /// Progress arrives four times a second. Reloading the whole table that often
@@ -306,6 +347,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
         [self reloadList];
         return;
     }
+    [self updateQueueLabel];
     for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows) {
         MVDownloadCell *cell = (MVDownloadCell *)[self.tableView cellForRowAtIndexPath:indexPath];
         if ([cell isKindOfClass:MVDownloadCell.class] && indexPath.row < (NSInteger)now.count) {
@@ -442,7 +484,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 - (void)playFile:(MVDownloadRecord *)record {
     // Hand the whole visible list to the player so its previous/next buttons
-    // move through the downloads. Only finished rows with a file are playable.
+    // move through the downloads. Only finished rows with a playable file are
+    // included — WebM/MKV would hang AVPlayer when next/prev landed on them.
+    static NSSet<NSString *> *playable;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        playable = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"]];
+    });
+
     NSArray<MVDownloadRecord *> *records = [self records];
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
     NSMutableArray<NSString *> *titles = [NSMutableArray array];
@@ -450,11 +499,23 @@ static NSString *const kDoneCell = @"MVDoneCell";
     for (NSUInteger i = 0; i < records.count; i++) {
         MVDownloadRecord *r = records[i];
         if (r.state != MVDownloadStateCompleted || r.path.length == 0) continue;
+        if (![playable containsObject:r.path.pathExtension.lowercaseString]) continue;
         [urls addObject:[NSURL fileURLWithPath:r.path]];
         [titles addObject:r.title.length ? r.title : r.path.lastPathComponent.stringByDeletingPathExtension];
         if (r == record) index = (NSInteger)urls.count - 1;
     }
-    if (!urls.count) return;
+    if (!urls.count) {
+        NSString *ext = record.path.pathExtension.lowercaseString;
+        if ([ext isEqualToString:@"webm"] || [ext isEqualToString:@"mkv"]) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:[MVLang t:@"Can't play this file"]
+                                 message:[MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+        return;
+    }
 
     [[MVPlayerCenter shared] playQueue:urls titles:titles fromIndex:index];
     if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {

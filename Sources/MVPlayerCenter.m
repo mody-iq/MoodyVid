@@ -425,9 +425,13 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)forwardTapped { if (self.onSeekForward) self.onSeekForward(); }
 
 - (void)sliderChanged:(UISlider *)slider {
-    if (!_player.currentItem) return;
-    CMTime t = CMTimeMakeWithSeconds(slider.value, 600);
-    [_player seekToTime:t toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    AVPlayerItem *item = _player.currentItem;
+    if (!item) return;
+    // Fast jump (infinite tolerance) and drop any earlier seek so the dozens of
+    // ValueChanged events while dragging never stack up and freeze playback.
+    [item cancelPendingSeeks];
+    CMTime t = CMTimeMakeWithSeconds(slider.value, 1000);
+    [_player seekToTime:t toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
 }
 
 @end
@@ -446,9 +450,19 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 // "resume after dismissal" from an earlier presentation cannot fight the new
 // state (for example restarting a paused video the user actually stopped).
 @property (nonatomic) NSUInteger generation;
+// Last time an item was swapped. Rapid next/prev taps that land within this
+// window are dropped: swapping twice while the first item is still preparing
+// is another way to wedge AVPlayer.
+@property (nonatomic) NSTimeInterval lastLoadTime;
 // Remembers playback was running when an interruption began, so we can restart
 // it automatically when the interruption ends.
 @property (nonatomic) BOOL wasInterruptedWhilePlaying;
+// Observers on the current item's status, so a file AVPlayer cannot decode
+// (AV1/VP9-in-mp4, a truncated download) is skipped instead of stalling.
+@property (nonatomic, strong, nullable) id itemStatusObserver;
+// Counts back-to-back auto-skips so a folder of undecodable files does not
+// cycle forever; reset whenever the user picks an item deliberately.
+@property (nonatomic) NSInteger consecutiveFailures;
 @end
 
 @implementation MVPlayerCenter
@@ -515,18 +529,59 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     self.queue = [urls copy];
     self.queueTitles = titles.count == urls.count ? [titles copy] : @[];
     self.queueIndex = index;
+    self.consecutiveFailures = 0;
     [self loadItemAtIndex:index];
 }
 
+/// Purely file-extension based: the formats AVPlayer can actually decode.
+/// Anything else (WebM, MKV, …) must never reach replaceCurrentItem, which
+/// blocks the main thread forever when the player cannot handle the file.
++ (NSArray<NSString *> *)playableExtensions {
+    return @[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"];
+}
+
++ (BOOL)urlIsPlayable:(NSURL *)url {
+    NSString *ext = url.pathExtension.lowercaseString;
+    if (!ext.length) return YES;
+    return [[self playableExtensions] containsObject:ext];
+}
+
 - (void)loadItemAtIndex:(NSInteger)index {
+    [self loadItemAtIndex:index direction:0 attempts:0];
+}
+
+/// True when AVPlayer can open this URL: a supported extension and a file that
+/// exists and has bytes. Cheap and synchronous, so it never delays a swap.
+- (BOOL)canPlayURL:(NSURL *)url {
+    if (![MVPlayerCenter urlIsPlayable:url]) return NO;
+    if (!url.isFileURL) return YES;
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
+    return [attrs[NSFileSize] unsignedLongLongValue] > 0;
+}
+
+- (void)loadItemAtIndex:(NSInteger)index direction:(NSInteger)direction attempts:(NSUInteger)attempts {
     if (index < 0 || index >= (NSInteger)self.queue.count) return;
+    if (attempts > (NSUInteger)self.queue.count + 1) { [self refreshMiniBar]; return; }
+
+    NSURL *url = self.queue[index];
+
+    // WebM/MKV and missing/empty files make replaceCurrentItem block the main
+    // thread forever. Walk to the nearest playable sibling instead.
+    if (![self canPlayURL:url]) {
+        [self loadNextPlayable:url direction:direction attempts:attempts + 1];
+        return;
+    }
+
+    // Debounce item swaps.
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (_lastLoadTime > 0 && now - _lastLoadTime < 0.35) return;
+    _lastLoadTime = now;
+
     self.generation++;
     self.queueIndex = index;
-    NSURL *url = self.queue[index];
     NSString *title = index < (NSInteger)self.queueTitles.count && self.queueTitles[index].length
         ? self.queueTitles[index]
         : url.lastPathComponent.stringByDeletingPathExtension;
-    self.currentTitle = title;
 
     [self ensureAudioSession];
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
@@ -539,29 +594,98 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
             [weakSelf syncProgress];
         }];
     }
+
+    // Cancel any seek still running on the old item before swapping it out:
+    // replacing an item while a seek is in flight is a documented way to hang
+    // the player (and with it, the main thread), and rapid prev/next taps
+    // would otherwise stack exactly that. `currentTitle` is told only after
+    // the swap so playback of the new item picks it up.
+    [self.internalPlayer pause];
+    [self.internalPlayer.currentItem cancelPendingSeeks];
+    self.currentTitle = title;
     [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
+    [self watchItem:item forIndex:index];
     [self.internalPlayer play];
+    [self refreshMiniBar];
+}
+
+/// Watches the freshly installed item. If AVPlayer cannot decode it (an
+/// AV1/VP9-in-mp4 stream, a truncated download) it reports failed or stalls
+/// with a nil error — either way we skip to the next item so the app never
+/// sits on a black frame.
+- (void)watchItem:(AVPlayerItem *)item forIndex:(NSInteger)index {
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    if (self.itemStatusObserver) [nc removeObserver:self.itemStatusObserver];
+
+    __weak typeof(self) weakSelf = self;
+    self.itemStatusObserver = [nc addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+                                              object:item queue:NSOperationQueue.mainQueue
+                                          usingBlock:^(NSNotification *note) {
+        [weakSelf itemFailedToPlay:index];
+    }];
+
+    // A status that never reaches "ready" means the decoder rejected the file.
+    // Give it a couple of seconds, then move on rather than hang on black.
+    NSUInteger gen = self.generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) self_ = weakSelf;
+        if (!self_ || self_.generation != gen) return;
+        if (self_.internalPlayer.currentItem != item) return;
+        if (item.status == AVPlayerItemStatusFailed) { [self_ itemFailedToPlay:index]; }
+    });
+}
+
+- (void)itemFailedToPlay:(NSInteger)index {
+    if (self.queue.count < 2) return;              // nothing else to try
+    if (index != self.queueIndex) return;          // a newer item already took over
+    if (self.consecutiveFailures >= (NSInteger)self.queue.count) return;  // all bad; stop cycling
+    self.consecutiveFailures++;
+    [self playNext];
+}
+
+/// Walks from the skipped URL to the nearest playable sibling in the queue,
+/// clockwise (next) or counter-clockwise (previous), then loads it.
+- (void)loadNextPlayable:(NSURL *)skippedURL direction:(NSInteger)direction attempts:(NSUInteger)attempts {
+    NSInteger n = (NSInteger)self.queue.count;
+    if (n < 1) { [self refreshMiniBar]; return; }
+    NSInteger start = [self.queue indexOfObject:skippedURL];
+    if (start == NSNotFound) start = self.queueIndex;
+    for (NSInteger step = 1; step <= n; step++) {
+        NSInteger idx;
+        if (direction < 0) idx = ((start - step) % n + n) % n;
+        else idx = (start + step) % n;
+        if (idx == start) continue;
+        if ([MVPlayerCenter urlIsPlayable:self.queue[idx]]) {
+            [self loadItemAtIndex:idx direction:direction attempts:attempts];
+            return;
+        }
+    }
     [self refreshMiniBar];
 }
 
 - (void)playNext {
     if (self.queue.count < 2) return;
+    self.consecutiveFailures = 0;
     NSInteger next = self.queueIndex + 1;
     if (next >= (NSInteger)self.queue.count) next = 0;
-    [self loadItemAtIndex:next];
+    [self loadItemAtIndex:next direction:1 attempts:0];
     [self refreshMiniBar];
 }
 
 - (void)playPrevious {
     if (self.queue.count < 2) return;
+    self.consecutiveFailures = 0;
+    CMTime cur = self.internalPlayer.currentTime;
     // Tap again at the start of the item to restart it, like most players.
-    if (self.internalPlayer.currentTime.value > 3 * self.internalPlayer.currentTime.timescale) {
+    // Guard against an item that is still preparing (indefinite time would
+    // otherwise be treated as "way past three seconds" and seek to a bogus spot).
+    if (!CMTIME_IS_INDEFINITE(cur) && cur.value > 3 * cur.timescale) {
         [self seekTo:0];
         return;
     }
     NSInteger prev = self.queueIndex - 1;
     if (prev < 0) prev = (NSInteger)self.queue.count - 1;
-    [self loadItemAtIndex:prev];
+    [self loadItemAtIndex:prev direction:-1 attempts:0];
     [self refreshMiniBar];
 }
 
@@ -583,10 +707,15 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)stop {
     self.generation++;
+    if (self.itemStatusObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.itemStatusObserver];
+        self.itemStatusObserver = nil;
+    }
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = NO;
     self.queue = nil;
     self.queueTitles = nil;
+    self.consecutiveFailures = 0;
     [self hideBar];
 }
 
@@ -601,18 +730,56 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)seekBy:(double)seconds {
-    if (!self.internalPlayer) return;
+    if (!self.internalPlayer || !self.internalPlayer.currentItem) return;
     CMTime cur = [self.internalPlayer currentTime];
+    // The item may still be preparing right after a replaceCurrentItem, when
+    // currentTime is indefinite (NaN) and a seekToTime with an invalid time
+    // blocks AVPlayer forever. Anything wrong means "stay put".
+    if (CMTIME_IS_INDEFINITE(cur) || CMTimeGetSeconds(cur) != CMTimeGetSeconds(cur)) return;
     double target = CMTimeGetSeconds(cur) + seconds;
-    if (target < 0) target = 0;
-    CMTime t = CMTimeMakeWithSeconds(target, 600);
-    [self.internalPlayer seekToTime:t toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
+    [self safeSeek:target];
 }
 
 - (void)seekTo:(double)seconds {
-    [self.internalPlayer seekToTime:CMTimeMakeWithSeconds(seconds, 600)
-                    toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    [self safeSeek:seconds];
 }
+
+/// The one seek used everywhere. It clamps to the item duration, guards against
+/// NaN/indefinite values (which would freeze AVPlayer), uses infinite
+/// tolerances so the seek is a fast jump instead of a frame-exact decode, and
+/// drops any earlier seek so rapid taps cannot stack up.
+- (void)safeSeek:(double)seconds {
+    AVPlayer *p = self.internalPlayer;
+    AVPlayerItem *item = p.currentItem;
+    if (!item) return;
+    if (!(seconds == seconds)) return;  // NaN
+    double total = CMTimeGetSeconds(item.duration);
+    if (total > 0) seconds = MAX(0, MIN(seconds, total - 0.05));
+    if (seconds < 0) seconds = 0;
+    [item cancelPendingSeeks];
+    [p seekToTime:CMTimeMakeWithSeconds(seconds, 1000)
+        toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
+}
+
+- (void)seekToSeconds:(double)seconds { [self seekTo:seconds]; }
+
+- (double)currentTime {
+    AVPlayerItem *item = self.internalPlayer.currentItem;
+    if (!item) return 0;
+    double t = CMTimeGetSeconds([self.internalPlayer currentTime]);
+    return isnan(t) ? 0 : MAX(0, t);
+}
+
+- (double)duration {
+    AVPlayerItem *item = self.internalPlayer.currentItem;
+    if (!item) return 0;
+    double d = CMTimeGetSeconds(item.duration);
+    return isnan(d) || d < 0 ? 0 : d;
+}
+
+- (BOOL)hasQueue { return self.queue.count > 1; }
+
+- (NSInteger)queueIndex { return self.queueIndex; }
 
 #pragma mark - Playback state
 

@@ -103,6 +103,7 @@
 @property (nonatomic, strong) UIButton *qualityButton;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIProgressView *progressView;
+@property (nonatomic, strong) UIActivityIndicatorView *busyView;
 @property (nonatomic, strong) UILabel *platformsTitle;
 @property (nonatomic, copy) NSString *selectedQuality;
 @property (nonatomic, strong) NSArray<MVPlatform *> *platforms;
@@ -233,6 +234,12 @@
     self.statusLabel.textColor = [MVTheme secondaryText];
     [linkCard addSubview:self.statusLabel];
 
+    self.busyView = [UIActivityIndicatorView new];
+    self.busyView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.busyView.hidesWhenStopped = YES;
+    self.busyView.color = [MVTheme accent];
+    [linkCard addSubview:self.busyView];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.urlField.topAnchor constraintEqualToAnchor:linkCard.topAnchor constant:14],
         [self.urlField.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
@@ -264,6 +271,11 @@
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:linkCard.leadingAnchor constant:16],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:linkCard.trailingAnchor constant:-16],
         [self.statusLabel.bottomAnchor constraintEqualToAnchor:linkCard.bottomAnchor constant:-16],
+
+        [self.busyView.leadingAnchor constraintEqualToAnchor:self.statusLabel.trailingAnchor constant:8],
+        [self.busyView.centerYAnchor constraintEqualToAnchor:self.statusLabel.centerYAnchor],
+        [self.busyView.widthAnchor constraintEqualToConstant:18],
+        [self.busyView.heightAnchor constraintEqualToConstant:18],
     ]];
     [stack addArrangedSubview:linkCard];
 
@@ -307,6 +319,11 @@
     tagline.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     tagline.textColor = [MVTheme secondaryText];
     tagline.numberOfLines = 1;
+    // Keep the whole sentence on one line: shrink slightly instead of clipping
+    // it to "حمّل الفيديوهات من أي...".
+    tagline.adjustsFontSizeToFitWidth = YES;
+    tagline.minimumScaleFactor = 0.7;
+    tagline.lineBreakMode = NSLineBreakByClipping;
 
     MVGradientLabel *brand = [MVGradientLabel new];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
@@ -335,11 +352,14 @@
     [NSLayoutConstraint activateConstraints:@[
         [row.topAnchor constraintEqualToAnchor:header.topAnchor],
         [row.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [row.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
+        // Fill the full width so the tagline always has room to show its whole
+        // sentence on one line.
+        [row.trailingAnchor constraintEqualToAnchor:header.trailingAnchor],
         [row.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
     ]];
 
-    // Keep the tagline single-line but allow it to shrink gracefully.
+    // Squeeze the tagline if space is tight, then shrink its font to keep the
+    // whole sentence on one line instead of truncating it.
     [tagline setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     return header;
 }
@@ -454,9 +474,13 @@
 
 - (void)updateQualityTitle {
     NSString *label;
-    if ([self.selectedQuality isEqualToString:@"720p"]) label = [MVLang t:@"Up to 720p"];
+    if ([self.selectedQuality isEqualToString:@"1080"] || [self.selectedQuality isEqualToString:@"1440"] || [self.selectedQuality isEqualToString:@"2160"]) {
+        label = [MVLang t:@"1080p HD"];
+    }
+    else if ([self.selectedQuality isEqualToString:@"720p"]) label = [MVLang t:@"Up to 720p"];
     else if ([self.selectedQuality isEqualToString:@"480p"]) label = [MVLang t:@"Up to 480p"];
     else if ([self.selectedQuality isEqualToString:@"audio"]) label = [MVLang t:@"Audio only (M4A)"];
+    else if ([self.selectedQuality isEqualToString:@"mp3"]) label = [MVLang t:@"MP3 (audio)"];
     else label = [MVLang t:@"Best available"];
     [self.qualityButton setTitle:[NSString stringWithFormat:@"%@: %@", [MVLang t:@"Quality"], label]
                         forState:UIControlStateNormal];
@@ -532,9 +556,11 @@
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
     NSArray<NSArray *> *options = @[
         @[@"Best available", @"best"],
+        @[@"1080p HD", @"1080"],
         @[@"Up to 720p", @"720p"],
         @[@"Up to 480p", @"480p"],
         @[@"Audio only (M4A)", @"audio"],
+        @[@"MP3 (audio)", @"mp3"],
     ];
     for (NSArray *option in options) {
         NSString *quality = option[1];
@@ -619,6 +645,7 @@
         self_.progressView.progress = (float)watched.progress;
         if (watched.state == MVDownloadStateWaiting) {
             [self_ showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
+            [self_.busyView startAnimating];
         } else if (watched.isActive) {
             if (watched.progress > 0) {
                 [self_ showStatus:[NSString stringWithFormat:@"%.0f%%  ·  %@  ·  ETA %@",
@@ -626,12 +653,17 @@
                                    [MVPaths formatSpeed:watched.speed],
                                    [MVPaths formatDuration:watched.eta]]
                             color:[MVTheme secondaryText]];
+                [self_.busyView stopAnimating];
             } else {
                 // Pre-download phase (DNS, metadata); make the wait feel alive.
                 [self_ showStatus:[MVLang t:@"Connecting…"] color:[MVTheme secondaryText]];
+                [self_.busyView startAnimating];
             }
+        } else {
+            [self_.busyView stopAnimating];
         }
     }];
+    [self.busyView stopAnimating];
 }
 
 - (void)stopWatching {

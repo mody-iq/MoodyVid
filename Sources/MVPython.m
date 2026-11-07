@@ -237,6 +237,10 @@ static NSString *pyErrorString(void) {
     // of seconds while the engine imports everything.
     PyObject *dl = PyImport_ImportModule("downloader");
     if (!dl) PyErr_Clear();  // failure is fine; the download call will surface it
+    PyObject *prewarm = dl ? PyObject_GetAttrString(dl, "prewarm") : NULL;
+    PyObject *pr = prewarm ? PyObject_CallNoArgs(prewarm) : NULL;
+    Py_XDECREF(pr);
+    Py_XDECREF(prewarm);
     Py_XDECREF(dl);
 
     [self readEngineInfo];

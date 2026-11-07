@@ -43,6 +43,36 @@ if find "$PKGS" -name '*.so' | grep -q .; then
   exit 1
 fi
 
+echo "== LAME (static MP3 encoder for iOS)"
+LAME_DIR="$BUILD_DIR/lame"
+LAME_TAR="$BUILD_DIR/lame.tar.gz"
+LAME_VER="3.100"
+curl -fsSL --retry 3 -o "$LAME_TAR" "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-${LAME_VER}.tar.gz"
+mkdir -p "$LAME_DIR"
+tar -xzf "$LAME_TAR" -C "$LAME_DIR" --strip-components=1
+(
+  cd "$LAME_DIR"
+  ./configure \
+    --host=aarch64-apple-darwin \
+    --disable-shared \
+    --enable-static \
+    --disable-frontend \
+    --disable-decoder \
+    --disable-analyzer-hacks \
+    --disable-debug \
+    --disable-asm \
+    CC="xcrun --sdk iphoneos clang -arch arm64 -isysroot $SDK -miphoneos-version-min=15.0" \
+    RANLIB="xcrun --sdk iphoneos ranlib" \
+    AR="xcrun --sdk iphoneos ar" \
+    >/dev/null
+  make -j4 >/dev/null
+)
+if [ ! -f "$LAME_DIR/libmp3lame/.libs/libmp3lame.a" ]; then
+  echo "ERROR: LAME failed to build"
+  exit 1
+fi
+echo "LAME built: $LAME_DIR/libmp3lame/.libs/libmp3lame.a"
+
 echo "== Compiling"
 xcrun --sdk iphoneos clang \
   -arch arm64 \
@@ -52,12 +82,14 @@ xcrun --sdk iphoneos clang \
   -O2 \
   -Wall -Wno-deprecated-declarations \
   -F "$SLICE" \
+  -I "$LAME_DIR" \
   -framework UIKit -framework Foundation -framework JavaScriptCore -framework Python -framework Photos \
-  -framework AVKit -framework AVFoundation -framework CoreMedia \
+  -framework AVKit -framework AVFoundation -framework CoreMedia -framework AudioToolbox \
   -framework CoreGraphics -framework QuartzCore -framework WebKit \
   -framework UserNotifications -framework StoreKit -framework MediaPlayer \
   -Wl,-rpath,@executable_path/Frameworks \
   Sources/*.m \
+  "$LAME_DIR/libmp3lame/.libs/libmp3lame.a" \
   -o "$APP_DIR/$APP_NAME"
 
 echo "== Bundle"

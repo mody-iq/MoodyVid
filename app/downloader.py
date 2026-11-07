@@ -36,7 +36,9 @@ def _selector(quality):
 # hand out DASH-only streams (video and sound apart) for most videos. Try the
 # styles that still expose a combined file, in order, and remember the one that
 # worked so the next video starts there instead of repeating the failures.
-PLAYER_CLIENTS = [None, ["visionos", "web_embedded", "mweb"], ["android"], ["tv_simply", "web_safari"]]
+# "android" cracks the combined mp4 in one fast round on real traffic; the
+# other sets are kept only as fallbacks. The slow default probe is last.
+PLAYER_CLIENTS = [["android"], ["tv_simply", "web_safari"], ["visionos", "web_embedded", "mweb"], None]
 _good_client = [None, 0.0]
 _GOOD_CLIENT_TTL = 3600
 
@@ -140,6 +142,32 @@ def _client_order():
 
 
 
+def prewarm():
+    """Imports the heavy modules once, at launch, so the first download does not
+    have to pay the import cost while the spinner is on screen.
+
+    Must be callable off-device for the tests, which import this file directly.
+    Returns a small dict so the native side can log what warmed up.
+    """
+    warmed = []
+    try:
+        import yt_dlp  # noqa: F401
+        warmed.append("yt_dlp")
+    except BaseException:
+        pass
+    _use_bundled_certificates()
+    _native()
+    try:
+        # Instantiate once so the extractor's lazy class registry populates and
+        # the JS challenges warm their caches.
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            _ = ydl  # noqa
+        warmed.append("YoutubeDL")
+    except BaseException:
+        pass
+    return json.dumps({"warmed": warmed}, ensure_ascii=False)
+
+
 def download(url, quality="best", _task=""):
     try:
         import yt_dlp
@@ -238,7 +266,7 @@ def _download_once(yt_dlp, url, fmt, client, out_dir, native=None, task=""):
         # Resume the tail of an interrupted download instead of restarting it.
         "continue": True,
         # A blocked style should fail quickly so the next one is tried.
-        "socket_timeout": 15,
+        "socket_timeout": 8,
         "progress_hooks": [_progress_hook(native, task)],
     }
     if client:
@@ -256,6 +284,76 @@ def _downloaded_path(ydl, info):
             return path
     path = ydl.prepare_filename(info)
     return path if path and os.path.exists(path) else None
+
+
+def download_fragment(url, kind, quality="best", _task=""):
+    """Downloads ONE stream (kind="video" or "audio") to a single file.
+
+    iOS has no ffmpeg, so higher qualities cannot be merged inside yt-dlp. The
+    app instead downloads the video stream and the audio stream separately
+    (progressive) and muxes them natively with AVFoundation. This function
+    returns just the one fragment; the native side combines the pair.
+    """
+    try:
+        import yt_dlp
+    except Exception as e:
+        return _error(f"yt-dlp not available: {e}")
+
+    _use_bundled_certificates()
+
+    if kind == "audio":
+        fmt = "bestaudio[ext=m4a]/bestaudio/best[ext=m4a]/best"
+    else:
+        height = 2160
+        if isinstance(quality, str) and quality.isdigit():
+            h = int(quality)
+            if h > 0: height = h
+        # Prefer MP4 at every step so single-file downloads stay playable on
+        # iOS. WebM is considered only when the source offers nothing else.
+        fmt = (f"bestvideo[height<={height}][ext=mp4]/b[height<={height}][ext=mp4]/b[ext=mp4]"
+               f"/b[height<={height}][ext=webm]/bestvideo[height<={height}]")
+
+    out_dir = _output_dir()
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        return _error(f"cannot create the download folder: {e}")
+
+    native = _native()
+    for client in _client_order():
+        if _is_cancelled(native, _task):
+            return _error("cancelled")
+        try:
+            opts = {
+                "format": fmt,
+                "outtmpl": os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "retries": 10,
+                "fragment_retries": 10,
+                "continue": True,
+                "socket_timeout": 8,
+                "progress_hooks": [_progress_hook(native, _task)],
+            }
+            if client:
+                opts["extractor_args"] = {"youtube": {"player_client": client}}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                path = _downloaded_path(ydl, info)
+            if path:
+                _good_client[0], _good_client[1] = client, time.time()
+                return json.dumps({
+                    "path": path,
+                    "title": info.get("title", ""),
+                    "thumbnail": info.get("thumbnail", ""),
+                    "ext": path.lower().rsplit(".", 1)[-1] if "." in path else "",
+                }, ensure_ascii=False)
+        except _Cancelled:
+            return _error("cancelled")
+        except Exception as e:
+            continue
+    return _error("the stream could not be downloaded")
 
 
 def _has_video(info):
