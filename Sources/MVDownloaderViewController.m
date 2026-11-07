@@ -324,11 +324,22 @@
 
 /// Re-applies theme colours to views that were built once in viewDidLoad.
 - (void)applyThemeRecursively {
-    self.view.backgroundColor = [MVTheme background];
+    [MVTheme applyWallpaperTo:self.view];
     self.urlField.textColor = [MVTheme text];
     self.statusLabel.textColor = [MVTheme secondaryText];
     self.platformsTitle.textColor = [MVTheme text];
     [self updateQualityTitle];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    // A wallpaper gradient is a fixed sublayer; keep its frame matching the
+    // view so rotation and safe-area changes do not crop it.
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) {
+            layer.frame = self.view.bounds;
+        }
+    }
 }
 
 - (void)updateQualityTitle {

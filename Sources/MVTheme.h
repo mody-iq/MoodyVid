@@ -37,6 +37,29 @@ extern NSString *const MVThemeDidChangeNotification;
 + (UIColor *)warning;
 + (UIColor *)danger;
 
+// Wallpapers
+//
+/// The gradient a screen draws behind its content. Both colours already adapt
+/// to the current appearance (light/dark/system), so a screen just pairs them.
++ (UIColor *)wallpaperStart;
++ (UIColor *)wallpaperEnd;
+
+/// The gradient colours for a *specific* wallpaper, for previews.
++ (UIColor *)wallpaperStartForName:(NSString *)name;
++ (UIColor *)wallpaperEndForName:(NSString *)name;
+
+/// All the wallpaper keys available to the settings picker.
++ (NSArray<NSString *> *)wallpaperNames;
+
+/// The currently selected wallpaper key, persisted.
++ (NSString *)wallpaperName;
++ (void)setWallpaperName:(NSString *)name;
+
+/// Adds a wallpaper CAGradientLayer to the view's background, resized to its
+/// bounds. Removes any previous wallpaper layer first, so it is safe to call
+/// again when the theme or wallpaper changes.
++ (void)applyWallpaperTo:(UIView *)view;
+
 /// A rounded, translucent card with a hairline border, as used across the design.
 + (void)applyCardStyle:(UIView *)view;
 + (void)applyCardStyle:(UIView *)view cornerRadius:(CGFloat)radius;

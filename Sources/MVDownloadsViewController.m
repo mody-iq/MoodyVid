@@ -176,7 +176,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
             break;
         case MVDownloadStateCompleted:
             self.detailTextLabel.text = [MVLang t:@"Completed"];
-            self.detailTextLabel.textColor = normal;
+            self.detailTextLabel.textColor = [MVTheme success];
             [self.actionButton showIcon:@"square.and.arrow.down"];
             break;
         case MVDownloadStateFailed:
@@ -270,7 +270,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.title = [MVLang t:@"Downloads"];
     self.emptyLabel.text = [MVLang t:@"No downloads yet"];
     self.search.searchBar.placeholder = [MVLang t:@"Search downloads"];
+    [MVTheme applyWallpaperTo:self.view];
     [self reloadList];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
+    }
 }
 
 - (void)reloadList {
@@ -426,13 +434,22 @@ static NSString *const kDoneCell = @"MVDoneCell";
 }
 
 - (void)playFile:(MVDownloadRecord *)record {
-    NSString *path = record.path;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        [self alert:[MVLang t:@"Failed"] message:[MVLang t:@"No files"]];
-        return;
+    // Hand the whole visible list to the player so its previous/next buttons
+    // move through the downloads. Only finished rows with a file are playable.
+    NSArray<MVDownloadRecord *> *records = [self records];
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    NSInteger index = 0;
+    for (NSUInteger i = 0; i < records.count; i++) {
+        MVDownloadRecord *r = records[i];
+        if (r.state != MVDownloadStateCompleted || r.path.length == 0) continue;
+        [urls addObject:[NSURL fileURLWithPath:r.path]];
+        [titles addObject:r.title.length ? r.title : r.path.lastPathComponent.stringByDeletingPathExtension];
+        if (r == record) index = (NSInteger)urls.count - 1;
     }
-    [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
-                                title:path.lastPathComponent.stringByDeletingPathExtension];
+    if (!urls.count) return;
+
+    [[MVPlayerCenter shared] playQueue:urls titles:titles fromIndex:index];
     if (record.thumbnail.length && [NSFileManager.defaultManager fileExistsAtPath:record.thumbnail]) {
         UIImage *art = [UIImage imageWithContentsOfFile:record.thumbnail];
         if (art) [[MVPlayerCenter shared] setThumbnailImage:art];

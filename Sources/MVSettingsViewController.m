@@ -44,7 +44,15 @@ static NSString *const kCell = @"MVCell";
 
 - (void)refresh {
     self.title = [MVLang t:@"More"];
+    [MVTheme applyWallpaperTo:self.view];
     [self.tableView reloadData];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
+    }
 }
 
 #pragma mark - Table
@@ -52,16 +60,18 @@ static NSString *const kCell = @"MVCell";
 typedef NS_ENUM(NSInteger, MVMoreSection) {
     MVMoreSectionLanguage = 0,
     MVMoreSectionAppearance,
+    MVMoreSectionWallpaper,
     MVMoreSectionStorage,
     MVMoreSectionAbout,
 };
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case MVMoreSectionLanguage:   return 1;
         case MVMoreSectionAppearance: return 3;
+        case MVMoreSectionWallpaper:  return MVTheme.wallpaperNames.count;
         case MVMoreSectionStorage:    return 2;
         case MVMoreSectionAbout:      return 1;
         default: return 0;
@@ -72,6 +82,7 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     switch (section) {
         case MVMoreSectionLanguage:   return [MVLang t:@"Language"];
         case MVMoreSectionAppearance: return [MVLang t:@"Appearance"];
+        case MVMoreSectionWallpaper:  return [MVLang t:@"Wallpaper"];
         case MVMoreSectionStorage:    return [MVLang t:@"Storage"];
         case MVMoreSectionAbout:      return [MVLang t:@"About"];
         default: return nil;
@@ -96,6 +107,29 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         if (MVTheme.shared.mode == [modes[indexPath.row][1] integerValue]) {
             cell.accessoryType = UITableViewCellAccessoryCheckmark;
             cell.tintColor = [MVTheme accent];
+        }
+    } else if (indexPath.section == MVMoreSectionWallpaper) {
+        NSArray<NSString *> *names = MVTheme.wallpaperNames;
+        NSString *key = names[indexPath.row];
+        content.text = [MVLang t:[self wallpaperLabelForKey:key]];
+        if ([MVTheme.wallpaperName isEqualToString:key]) {
+            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            cell.tintColor = [MVTheme accent];
+        } else {
+            // A small swatch preview so the choice is not abstract.
+            NSArray<UIColor *> *swatchColors = [self wallpaperSwatchForKey:key];
+            if (swatchColors.count == 2) {
+                CAGradientLayer *grad = [CAGradientLayer layer];
+                grad.colors = @[(id)swatchColors[0].CGColor, (id)swatchColors[1].CGColor];
+                grad.startPoint = CGPointMake(0.5, 0);
+                grad.endPoint = CGPointMake(0.5, 1);
+                UIView *swatch = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
+                swatch.layer.cornerRadius = 8;
+                swatch.layer.masksToBounds = YES;
+                grad.frame = swatch.bounds;
+                [swatch.layer addSublayer:grad];
+                cell.accessoryView = swatch;
+            }
         }
     } else if (indexPath.section == MVMoreSectionStorage) {
         if (indexPath.row == 0) {
@@ -123,6 +157,11 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionAppearance: {
             NSArray *modes = @[@(MVThemeModeDark), @(MVThemeModeLight), @(MVThemeModeSystem)];
             MVTheme.shared.mode = [modes[indexPath.row] integerValue];
+            [self refresh];
+            break;
+        }
+        case MVMoreSectionWallpaper: {
+            [MVTheme setWallpaperName:MVTheme.wallpaperNames[indexPath.row]];
             [self refresh];
             break;
         }
@@ -157,6 +196,29 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     sheet.popoverPresentationController.sourceView = self.view;
     sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 200, 1, 1);
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+#pragma mark - Wallpapers
+
+- (NSString *)wallpaperLabelForKey:(NSString *)key {
+    NSDictionary *labels = @{
+        @"classic":  @"Classic",
+        @"midnight": @"Midnight",
+        @"aurora":   @"Aurora",
+        @"sunset":   @"Sunset",
+        @"forest":   @"Forest",
+    };
+    return labels[key] ?: key;
+}
+
+// A two-colour swatch preview. Uses the dynamic wallpaper colours so the swatch
+// matches whatever appearance the app is currently in.
+- (NSArray<UIColor *> *)wallpaperSwatchForKey:(NSString *)key {
+    UIColor *start = [[MVTheme wallpaperStartForName:key]
+                      resolvedColorWithTraitCollection:UITraitCollection.currentTraitCollection];
+    UIColor *end = [[MVTheme wallpaperEndForName:key]
+                    resolvedColorWithTraitCollection:UITraitCollection.currentTraitCollection];
+    return @[start, end];
 }
 
 #pragma mark - Engine info

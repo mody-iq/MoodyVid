@@ -28,6 +28,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// Replaces the artwork shown in the floating mini-bar.
 - (void)setThumbnailImage:(UIImage *)image;
 
+/// Plays a whole list, so the mini-bar's previous/next buttons move through it.
+/// Tapping a row in Downloads or Files hands over the rows around it.
+- (void)playQueue:(NSArray<NSURL *> *)urls
+          titles:(NSArray<NSString *> *)titles
+       fromIndex:(NSInteger)index;
+
+/// Jumps to the next/previous item in the current queue.
+- (void)playNext;
+- (void)playPrevious;
+
 @property (nonatomic, readonly, getter=isPlaying) BOOL playing;
 @property (nonatomic, readonly, nullable) AVPlayer *player;
 @property (nonatomic, readonly, nullable) NSString *currentTitle;

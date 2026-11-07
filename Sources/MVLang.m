@@ -174,6 +174,14 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Available": @"متاح",
             @"Copied": @"تم النسخ",
             @"Link copied": @"تم نسخ الرابط",
+
+            // Wallpapers
+            @"Wallpaper": @"الخلفية",
+            @"Classic": @"كلاسيكية",
+            @"Midnight": @"منتصف الليل",
+            @"Aurora": @"الشفق القطبي",
+            @"Sunset": @"الغروب",
+            @"Forest": @"الغابة",
         };
     });
     return table;

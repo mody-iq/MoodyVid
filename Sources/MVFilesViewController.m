@@ -138,7 +138,15 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.search.searchBar.placeholder = [MVLang t:@"Search files"];
     self.storageLabel.text = [NSString stringWithFormat:@"%@ %@",
                               [MVPaths formatBytes:[MVPaths freeSpace]], [MVLang t:@"available"]];
+    [MVTheme applyWallpaperTo:self.view];
     [self.tableView reloadData];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
+    }
 }
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
@@ -214,9 +222,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     NSString *ext = path.pathExtension.lowercaseString;
     if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) {
-        [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
-                                    title:path.lastPathComponent.stringByDeletingPathExtension];
-        [[MVPlayerCenter shared] presentCurrentPlayer];
+        [self playPathInQueue:path];
     } else {
         UIActivityViewController *share = [[UIActivityViewController alloc]
             initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
@@ -294,9 +300,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     if (!isDir && playable) {
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [[MVPlayerCenter shared] playURL:[NSURL fileURLWithPath:path]
-                                        title:path.lastPathComponent.stringByDeletingPathExtension];
-            [[MVPlayerCenter shared] presentCurrentPlayer];
+            [self playPathInQueue:path];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [[MVDownloadEngine shared] saveToPhotos:path completion:^(NSString *fp, NSString *err) {
@@ -402,6 +406,27 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItems.lastObject;
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)playPathInQueue:(NSString *)path {
+    // The previous/next buttons in the player step through the visible rows of
+    // this folder, ignoring subfolders and non-video files.
+    NSArray<NSString *> *names = [self entries];
+    NSString *dir = [self currentDirectory];
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    NSInteger index = 0;
+    for (NSUInteger i = 0; i < names.count; i++) {
+        NSString *p = [dir stringByAppendingPathComponent:names[i]];
+        NSString *ext = p.pathExtension.lowercaseString;
+        if (![@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav", @"webm", @"mkv"] containsObject:ext]) continue;
+        [urls addObject:[NSURL fileURLWithPath:p]];
+        [titles addObject:p.lastPathComponent.stringByDeletingPathExtension];
+        if ([p isEqualToString:path]) index = (NSInteger)urls.count - 1;
+    }
+    if (!urls.count) return;
+    [[MVPlayerCenter shared] playQueue:urls titles:titles fromIndex:index];
+    [[MVPlayerCenter shared] presentCurrentPlayer];
 }
 
 @end

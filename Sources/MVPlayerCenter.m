@@ -5,8 +5,18 @@
 #import "MVLang.h"
 
 /// The mini bar that stays above every screen while something is playing.
-static CGFloat const kMiniBarHeight = 64;
-static CGFloat const kMiniThumb = 44;
+static CGFloat const kMiniBarHeight = 80;
+static CGFloat const kMiniThumb = 46;
+static CGFloat const kSeekSeconds = 15.0;
+
+/// A small tinted icon button used in the mini bar.
+static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    b.tintColor = tint;
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    return b;
+}
 
 @interface MVFloatingPlayerBar : UIView
 @property (nonatomic, strong) UIImageView *thumbView;
@@ -14,6 +24,10 @@ static CGFloat const kMiniThumb = 44;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UIButton *pauseButton;
 @property (nonatomic, strong) UIButton *closeButton;
+@property (nonatomic, strong) UIButton *backButton;
+@property (nonatomic, strong) UIButton *forwardButton;
+@property (nonatomic, strong) UIButton *prevButton;
+@property (nonatomic, strong) UIButton *nextButton;
 @property (nonatomic, strong) UIProgressView *progress;
 @end
 
@@ -23,13 +37,14 @@ static CGFloat const kMiniThumb = 44;
     if ((self = [super initWithFrame:frame])) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
         self.backgroundColor = [MVTheme card];
-        self.layer.cornerRadius = 14;
+        self.layer.cornerRadius = 16;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
         self.layer.borderWidth = 0.5;
         self.layer.borderColor = [MVTheme cardBorder].CGColor;
         self.layer.shadowColor = UIColor.blackColor.CGColor;
-        self.layer.shadowOpacity = 0.25;
-        self.layer.shadowRadius = 10;
-        self.layer.shadowOffset = CGSizeMake(0, 4);
+        self.layer.shadowOpacity = 0.3;
+        self.layer.shadowRadius = 12;
+        self.layer.shadowOffset = CGSizeMake(0, 5);
         self.clipsToBounds = NO;
 
         _thumbView = [UIImageView new];
@@ -51,16 +66,13 @@ static CGFloat const kMiniThumb = 44;
         _subtitleLabel.textColor = [MVTheme secondaryText];
         _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
-        _pauseButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_pauseButton setImage:[UIImage systemImageNamed:@"pause.fill"] forState:UIControlStateNormal];
-        [_pauseButton setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateSelected];
-        _pauseButton.tintColor = [MVTheme accent];
-        _pauseButton.translatesAutoresizingMaskIntoConstraints = NO;
+        _prevButton = MVBarButton(@"backward.end.fill", [MVTheme accent]);
+        _backButton = MVBarButton(@"gobackward.15", [MVTheme text]);
+        _pauseButton = MVBarButton(@"pause.fill", [MVTheme accent]);
+        _forwardButton = MVBarButton(@"goforward.15", [MVTheme text]);
+        _nextButton = MVBarButton(@"forward.end.fill", [MVTheme accent]);
 
-        _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
-        _closeButton.tintColor = [MVTheme secondaryText];
-        _closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+        _closeButton = MVBarButton(@"xmark.circle.fill", [MVTheme secondaryText]);
 
         _progress = [UIProgressView new];
         _progress.progressTintColor = [MVTheme accent];
@@ -70,7 +82,11 @@ static CGFloat const kMiniThumb = 44;
         [self addSubview:_thumbView];
         [self addSubview:_titleLabel];
         [self addSubview:_subtitleLabel];
+        [self addSubview:_prevButton];
+        [self addSubview:_backButton];
         [self addSubview:_pauseButton];
+        [self addSubview:_forwardButton];
+        [self addSubview:_nextButton];
         [self addSubview:_closeButton];
         [self addSubview:_progress];
 
@@ -81,26 +97,46 @@ static CGFloat const kMiniThumb = 44;
             [_thumbView.heightAnchor constraintEqualToConstant:kMiniThumb],
 
             [_titleLabel.leadingAnchor constraintEqualToAnchor:_thumbView.trailingAnchor constant:12],
-            [_titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:11],
-            [_titleLabel.trailingAnchor constraintEqualToAnchor:_pauseButton.leadingAnchor constant:-8],
+            [_titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:12],
+            [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_prevButton.leadingAnchor constant:-8],
 
             [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
-            [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
             [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:2],
 
             [_progress.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
             [_progress.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
             [_progress.topAnchor constraintEqualToAnchor:_subtitleLabel.bottomAnchor constant:6],
 
-            [_pauseButton.trailingAnchor constraintEqualToAnchor:_closeButton.leadingAnchor constant:-8],
+            // Right-side button cluster: prev, back, pause, forward, next, close.
+            [_closeButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
+            [_closeButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_closeButton.widthAnchor constraintEqualToConstant:26],
+            [_closeButton.heightAnchor constraintEqualToConstant:26],
+
+            [_nextButton.trailingAnchor constraintEqualToAnchor:_closeButton.leadingAnchor constant:-6],
+            [_nextButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_nextButton.widthAnchor constraintEqualToConstant:32],
+            [_nextButton.heightAnchor constraintEqualToConstant:32],
+
+            [_forwardButton.trailingAnchor constraintEqualToAnchor:_nextButton.leadingAnchor constant:-6],
+            [_forwardButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_forwardButton.widthAnchor constraintEqualToConstant:30],
+            [_forwardButton.heightAnchor constraintEqualToConstant:30],
+
+            [_pauseButton.trailingAnchor constraintEqualToAnchor:_forwardButton.leadingAnchor constant:-6],
             [_pauseButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
             [_pauseButton.widthAnchor constraintEqualToConstant:34],
             [_pauseButton.heightAnchor constraintEqualToConstant:34],
 
-            [_closeButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
-            [_closeButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-            [_closeButton.widthAnchor constraintEqualToConstant:30],
-            [_closeButton.heightAnchor constraintEqualToConstant:30],
+            [_backButton.trailingAnchor constraintEqualToAnchor:_pauseButton.leadingAnchor constant:-6],
+            [_backButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_backButton.widthAnchor constraintEqualToConstant:30],
+            [_backButton.heightAnchor constraintEqualToConstant:30],
+
+            [_prevButton.trailingAnchor constraintEqualToAnchor:_backButton.leadingAnchor constant:-6],
+            [_prevButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_prevButton.widthAnchor constraintEqualToConstant:32],
+            [_prevButton.heightAnchor constraintEqualToConstant:32],
         ]];
     }
     return self;
@@ -108,7 +144,7 @@ static CGFloat const kMiniThumb = 44;
 
 @end
 
-/// The system player, with one fix: iOS pauses an AVPlayerViewController's player
+/// The system player, with a fix: iOS pauses an AVPlayerViewController's player
 /// when the controller is dismissed. The user expects the video to keep playing
 /// in the mini bar, so playback is resumed if it was playing when the dismissal began.
 @interface MVPlayerViewController : AVPlayerViewController
@@ -130,12 +166,20 @@ static CGFloat const kMiniThumb = 44;
     if (!self.isBeingDismissed) return;
     AVPlayer *player = self.player;
     if (self.wasPlaying && player) {
-        [player play];
-        // The system can pause a moment after the dismissal ends, so check again.
-        for (NSNumber *delay in @[@0.25, @0.8]) {
+        // Give AVKit a beat to hand the player back before re-starting, then
+        // keep nudging it: the system sometimes pauses again right after the
+        // dismissal animation completes. Shorter first checks mean the gap the
+        // user heard is gone in practice.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [player play];
+        });
+        for (NSNumber *delay in @[@0.25, @0.5, @1.0, @2.0]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                if (player.timeControlStatus == AVPlayerTimeControlStatusPaused) [player play];
+                if (player.status == AVPlayerStatusReadyToPlay &&
+                    player.timeControlStatus == AVPlayerTimeControlStatusPaused) {
+                    [player play];
+                }
             });
         }
     }
@@ -150,6 +194,10 @@ static CGFloat const kMiniThumb = 44;
 @property (nonatomic, strong) MVFloatingPlayerBar *bar;
 @property (nonatomic, strong) id timeObserver;
 @property (nonatomic) BOOL audioSessionReady;
+// Playlist the previous/next buttons move through.
+@property (nonatomic, copy) NSArray<NSURL *> *queue;
+@property (nonatomic, copy) NSArray<NSString *> *queueTitles;
+@property (nonatomic) NSInteger queueIndex;
 @end
 
 @implementation MVPlayerCenter
@@ -166,6 +214,10 @@ static CGFloat const kMiniThumb = 44;
         _bar = [MVFloatingPlayerBar new];
         [_bar.pauseButton addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [_bar.closeButton addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
+        [_bar.backButton addTarget:self action:@selector(seekBack) forControlEvents:UIControlEventTouchUpInside];
+        [_bar.forwardButton addTarget:self action:@selector(seekForward) forControlEvents:UIControlEventTouchUpInside];
+        [_bar.prevButton addTarget:self action:@selector(playPrevious) forControlEvents:UIControlEventTouchUpInside];
+        [_bar.nextButton addTarget:self action:@selector(playNext) forControlEvents:UIControlEventTouchUpInside];
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openFullPlayer)];
         tap.delegate = self;
         [_bar addGestureRecognizer:tap];
@@ -203,9 +255,28 @@ static CGFloat const kMiniThumb = 44;
 }
 
 - (void)playURL:(NSURL *)url title:(NSString *)title {
-    [self ensureAudioSession];
+    [self playQueue:@[url] titles:title.length ? @[title] : @[] fromIndex:0];
+}
 
-    self.currentTitle = title.length ? [title copy] : url.lastPathComponent.stringByDeletingPathExtension;
+- (void)playQueue:(NSArray<NSURL *> *)urls titles:(NSArray<NSString *> *)titles fromIndex:(NSInteger)index {
+    if (!urls.count) return;
+    if (index < 0 || index >= (NSInteger)urls.count) index = 0;
+    self.queue = [urls copy];
+    self.queueTitles = titles.count == urls.count ? [titles copy] : @[];
+    self.queueIndex = index;
+    [self loadItemAtIndex:index];
+}
+
+- (void)loadItemAtIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)self.queue.count) return;
+    self.queueIndex = index;
+    NSURL *url = self.queue[index];
+    NSString *title = index < (NSInteger)self.queueTitles.count && self.queueTitles[index].length
+        ? self.queueTitles[index]
+        : url.lastPathComponent.stringByDeletingPathExtension;
+    self.currentTitle = title;
+
+    [self ensureAudioSession];
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
     if (!self.internalPlayer) {
         self.internalPlayer = [AVPlayer new];
@@ -218,8 +289,27 @@ static CGFloat const kMiniThumb = 44;
     }
     [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
     [self.internalPlayer play];
-    // The bar is shown when the full player is dismissed (see openFullPlayer),
-    // so it never flashes for a split second before the player opens.
+    [self refreshMiniBar];
+}
+
+- (void)playNext {
+    if (self.queue.count < 2) return;
+    NSInteger next = self.queueIndex + 1;
+    if (next >= (NSInteger)self.queue.count) next = 0;
+    [self loadItemAtIndex:next];
+    [self refreshMiniBar];
+}
+
+- (void)playPrevious {
+    if (self.queue.count < 2) return;
+    // Tap again at the start of the item to restart it, like most players.
+    if (self.internalPlayer.currentTime.value > 3 * self.internalPlayer.currentTime.timescale) {
+        [self seekTo:0];
+        return;
+    }
+    NSInteger prev = self.queueIndex - 1;
+    if (prev < 0) prev = (NSInteger)self.queue.count - 1;
+    [self loadItemAtIndex:prev];
     [self refreshMiniBar];
 }
 
@@ -242,7 +332,33 @@ static CGFloat const kMiniThumb = 44;
 - (void)stop {
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = NO;
+    self.queue = nil;
+    self.queueTitles = nil;
     [self hideBar];
+}
+
+#pragma mark - Seeking
+
+- (void)seekForward {
+    [self seekBy:kSeekSeconds];
+}
+
+- (void)seekBack {
+    [self seekBy:-kSeekSeconds];
+}
+
+- (void)seekBy:(double)seconds {
+    if (!self.internalPlayer) return;
+    CMTime cur = [self.internalPlayer currentTime];
+    double target = CMTimeGetSeconds(cur) + seconds;
+    if (target < 0) target = 0;
+    CMTime t = CMTimeMakeWithSeconds(target, 600);
+    [self.internalPlayer seekToTime:t toleranceBefore:kCMTimePositiveInfinity toleranceAfter:kCMTimePositiveInfinity];
+}
+
+- (void)seekTo:(double)seconds {
+    [self.internalPlayer seekToTime:CMTimeMakeWithSeconds(seconds, 600)
+                    toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
 }
 
 - (BOOL)isPlaying {
@@ -259,8 +375,11 @@ static CGFloat const kMiniThumb = 44;
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
        shouldReceiveTouch:(UITouch *)touch {
-    // The mini bar itself opens the player; the two buttons do not.
-    if (touch.view == self.bar.pauseButton || touch.view == self.bar.closeButton) return NO;
+    // The mini bar itself opens the player; the buttons do not.
+    for (UIView *v in @[self.bar.pauseButton, self.bar.closeButton, self.bar.backButton,
+                        self.bar.forwardButton, self.bar.prevButton, self.bar.nextButton]) {
+        if (touch.view == v || [v.subviews containsObject:touch.view]) return NO;
+    }
     return YES;
 }
 
@@ -268,6 +387,11 @@ static CGFloat const kMiniThumb = 44;
     self.bar.titleLabel.text = self.currentTitle.length ? self.currentTitle : [MVLang t:@"Now playing"];
     self.bar.subtitleLabel.text = self.isPlaying ? [MVLang t:@"Playing"] : [MVLang t:@"Paused"];
     self.bar.pauseButton.selected = !self.isPlaying;
+    BOOL multi = self.queue.count > 1;
+    self.bar.prevButton.enabled = multi;
+    self.bar.nextButton.enabled = multi;
+    self.bar.prevButton.alpha = multi ? 1 : 0.4;
+    self.bar.nextButton.alpha = multi ? 1 : 0.4;
 }
 
 - (void)showBar {
