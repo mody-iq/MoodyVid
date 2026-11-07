@@ -233,8 +233,10 @@ def _download_once(yt_dlp, url, fmt, client, out_dir, native=None, task=""):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 10,
+        "fragment_retries": 10,
+        # Resume the tail of an interrupted download instead of restarting it.
+        "continue": True,
         # A blocked style should fail quickly so the next one is tried.
         "socket_timeout": 15,
         "progress_hooks": [_progress_hook(native, task)],

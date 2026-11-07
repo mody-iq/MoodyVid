@@ -4,6 +4,8 @@
 #import "MVTheme.h"
 #import "MVLang.h"
 #import "MVPython.h"
+#import "MVDownloadEngine.h"
+#import "MVPlayerCenter.h"
 
 @interface MVAppDelegate : UIResponder <UIApplicationDelegate, UNUserNotificationCenterDelegate>
 @property (strong, nonatomic) UIWindow *window;
@@ -27,6 +29,10 @@
     UNUserNotificationCenter.currentNotificationCenter.delegate = self;
     [UNUserNotificationCenter.currentNotificationCenter requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
                                                                     completionHandler:nil];
+
+    // If the system killed us mid-download, pick the queue back up. yt-dlp
+    // continues the .part files it left behind.
+    [[MVDownloadEngine shared] resumeInterrupted];
     return YES;
 }
 

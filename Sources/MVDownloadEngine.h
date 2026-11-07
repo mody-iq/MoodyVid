@@ -36,6 +36,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)saveToPhotos:(NSString *)filePath
           completion:(void (^_Nullable)(NSString *_Nullable filePath, NSString *_Nullable error))completion;
 
+/// Re-queues records that were still waiting or downloading when the app was
+/// killed, so an interrupted download resumes (yt-dlp continues .part files).
+- (void)resumeInterrupted;
+
 @end
 
 NS_ASSUME_NONNULL_END

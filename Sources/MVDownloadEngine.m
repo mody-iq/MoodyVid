@@ -93,6 +93,23 @@ static const NSUInteger kMaxConcurrent = 2;
     [self pump];
 }
 
+- (void)resumeInterrupted {
+    // Records in Waiting/Active with no process behind them came from an
+    // interrupted session (a crash or the system killing us in the background).
+    // Put them back in the queue; yt-dlp continues any .part files it finds.
+    for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+        if (r.state == MVDownloadStateWaiting || r.state == MVDownloadStateActive) {
+            MVDownloadJob *job = [MVDownloadJob new];
+            job.identifier = r.identifier;
+            job.url = r.url;
+            job.quality = r.quality ?: @"best";
+            [_queue addObject:job];
+            r.state = MVDownloadStateWaiting;
+        }
+    }
+    [self pump];
+}
+
 /// Starts queued jobs while there is room. Called on the main queue.
 - (void)pump {
     while (_running.count < kMaxConcurrent && _queue.count) {

@@ -192,6 +192,8 @@ static CGFloat const kMiniBarHeight = 58;
     return (self.internalPlayer.rate != 0 && !self.internalPlayer.error);
 }
 
+- (AVPlayer *)player { return self.internalPlayer; }
+
 #pragma mark - Floating bar
 
 - (void)showBar {
