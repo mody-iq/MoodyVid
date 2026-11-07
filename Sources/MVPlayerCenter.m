@@ -169,7 +169,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @end
 
 @implementation MVFullPlayerViewController {
-    CALayer *_videoLayer;      // host layer for the player
+    AVPlayerLayer *_videoLayer; // host layer for the player
     CALayer *_scrim;           // dim overlay between wallpaper and video
     UISlider *_slider;
     UILabel *_titleLabel;
@@ -373,7 +373,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     double pos = CMTimeGetSeconds(time);
     if (!isnan(total) && total > 0) {
         _slider.maximumValue = total;
-        if (!_slider.dragging) _slider.value = MAX(0, MIN(pos, total));
+        if (!_slider.tracking) _slider.value = MAX(0, MIN(pos, total));
         _timeLabel.text = [NSString stringWithFormat:@"%@  /  %@",
                            [self hms:pos], [self hms:total]];
     }

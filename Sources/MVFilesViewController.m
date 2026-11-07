@@ -26,7 +26,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 // full-screen modal.
 @property (nonatomic, strong) UIView *playerCard;
 @property (nonatomic, strong) UIView *videoSurface;
-@property (nonatomic, strong) CALayer *videoLayer;
+@property (nonatomic, strong) AVPlayerLayer *videoLayer;
 @property (nonatomic, strong) UILabel *nowTitleLabel;
 @property (nonatomic, strong) UIButton *playPauseButton;
 @property (nonatomic, strong) UIButton *cardCloseButton;

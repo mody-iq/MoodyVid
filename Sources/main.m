@@ -28,7 +28,7 @@
     // they find out. Without a delegate, banners are suppressed in foreground.
     UNUserNotificationCenter.currentNotificationCenter.delegate = self;
     [UNUserNotificationCenter.currentNotificationCenter requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
-                                                                    completionHandler:nil];
+                                                                    completionHandler:^(BOOL granted, NSError *error) {}];
 
     // If the system killed us mid-download, pick the queue back up. yt-dlp
     // continues the .part files it left behind.
