@@ -528,7 +528,22 @@ static NSString *const kMessageHandler = @"moodyvid";
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [MVTheme applyWallpaperTo:self.view];
     [self refreshText];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+    }
 }
 
 - (void)dealloc {

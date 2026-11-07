@@ -55,6 +55,14 @@ static NSString *const kCell = @"MVCell";
     }
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+        [self.tableView reloadData];
+    }
+}
+
 #pragma mark - Table
 
 typedef NS_ENUM(NSInteger, MVMoreSection) {
@@ -70,8 +78,8 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case MVMoreSectionLanguage:   return 1;
-        case MVMoreSectionAppearance: return 3;
-        case MVMoreSectionWallpaper:  return MVTheme.wallpaperNames.count;
+        case MVMoreSectionAppearance: return 1;
+        case MVMoreSectionWallpaper:  return 1;
         case MVMoreSectionStorage:    return 2;
         case MVMoreSectionAbout:      return 1;
         default: return 0;
@@ -80,9 +88,9 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case MVMoreSectionLanguage:   return [MVLang t:@"Language"];
-        case MVMoreSectionAppearance: return [MVLang t:@"Appearance"];
-        case MVMoreSectionWallpaper:  return [MVLang t:@"Wallpaper"];
+        case MVMoreSectionLanguage:   return nil;
+        case MVMoreSectionAppearance: return nil;
+        case MVMoreSectionWallpaper:  return nil;
         case MVMoreSectionStorage:    return [MVLang t:@"Storage"];
         case MVMoreSectionAbout:      return [MVLang t:@"About"];
         default: return nil;
@@ -102,35 +110,16 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         content.secondaryText = [MVLang displayNameForCode:MVLang.shared.code];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == MVMoreSectionAppearance) {
-        NSArray *modes = @[@[@"Dark", @(MVThemeModeDark)], @[@"Light", @(MVThemeModeLight)], @[@"System", @(MVThemeModeSystem)]];
-        content.text = [MVLang t:modes[indexPath.row][0]];
-        if (MVTheme.shared.mode == [modes[indexPath.row][1] integerValue]) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
-            cell.tintColor = [MVTheme accent];
-        }
+        content.text = [MVLang t:@"Appearance"];
+        cell.accessoryView = [self modeLabel];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == MVMoreSectionWallpaper) {
-        NSArray<NSString *> *names = MVTheme.wallpaperNames;
-        NSString *key = names[indexPath.row];
-        content.text = [MVLang t:[self wallpaperLabelForKey:key]];
-        if ([MVTheme.wallpaperName isEqualToString:key]) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
-            cell.tintColor = [MVTheme accent];
-        } else {
-            // A small swatch preview so the choice is not abstract.
-            NSArray<UIColor *> *swatchColors = [self wallpaperSwatchForKey:key];
-            if (swatchColors.count == 2) {
-                CAGradientLayer *grad = [CAGradientLayer layer];
-                grad.colors = @[(id)swatchColors[0].CGColor, (id)swatchColors[1].CGColor];
-                grad.startPoint = CGPointMake(0.5, 0);
-                grad.endPoint = CGPointMake(0.5, 1);
-                UIView *swatch = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
-                swatch.layer.cornerRadius = 8;
-                swatch.layer.masksToBounds = YES;
-                grad.frame = swatch.bounds;
-                [swatch.layer addSublayer:grad];
-                cell.accessoryView = swatch;
-            }
-        }
+        content.text = [MVLang t:@"Wallpaper"];
+        // Current wallpaper name plus a small preview swatch.
+        NSString *key = MVTheme.wallpaperName;
+        content.secondaryText = [MVLang t:[self wallpaperLabelForKey:key]];
+        cell.accessoryView = [self wallpaperSwatchViewForName:key];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.section == MVMoreSectionStorage) {
         if (indexPath.row == 0) {
             content.text = [MVLang t:@"Storage"];
@@ -154,17 +143,12 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionLanguage:
             [self showLanguageMenu];
             break;
-        case MVMoreSectionAppearance: {
-            NSArray *modes = @[@(MVThemeModeDark), @(MVThemeModeLight), @(MVThemeModeSystem)];
-            MVTheme.shared.mode = [modes[indexPath.row] integerValue];
-            [self refresh];
+        case MVMoreSectionAppearance:
+            [self showAppearanceMenu];
             break;
-        }
-        case MVMoreSectionWallpaper: {
-            [MVTheme setWallpaperName:MVTheme.wallpaperNames[indexPath.row]];
-            [self refresh];
+        case MVMoreSectionWallpaper:
+            [self showWallpaperMenu];
             break;
-        }
         case MVMoreSectionStorage:
             if (indexPath.row == 1) [self clearCache];
             break;
@@ -174,7 +158,6 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 }
 
 - (void)showLanguageMenu {
-    // A checkmark per row is clearer than a sheet on iPad, and it is one tap.
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Language"]
                                                                   message:nil
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
@@ -198,6 +181,57 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+- (void)showAppearanceMenu {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Appearance"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray *modes = @[
+        @[@"Dark", @(MVThemeModeDark), @"moon.fill"],
+        @[@"Light", @(MVThemeModeLight), @"sun.max.fill"],
+        @[@"System", @(MVThemeModeSystem), @"circle.lefthalf.filled"],
+    ];
+    for (NSArray *mode in modes) {
+        UIAlertAction *action = [UIAlertAction actionWithTitle:[MVLang t:mode[0]]
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(UIAlertAction *a) {
+            MVTheme.shared.mode = [mode[1] integerValue];
+            [self refresh];
+        }];
+        [action setValue:[UIImage systemImageNamed:mode[2]] forKey:@"image"];
+        if (MVTheme.shared.mode == [mode[1] integerValue]) {
+            [action setValue:[UIImage systemImageNamed:@"checkmark"] forKey:@"image"];
+        }
+        [sheet addAction:action];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 200, 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)showWallpaperMenu {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Wallpaper"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    NSString *current = MVTheme.wallpaperName;
+    for (NSString *key in MVTheme.wallpaperNames) {
+        UIAlertAction *action = [UIAlertAction actionWithTitle:[MVLang t:[self wallpaperLabelForKey:key]]
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(UIAlertAction *a) {
+            [MVTheme setWallpaperName:key];
+            [self refresh];
+        }];
+        if ([key isEqualToString:current]) {
+            [action setValue:[UIImage systemImageNamed:@"checkmark"] forKey:@"image"];
+        }
+        [sheet addAction:action];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 200, 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
 #pragma mark - Wallpapers
 
 - (NSString *)wallpaperLabelForKey:(NSString *)key {
@@ -206,19 +240,66 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         @"midnight": @"Midnight",
         @"aurora":   @"Aurora",
         @"sunset":   @"Sunset",
+        @"ocean":    @"Ocean",
         @"forest":   @"Forest",
+        @"graphite": @"Graphite",
+        @"neon":     @"Neon",
+        @"cosmic":   @"Cosmic",
+        @"waves":    @"Waves",
     };
     return labels[key] ?: key;
 }
 
-// A two-colour swatch preview. Uses the dynamic wallpaper colours so the swatch
-// matches whatever appearance the app is currently in.
-- (NSArray<UIColor *> *)wallpaperSwatchForKey:(NSString *)key {
-    UIColor *start = [[MVTheme wallpaperStartForName:key]
-                      resolvedColorWithTraitCollection:UITraitCollection.currentTraitCollection];
-    UIColor *end = [[MVTheme wallpaperEndForName:key]
-                    resolvedColorWithTraitCollection:UITraitCollection.currentTraitCollection];
-    return @[start, end];
+// The label that shows the current theme next to the "Appearance" row.
+- (UIView *)modeLabel {
+    UILabel *label = [UILabel new];
+    switch (MVTheme.shared.mode) {
+        case MVThemeModeDark:  label.text = [MVLang t:@"Dark"];  break;
+        case MVThemeModeLight: label.text = [MVLang t:@"Light"]; break;
+        default:               label.text = [MVLang t:@"System"]; break;
+    }
+    label.font = [UIFont systemFontOfSize:15];
+    label.textColor = [MVTheme secondaryText];
+    [label sizeToFit];
+    return label;
+}
+
+// A small reusable preview swatch (gradient or rendered pattern).
+- (UIView *)wallpaperSwatchViewForName:(NSString *)key {
+    UIView *swatch = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 34, 34)];
+    swatch.layer.cornerRadius = 9;
+    swatch.layer.masksToBounds = YES;
+    swatch.layer.borderWidth = 0.5;
+    swatch.layer.borderColor = [MVTheme cardBorder].CGColor;
+
+    CGSize sz = CGSizeMake(34, 34);
+    if ([MVTheme wallpaperUsesImage:key]) {
+        UIImage *img = [MVTheme wallpaperImageForName:key size:sz];
+        if (img) {
+            UIImageView *iv = [[UIImageView alloc] initWithFrame:swatch.bounds];
+            iv.image = img;
+            iv.contentMode = UIViewContentModeScaleAspectFill;
+            [swatch addSubview:iv];
+            return swatch;
+        }
+    }
+    NSArray<UIColor *> *colors = [MVTheme wallpaperColorsForName:key];
+    if (colors.count) {
+        CAGradientLayer *grad = [CAGradientLayer layer];
+        NSMutableArray *cg = [NSMutableArray arrayWithCapacity:colors.count];
+        for (UIColor *c in colors) [cg addObject:(id)c.CGColor];
+        grad.colors = cg;
+        if (colors.count > 1) {
+            NSMutableArray *loc = [NSMutableArray array];
+            for (NSUInteger i = 0; i < colors.count; i++) [loc addObject:@((CGFloat)i / (colors.count - 1))];
+            grad.locations = loc;
+        }
+        grad.startPoint = CGPointMake(0.5, 0);
+        grad.endPoint = CGPointMake(0.5, 1);
+        grad.frame = swatch.bounds;
+        [swatch.layer addSublayer:grad];
+    }
+    return swatch;
 }
 
 #pragma mark - Engine info

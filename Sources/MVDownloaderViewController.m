@@ -27,6 +27,72 @@
 }
 @end
 
+/// A view that renders its text filled with a diagonal accent gradient, used
+/// for the brand name on the home screen.
+@interface MVGradientLabel : UIView
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, strong) UIFont *font;
+@property (nonatomic, strong) UIColor *startColor;
+@property (nonatomic, strong) UIColor *endColor;
+@end
+
+@implementation MVGradientLabel
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.opaque = NO;
+        self.backgroundColor = UIColor.clearColor;
+        self.userInteractionEnabled = NO;
+    }
+    return self;
+}
+
+- (void)setText:(NSString *)text {
+    _text = [text copy];
+    [self setNeedsDisplay];
+}
+- (void)setFont:(UIFont *)font {
+    _font = font;
+    [self setNeedsDisplay];
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self setNeedsDisplay];
+}
+
+- (void)drawRect:(CGRect)rect {
+    if (!self.text.length) return;
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (!context) return;
+
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGGradientRef gradient = CGGradientCreateWithColors(space, (__bridge CFArrayRef)@[
+        (id)(self.startColor ?: [MVTheme accent]).CGColor,
+        (id)(self.endColor ?: [MVTheme accent].CGColor),
+    ], NULL);
+    NSDictionary *attrs = self.font ? @{NSFontAttributeName: self.font} : @{};
+    CGSize size = [self.text sizeWithAttributes:attrs];
+
+    CGContextSaveGState(context);
+    CGContextSetTextDrawingMode(context, kCGTextClip);
+    [self.text drawAtPoint:CGPointMake(0, (CGRectGetHeight(rect) - size.height) / 2.0)
+            withAttributes:attrs];
+    CGContextDrawLinearGradient(context, gradient,
+                                CGPointMake(0, 0),
+                                CGPointMake(CGRectGetWidth(rect), CGRectGetHeight(rect)), 0);
+    CGContextRestoreGState(context);
+
+    CGGradientRelease(gradient);
+    CGColorSpaceRelease(space);
+}
+
+- (CGSize)intrinsicContentSize {
+    if (!self.font || !self.text.length) return CGSizeZero;
+    return [self.text sizeWithAttributes:@{NSFontAttributeName: self.font}];
+}
+
+@end
+
 @interface MVDownloaderViewController () <UITextFieldDelegate>
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UITextField *urlField;
@@ -215,30 +281,62 @@
 - (UIView *)makeHeader {
     UIView *header = [UIView new];
 
-    UILabel *brand = [UILabel new];
-    brand.text = @"MoodyVid";
-    brand.font = [UIFont systemFontOfSize:28 weight:UIFontWeightHeavy];
-    brand.textColor = [MVTheme text];
-    brand.translatesAutoresizingMaskIntoConstraints = NO;
-    [header addSubview:brand];
+    // Glassy icon badge on the left, brand gradient text beside it.
+    UIView *badge = [UIView new];
+    badge.translatesAutoresizingMaskIntoConstraints = NO;
+    badge.layer.cornerRadius = 18;
+    badge.layer.cornerCurve = kCACornerCurveContinuous;
+    [MVTheme applyCardStyle:badge cornerRadius:18];
+    UIImageView *icon = [UIImageView new];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.image = [UIImage systemImageNamed:@"play.rectangle.fill"];
+    icon.tintColor = [MVTheme accent];
+    [badge addSubview:icon];
+    [badge.widthAnchor constraintEqualToConstant:56].active = YES;
+    [badge.heightAnchor constraintEqualToConstant:56].active = YES;
+    [icon.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor].active = YES;
+    [icon.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor].active = YES;
 
     UILabel *tagline = [UILabel new];
     tagline.translatesAutoresizingMaskIntoConstraints = NO;
     tagline.tag = 101;
-    tagline.font = [UIFont systemFontOfSize:13];
+    tagline.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     tagline.textColor = [MVTheme secondaryText];
-    [header addSubview:tagline];
+    tagline.numberOfLines = 1;
 
+    MVGradientLabel *brand = [MVGradientLabel new];
+    brand.translatesAutoresizingMaskIntoConstraints = NO;
+    brand.startColor = [MVTheme accent];
+    brand.endColor = [UIColor colorWithRed:0.45 green:0.30 blue:0.85 alpha:1.0];
+    UIFont *brandFont = [UIFont systemFontOfSize:30 weight:UIFontWeightHeavy];
+    brand.font = brandFont;
+    brand.text = @"MoodyVid";
+
+    UIStackView *texts = [UIStackView new];
+    texts.axis = UILayoutConstraintAxisVertical;
+    texts.spacing = 2;
+    texts.translatesAutoresizingMaskIntoConstraints = NO;
+    [texts addArrangedSubview:brand];
+    [texts addArrangedSubview:tagline];
+
+    UIStackView *row = [UIStackView new];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 14;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addArrangedSubview:badge];
+    [row addArrangedSubview:texts];
+
+    [header addSubview:row];
     [NSLayoutConstraint activateConstraints:@[
-        [brand.topAnchor constraintEqualToAnchor:header.topAnchor],
-        [brand.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [brand.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
-
-        [tagline.topAnchor constraintEqualToAnchor:brand.bottomAnchor constant:2],
-        [tagline.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [tagline.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
-        [tagline.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
+        [row.topAnchor constraintEqualToAnchor:header.topAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+        [row.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
+        [row.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
     ]];
+
+    // Keep the tagline single-line but allow it to shrink gracefully.
+    [tagline setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     return header;
 }
 
@@ -339,6 +437,14 @@
         if ([layer.name isEqualToString:@"MVWallpaperLayer"]) {
             layer.frame = self.view.bounds;
         }
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+        [self applyThemeRecursively];
     }
 }
 

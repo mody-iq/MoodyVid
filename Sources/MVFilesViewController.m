@@ -149,6 +149,13 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     }
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+    }
+}
+
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     self.filter = searchController.searchBar.text ?: @"";
     [self.tableView reloadData];

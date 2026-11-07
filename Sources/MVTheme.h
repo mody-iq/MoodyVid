@@ -48,8 +48,25 @@ extern NSString *const MVThemeDidChangeNotification;
 + (UIColor *)wallpaperStartForName:(NSString *)name;
 + (UIColor *)wallpaperEndForName:(NSString *)name;
 
+/// The full stop-colour array for a wallpaper (already dynamic light/dark).
++ (NSArray<UIColor *> *)wallpaperColorsForName:(NSString *)name;
+
 /// All the wallpaper keys available to the settings picker.
 + (NSArray<NSString *> *)wallpaperNames;
+
+/// YES for wallpapers drawn as a raster pattern (waves/neon/cosmic).
++ (BOOL)wallpaperUsesImage:(NSString *)name;
+
+/// Renders the pattern wallpaper at the given point size.
++ (nullable UIImage *)wallpaperImageForName:(NSString *)name size:(CGSize)size;
+
+/// Re-renders the view's wallpaper when it is an image pattern and the
+/// appearance changed (image patterns cannot re-resolve dynamic colours, so the
+/// screens call this from -traitCollectionDidChange:).
++ (void)refreshWallpaperIfPattern:(UIView *)view;
+
+/// The tint used on frosted-glass surfaces.
++ (UIColor *)glassCard;
 
 /// The currently selected wallpaper key, persisted.
 + (NSString *)wallpaperName;

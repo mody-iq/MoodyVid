@@ -181,7 +181,12 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Midnight": @"منتصف الليل",
             @"Aurora": @"الشفق القطبي",
             @"Sunset": @"الغروب",
+            @"Ocean": @"المحيط",
             @"Forest": @"الغابة",
+            @"Graphite": @"الجرافيت",
+            @"Neon": @"نيون",
+            @"Cosmic": @"الكونية",
+            @"Waves": @"الأمواج",
         };
     });
     return table;

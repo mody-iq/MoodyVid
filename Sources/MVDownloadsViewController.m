@@ -281,6 +281,13 @@ static NSString *const kDoneCell = @"MVDoneCell";
     }
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+    }
+}
+
 - (void)reloadList {
     self.shownIdentifiers = [[self records] valueForKey:@"identifier"];
     [self.tableView reloadData];

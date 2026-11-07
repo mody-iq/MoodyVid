@@ -36,16 +36,26 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
-        self.backgroundColor = [MVTheme card];
+        // Frosted layout: the blur view added below sits behind the controls.
+        self.backgroundColor = [MVTheme glassCard];
         self.layer.cornerRadius = 16;
         self.layer.cornerCurve = kCACornerCurveContinuous;
         self.layer.borderWidth = 0.5;
-        self.layer.borderColor = [MVTheme cardBorder].CGColor;
+        self.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:MVTheme.shared.isDark ? 0.16 : 0.10].CGColor;
         self.layer.shadowColor = UIColor.blackColor.CGColor;
         self.layer.shadowOpacity = 0.3;
         self.layer.shadowRadius = 12;
         self.layer.shadowOffset = CGSizeMake(0, 5);
         self.clipsToBounds = NO;
+
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:
+                                     [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+        glass.frame = self.bounds;
+        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        glass.layer.cornerRadius = 16;
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        glass.layer.masksToBounds = YES;
+        [self insertSubview:glass atIndex:0];
 
         _thumbView = [UIImageView new];
         _thumbView.contentMode = UIViewContentModeScaleAspectFill;
@@ -145,10 +155,13 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @end
 
 /// The system player, with a fix: iOS pauses an AVPlayerViewController's player
-/// when the controller is dismissed. The user expects the video to keep playing
-/// in the mini bar, so playback is resumed if it was playing when the dismissal began.
+/// when the controller is dismissed, but the user expects the video to keep
+/// playing back in the mini bar. `wasPlaying` is captured before teardown and
+/// the `onResume` block (armed by the player center with a generation guard)
+/// keeps playback alive through the dismissal animation.
 @interface MVPlayerViewController : AVPlayerViewController
 @property (nonatomic, copy, nullable) void (^onDismissed)(void);
+@property (nonatomic, copy, nullable) void (^onResume)(void);
 @property (nonatomic) BOOL wasPlaying;
 @end
 
@@ -158,30 +171,20 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     [super viewWillDisappear:animated];
     if (self.isBeingDismissed) {
         self.wasPlaying = (self.player.timeControlStatus != AVPlayerTimeControlStatusPaused);
+        if (self.wasPlaying) {
+            // Try before the teardown has even started; often this alone
+            // prevents the audible drop.
+            [self.player play];
+            if (self.onResume) self.onResume();
+        }
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
     if (!self.isBeingDismissed) return;
-    AVPlayer *player = self.player;
-    if (self.wasPlaying && player) {
-        // Give AVKit a beat to hand the player back before re-starting, then
-        // keep nudging it: the system sometimes pauses again right after the
-        // dismissal animation completes. Shorter first checks mean the gap the
-        // user heard is gone in practice.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [player play];
-        });
-        for (NSNumber *delay in @[@0.25, @0.5, @1.0, @2.0]) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (player.status == AVPlayerStatusReadyToPlay &&
-                    player.timeControlStatus == AVPlayerTimeControlStatusPaused) {
-                    [player play];
-                }
-            });
-        }
+    if (self.wasPlaying) {
+        if (self.onResume) self.onResume();
     }
     if (self.onDismissed) self.onDismissed();
 }
@@ -198,6 +201,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @property (nonatomic, copy) NSArray<NSURL *> *queue;
 @property (nonatomic, copy) NSArray<NSString *> *queueTitles;
 @property (nonatomic) NSInteger queueIndex;
+// Bumped every time the item changes or playback is stopped, so a stale
+// "resume after dismissal" from an earlier presentation cannot fight the new
+// state (for example restarting a paused video the user actually stopped).
+@property (nonatomic) NSUInteger generation;
 @end
 
 @implementation MVPlayerCenter
@@ -269,6 +276,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)loadItemAtIndex:(NSInteger)index {
     if (index < 0 || index >= (NSInteger)self.queue.count) return;
+    self.generation++;
     self.queueIndex = index;
     NSURL *url = self.queue[index];
     NSString *title = index < (NSInteger)self.queueTitles.count && self.queueTitles[index].length
@@ -330,6 +338,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)stop {
+    self.generation++;
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = NO;
     self.queue = nil;
@@ -359,6 +368,34 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)seekTo:(double)seconds {
     [self.internalPlayer seekToTime:CMTimeMakeWithSeconds(seconds, 600)
                     toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+}
+
+#pragma mark - Resume guard
+
+// After a full-screen player dismisses, AVKit pauses the player. Keep nudging
+// it back for a couple of seconds, but only for *this* generation: if the user
+// already stopped playback or started another video meanwhile, do nothing.
+- (void)resumePlaybackForGeneration:(NSUInteger)gen {
+    [self resumePlaybackForGeneration:gen attempts:60];
+}
+
+- (void)resumePlaybackForGeneration:(NSUInteger)gen attempts:(NSInteger)attempts {
+    if (attempts <= 0) return;
+    if (self.generation != gen) return;
+    AVPlayer *p = self.internalPlayer;
+    if (!p) return;
+    // Already playing, or the user paused on purpose while dismissing: stop.
+    if (p.rate != 0 && p.timeControlStatus != AVPlayerTimeControlStatusPaused) return;
+    if (p.status != AVPlayerStatusReadyToPlay) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self resumePlaybackForGeneration:gen attempts:attempts - 1];
+        });
+        return;
+    }
+    [p play];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self resumePlaybackForGeneration:gen attempts:attempts - 1];
+    });
 }
 
 - (BOOL)isPlaying {
@@ -474,7 +511,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     if (@available(iOS 15.0, *)) {
         full.allowsPictureInPicturePlayback = YES;
     }
+    NSUInteger gen = self.generation;
     __weak typeof(self) weakSelf = self;
+    full.onResume = ^{
+        [weakSelf resumePlaybackForGeneration:gen];
+    };
     full.onDismissed = ^{
         [weakSelf refreshMiniBar];
         [weakSelf showBar];

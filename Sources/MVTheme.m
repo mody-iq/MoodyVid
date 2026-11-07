@@ -5,12 +5,19 @@ NSString *const MVThemeDidChangeNotification = @"MVThemeDidChangeNotification";
 static NSString *const kThemeModeKey = @"MVThemeMode";
 static NSString *const kWallpaperKey = @"MVWallpaper";
 
-/// The stock wallpaper: the current flat backdrop, before any gradient is drawn.
-static NSString *const kWallpaperClassic = @"classic";
+static NSString *const kWallpaperClassic  = @"classic";
 static NSString *const kWallpaperMidnight = @"midnight";
-static NSString *const kWallpaperAurora = @"aurora";
-static NSString *const kWallpaperSunset = @"sunset";
-static NSString *const kWallpaperForest = @"forest";
+static NSString *const kWallpaperAurora   = @"aurora";
+static NSString *const kWallpaperSunset   = @"sunset";
+static NSString *const kWallpaperOcean    = @"ocean";
+static NSString *const kWallpaperForest   = @"forest";
+static NSString *const kWallpaperGraphite = @"graphite";
+static NSString *const kWallpaperNeon     = @"neon";
+static NSString *const kWallpaperCosmic   = @"cosmic";
+static NSString *const kWallpaperWaves    = @"waves";
+
+/// Tag handed to every glass blur view so re-styling never stacks them.
+static NSInteger const kGlassBlurTag = 8081;
 
 @implementation MVTheme
 
@@ -53,8 +60,6 @@ static UIColor *MVColor(CGFloat dr, CGFloat dg, CGFloat db, CGFloat lr, CGFloat 
     }];
 }
 
-// Dark palette: near-black with a navy cast and a teal accent, matching the
-// design (background #0a0a0c, accent #0FA0B0).
 + (UIColor *)background   { return MVColor(0.039, 0.039, 0.047,  0.96, 0.96, 0.98); }
 + (UIColor *)card         { return MVColor(0.094, 0.094, 0.118,  1.00, 1.00, 1.00); }
 + (UIColor *)cardBorder   { return MVColor(1.00, 1.00, 1.00,  0.00, 0.00, 0.00); }
@@ -69,26 +74,61 @@ static UIColor *MVColor(CGFloat dr, CGFloat dg, CGFloat db, CGFloat lr, CGFloat 
 
 #pragma mark - Wallpapers
 
-// As with MVColor, each entry carries dark and light RGB values; the dynamic
-// provider picks per wallpaper + current appearance. "Start" is the top of the
-// gradient, "end" the bottom, tuned to keep the design's text readable.
-static NSDictionary<NSString *, NSArray *> *MVWallpaperTable(void) {
-    return @{
-        kWallpaperClassic:  @[@[@0.039, @0.039, @0.047], @[@0.039, @0.039, @0.047],
-                              @[@0.96,  @0.96,  @0.98],  @[@0.96,  @0.96,  @0.98]],
-        kWallpaperMidnight: @[@[@0.02,  @0.05,  @0.09], @[@0.02,  @0.14,  @0.20],
-                              @[@0.90,  @0.93,  @0.99], @[@0.72,  @0.85,  @0.96]],
-        kWallpaperAurora:   @[@[@0.03,  @0.07,  @0.10], @[@0.10,  @0.22,  @0.34],
-                              @[@0.92,  @0.95,  @0.99], @[@0.78,  @0.90,  @0.97]],
-        kWallpaperSunset:   @[@[@0.09,  @0.04,  @0.12], @[@0.32,  @0.10,  @0.20],
-                              @[@0.99,  @0.94,  @0.93], @[@0.96,  @0.82,  @0.86]],
-        kWallpaperForest:   @[@[@0.02,  @0.06,  @0.04], @[@0.06,  @0.18,  @0.12],
-                              @[@0.93,  @0.97,  @0.94], @[@0.77,  @0.90,  @0.82]],
-    };
+// Each wallpaper lists any number of colour stops; each stop carries a dark and
+// a light RGB triple so the wallpaper adapts to the appearance.
+static NSArray<NSArray<NSArray *> *> *MVStops(NSString *name) {
+    static NSDictionary *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = @{
+            kWallpaperClassic:  @[@[@[@0.039,@0.039,@0.047], @[@0.96,@0.96,@0.98]]],
+            kWallpaperMidnight: @[@[@[@0.012,@0.043,@0.078], @[@0.92,@0.95,@0.99]],
+                                  @[@[@0.020,@0.133,@0.173], @[@0.83,@0.91,@0.96]],
+                                  @[@[@0.039,@0.227,@0.290], @[@0.76,@0.86,@0.94]]],
+            kWallpaperAurora:   @[@[@[@0.008,@0.070,@0.043], @[@0.90,@0.97,@0.95]],
+                                  @[@[@0.027,@0.188,@0.145], @[@0.82,@0.94,@0.89]],
+                                  @[@[@0.055,@0.227,@0.235], @[@0.81,@0.91,@0.93]],
+                                  @[@[@0.106,@0.169,@0.333], @[@0.89,@0.88,@0.96]]],
+            kWallpaperSunset:   @[@[@[@0.086,@0.027,@0.067], @[@0.99,@0.92,@0.91]],
+                                  @[@[@0.227,@0.051,@0.141], @[@0.98,@0.84,@0.86]],
+                                  @[@[@0.420,@0.086,@0.188], @[@0.96,@0.72,@0.78]],
+                                  @[@[@0.576,@0.188,@0.114], @[@0.94,@0.65,@0.56]]],
+            kWallpaperOcean:    @[@[@[@0.008,@0.071,@0.149], @[@0.89,@0.95,@0.99]],
+                                  @[@[@0.024,@0.212,@0.388], @[@0.76,@0.89,@0.97]],
+                                  @[@[@0.051,@0.416,@0.549], @[@0.62,@0.83,@0.94]]],
+            kWallpaperForest:   @[@[@[@0.012,@0.094,@0.047], @[@0.92,@0.97,@0.93]],
+                                  @[@[@0.047,@0.184,@0.086], @[@0.84,@0.94,@0.88]],
+                                  @[@[@0.086,@0.333,@0.169], @[@0.74,@0.89,@0.80]]],
+            kWallpaperGraphite: @[@[@[@0.063,@0.071,@0.086], @[@0.95,@0.96,@0.97]],
+                                  @[@[@0.106,@0.129,@0.157], @[@0.89,@0.91,@0.93]],
+                                  @[@[@0.165,@0.200,@0.239], @[@0.79,@0.82,@0.86]]],
+            kWallpaperNeon:     @[@[@[@0.039,@0.024,@0.078], @[@0.97,@0.95,@1.00]],
+                                  @[@[@0.090,@0.051,@0.200], @[@0.91,@0.86,@0.99]],
+                                  @[@[@0.055,@0.165,@0.235], @[@0.84,@0.92,@0.98]]],
+            kWallpaperCosmic:   @[@[@[@0.027,@0.027,@0.059], @[@0.96,@0.96,@0.99]],
+                                  @[@[@0.078,@0.063,@0.196], @[@0.88,@0.88,@0.95]],
+                                  @[@[@0.169,@0.118,@0.302], @[@0.76,@0.79,@0.90]]],
+            kWallpaperWaves:    @[@[@[@0.039,@0.075,@0.133], @[@0.95,@0.97,@0.99]],
+                                  @[@[@0.071,@0.235,@0.322], @[@0.85,@0.92,@0.97]],
+                                  @[@[@0.059,@0.369,@0.455], @[@0.75,@0.88,@0.95]]],
+        };
+    });
+    NSArray *stops = table[name];
+    return stops ?: table[kWallpaperClassic];
 }
 
 + (NSArray<NSString *> *)wallpaperNames {
-    return @[kWallpaperClassic, kWallpaperMidnight, kWallpaperAurora, kWallpaperSunset, kWallpaperForest];
+    return @[kWallpaperClassic, kWallpaperMidnight, kWallpaperAurora,
+             kWallpaperSunset, kWallpaperOcean, kWallpaperForest, kWallpaperGraphite,
+             kWallpaperNeon, kWallpaperCosmic, kWallpaperWaves];
+}
+
+// Wallpapers rendered as an image (glow blobs / stars / waves) instead of a
+// plain smooth gradient.
++ (BOOL)wallpaperUsesImage:(NSString *)name {
+    return [name isEqualToString:kWallpaperNeon]
+        || [name isEqualToString:kWallpaperCosmic]
+        || [name isEqualToString:kWallpaperWaves];
 }
 
 + (NSString *)wallpaperName {
@@ -103,57 +143,205 @@ static NSDictionary<NSString *, NSArray *> *MVWallpaperTable(void) {
     [NSNotificationCenter.defaultCenter postNotificationName:MVThemeDidChangeNotification object:nil];
 }
 
-// Each wallpaper entry is start/end pairs for dark and light:
-// [darkStart, darkEnd, lightStart, lightEnd], each an RGB triple. idx 0 picks
-// the top colour, idx 1 the bottom. Returns a dynamic colour.
-static UIColor *MVWallpaperColor(NSString *kind, NSInteger idx) {
-    NSArray *entry = MVWallpaperTable()[kind];
-    if (entry.count < 4) return UIColor.clearColor;
-    NSArray *dark = entry[idx], *light = entry[idx + 2];
+// Whether the given traits resolve to the dark palette (honours the manual mode).
++ (BOOL)resolveDarkForTraits:(UITraitCollection *)traits {
+    switch (MVTheme.shared.mode) {
+        case MVThemeModeDark:  return YES;
+        case MVThemeModeLight: return NO;
+        default: return traits.userInterfaceStyle != UIUserInterfaceStyleLight;
+    }
+}
+
+// A dynamic colour for one wallpaper stop.
+static UIColor *MVStopColor(NSString *name, NSInteger idx) {
+    NSArray *stops = MVStops(name);
+    if (idx >= (NSInteger)stops.count) idx = stops.count - 1;
+    if (idx < 0) idx = 0;
+    NSArray *dark = stops[idx][0], *light = stops[idx][1];
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        BOOL darkMode;
-        switch (MVTheme.shared.mode) {
-            case MVThemeModeDark:  darkMode = YES; break;
-            case MVThemeModeLight: darkMode = NO;  break;
-            default: darkMode = traits.userInterfaceStyle != UIUserInterfaceStyleLight; break;
-        }
-        NSArray *c = darkMode ? dark : light;
-        return [UIColor colorWithRed:[c[0] doubleValue] green:[c[1] doubleValue] blue:[c[2] doubleValue] alpha:1.0];
+        NSArray *c = [MVTheme resolveDarkForTraits:traits] ? dark : light;
+        return [UIColor colorWithRed:[c[0] doubleValue] green:[c[1] doubleValue]
+                                blue:[c[2] doubleValue] alpha:1.0];
     }];
 }
 
-+ (UIColor *)wallpaperStart { return MVWallpaperColor(MVTheme.wallpaperName, 0); }
-+ (UIColor *)wallpaperEnd   { return MVWallpaperColor(MVTheme.wallpaperName, 1); }
++ (NSArray<UIColor *> *)wallpaperColorsForName:(NSString *)name {
+    if (![MVTheme.wallpaperNames containsObject:name]) return @[];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSUInteger i = 0; i < MVStops(name).count; i++) {
+        [out addObject:MVStopColor(name, (NSInteger)i)];
+    }
+    return out;
+}
 
-+ (UIColor *)wallpaperStartForName:(NSString *)name {
-    return [MVTheme.wallpaperNames containsObject:name] ? MVWallpaperColor(name, 0) : UIColor.clearColor;
+// The literal RGB triple for a wallpaper stop in a given appearance.
+static NSArray *MVRGB(NSString *name, NSInteger idx, BOOL dark) {
+    NSArray *stops = MVStops(name);
+    if (idx >= (NSInteger)stops.count) idx = stops.count - 1;
+    return stops[idx][dark ? 0 : 1];
 }
+
++ (UIColor *)wallpaperStart { return MVStopColor(MVTheme.wallpaperName, 0); }
++ (UIColor *)wallpaperEnd {
+    NSArray *colors = [self wallpaperColorsForName:MVTheme.wallpaperName];
+    return colors.lastObject ?: UIColor.clearColor;
+}
++ (UIColor *)wallpaperStartForName:(NSString *)name { return MVStopColor(name, 0); }
 + (UIColor *)wallpaperEndForName:(NSString *)name {
-    return [MVTheme.wallpaperNames containsObject:name] ? MVWallpaperColor(name, 1) : UIColor.clearColor;
+    NSArray *colors = [self wallpaperColorsForName:name];
+    return colors.lastObject ?: UIColor.clearColor;
 }
+
+#pragma mark - Wallpaper images (pattern wallpapers)
+
+// Rasterises the base gradient plus the pattern overlay. `dark` picks the palette.
+static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
+    UIGraphicsBeginImageContextWithOptions(size, NO, 0);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+
+    // 1. Vertical colour gradient.
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    size_t count = MVStops(name).count;
+    CGFloat locs[8] = {0};
+    CGFloat comps[8 * 4] = {0};
+    for (NSUInteger i = 0; i < count && i < 8; i++) {
+        NSArray *rgb = MVRGB(name, (NSInteger)i, dark);
+        locs[i] = (CGFloat)i / (CGFloat)(count - 1);
+        comps[i * 4 + 0] = [rgb[0] doubleValue];
+        comps[i * 4 + 1] = [rgb[1] doubleValue];
+        comps[i * 4 + 2] = [rgb[2] doubleValue];
+        comps[i * 4 + 3] = 1.0;
+    }
+    CGGradientRef grad = CGGradientCreateWithColorComponents(space, comps, locs, (size_t)count);
+    CGContextDrawLinearGradient(ctx, grad, CGPointMake(0, 0), CGPointMake(0, size.height), 0);
+    CGGradientRelease(grad);
+
+    // 2. Pattern overlays.
+    if ([name isEqualToString:kWallpaperWaves]) {
+        UIColor *line = dark ? [UIColor colorWithWhite:1.0 alpha:0.14]
+                             : [UIColor colorWithRed:0.03 green:0.27 blue:0.45 alpha:0.14];
+        CGContextSetLineWidth(ctx, 2.0);
+        CGFloat periods[3] = {3.5, 5.0, 7.0};
+        CGFloat bases[3] = {size.height * 0.78, size.height * 0.89, size.height * 0.97};
+        CGFloat amps[3] = {size.height * 0.055, size.height * 0.045, size.height * 0.035};
+        for (int i = 0; i < 3; i++) {
+            [[line colorWithAlphaComponent:0.28 - i * 0.07] setStroke];
+            CGContextBeginPath(ctx);
+            for (int x = 0; x <= 140; x++) {
+                CGFloat px = (CGFloat)x / 140.0 * size.width;
+                CGFloat py = bases[i] + amps[i] * sin((px / size.width) * periods[i] * 2.0 * M_PI);
+                if (x == 0) CGContextMoveToPoint(ctx, px, py);
+                else CGContextAddLineToPoint(ctx, px, py);
+            }
+            CGContextStrokePath(ctx);
+        }
+    } else if ([name isEqualToString:kWallpaperNeon]) {
+        NSArray *blobs = @[
+            @[@0.20f, @0.28f, @0.45f, @0.55f, @0.35f, @0.90f],
+            @[@0.82f, @0.22f, @0.40f, @0.95f, @0.30f, @0.55f],
+            @[@0.50f, @0.88f, @0.50f, @1.00f, @0.40f, @0.20f],
+        ];
+        for (NSArray *b in blobs) {
+            CGFloat cx = [b[0] floatValue] * size.width;
+            CGFloat cy = [b[1] floatValue] * size.height;
+            CGFloat r  = [b[2] floatValue] * size.width;
+            CGFloat comps2[8] = {[b[3] floatValue], [b[4] floatValue], [b[5] floatValue], 0.50, 0, 0, 0, 0};
+            CGFloat locs2[2] = {0, 1};
+            CGGradientRef g = CGGradientCreateWithColorComponents(space, comps2, locs2, 2);
+            CGContextDrawRadialGradient(ctx, g, CGPointMake(cx, cy), 0, CGPointMake(cx, cy), r, kCGGradientDrawsAfterEndLocation);
+            CGGradientRelease(g);
+        }
+    } else if ([name isEqualToString:kWallpaperCosmic]) {
+        UIColor *star = dark ? [UIColor colorWithWhite:1.0 alpha:0.50]
+                             : [UIColor colorWithRed:0.12 green:0.08 blue:0.38 alpha:0.33];
+        unsigned seed = 42;
+        for (int i = 0; i < 90; i++) {
+            CGFloat x = (CGFloat)(rand_r(&seed) % 1000) / 1000.0 * size.width;
+            CGFloat y = (CGFloat)(rand_r(&seed) % 1000) / 1000.0 * size.height;
+            CGFloat d = 0.7 + (CGFloat)(rand_r(&seed) % 45) / 100.0;
+            CGFloat alpha = 0.25 + (CGFloat)(rand_r(&seed) % 60) / 100.0;
+            [[star colorWithAlphaComponent:alpha] setFill];
+            CGContextFillEllipseInRect(ctx, CGRectMake(x, y, d, d));
+        }
+        CGFloat comps2[8] = {0.52, 0.24, 0.85, 0.30, 0, 0, 0, 0};
+        CGFloat locs2[2] = {0, 1};
+        CGGradientRef g = CGGradientCreateWithColorComponents(space, comps2, locs2, 2);
+        CGContextDrawRadialGradient(ctx, g,
+                                    CGPointMake(size.width * 0.75, size.height * 0.12), 0,
+                                    CGPointMake(size.width * 0.75, size.height * 0.12),
+                                    size.width * 0.55, kCGGradientDrawsAfterEndLocation);
+        CGGradientRelease(g);
+    }
+    CGColorSpaceRelease(space);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return img;
+}
+
++ (UIImage *)wallpaperImageForName:(NSString *)name size:(CGSize)size {
+    if (size.width <= 1 || size.height <= 1 || ![self wallpaperUsesImage:name]) return nil;
+    BOOL dark = [self resolveDarkForTraits:UITraitCollection.currentTraitCollection];
+    return MVWallpaperImage(name, size, dark);
+}
+
++ (void)refreshWallpaperIfPattern:(UIView *)view {
+    if (!view || ![self wallpaperUsesImage:self.wallpaperName]) return;
+    [self applyWallpaperTo:view];
+}
+
+#pragma mark - Applying
 
 + (void)applyWallpaperTo:(UIView *)view {
     if (!view) return;
     for (CALayer *layer in [view.layer.sublayers copy]) {
-        if ([layer isKindOfClass:CAGradientLayer.class]) {
-            // Assumes the gradient is the wallpaper; remove any previous one.
-            if (layer.name != nil && [layer.name isEqualToString:@"MVWallpaperLayer"]) {
-                [layer removeFromSuperlayer];
-            }
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) {
+            [layer removeFromSuperlayer];
         }
     }
-    if ([MVTheme.wallpaperName isEqualToString:kWallpaperClassic]) {
+    NSString *name = MVTheme.wallpaperName;
+    if ([name isEqualToString:kWallpaperClassic]) {
         view.backgroundColor = [MVTheme background];
         return;
     }
-    CAGradientLayer *g = [CAGradientLayer layer];
-    g.name = @"MVWallpaperLayer";
-    g.frame = view.bounds;
-    g.colors = @[(id)MVTheme.wallpaperStart.CGColor, (id)MVTheme.wallpaperEnd.CGColor];
-    g.startPoint = CGPointMake(0.5, 0);
-    g.endPoint = CGPointMake(0.5, 1);
-    [view.layer insertSublayer:g atIndex:0];
+
     view.backgroundColor = UIColor.clearColor;
+    CALayer *layer = nil;
+    if ([self wallpaperUsesImage:name]) {
+        UIImage *img = [self wallpaperImageForName:name size:view.bounds.size];
+        if (img) {
+            layer = [CALayer layer];
+            layer.contents = (id)img.CGImage;
+            layer.contentsGravity = kCAGravityResizeAspectFill;
+        }
+    } else {
+        CAGradientLayer *g = [CAGradientLayer layer];
+        // Pass the dynamic UIColor objects, not their CGColor: CAGradientLayer
+        // resolves them against the current trait environment and re-resolves
+        // them when the appearance switches, keeping the wallpaper adaptive.
+        NSArray<UIColor *> *colors = [self wallpaperColorsForName:name];
+        g.colors = colors;
+        if (colors.count > 1) {
+            NSMutableArray *loc = [NSMutableArray arrayWithCapacity:colors.count];
+            for (NSUInteger i = 0; i < colors.count; i++) {
+                [loc addObject:@((CGFloat)i / (CGFloat)(colors.count - 1))];
+            }
+            g.locations = loc;
+        }
+        g.startPoint = CGPointMake(0.5, 0);
+        g.endPoint = CGPointMake(0.5, 1);
+        layer = g;
+    }
+    if (layer) {
+        layer.name = @"MVWallpaperLayer";
+        layer.frame = view.bounds;
+        [view.layer insertSublayer:layer atIndex:0];
+    }
+}
+
+#pragma mark - Cards / controls
+
++ (UIColor *)glassCard {
+    return [[self card] colorWithAlphaComponent:0.55];
 }
 
 + (void)applyCardStyle:(UIView *)view {
@@ -161,12 +349,29 @@ static UIColor *MVWallpaperColor(NSString *kind, NSInteger idx) {
 }
 
 + (void)applyCardStyle:(UIView *)view cornerRadius:(CGFloat)radius {
-    view.backgroundColor = [self card];
+    view.backgroundColor = [self glassCard];
     view.layer.cornerRadius = radius;
     view.layer.cornerCurve = kCACornerCurveContinuous;
     view.layer.borderWidth = 1.0;
-    // A faint white border is what gives the translucent "glass" edge on dark.
-    view.layer.borderColor = [[self cardBorder] colorWithAlphaComponent:MVTheme.shared.isDark ? 0.10 : 0.06].CGColor;
+    view.layer.borderColor = [[self cardBorder] colorWithAlphaComponent:MVTheme.shared.isDark ? 0.16 : 0.10].CGColor;
+
+    // Frosted-glass backing: a system blur clipped to the same rounded corners.
+    BOOL hasGlass = NO;
+    for (UIView *sub in view.subviews) {
+        if (sub.tag == kGlassBlurTag) { hasGlass = YES; break; }
+    }
+    if (!hasGlass) {
+        UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+        UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:effect];
+        blur.tag = kGlassBlurTag;
+        blur.frame = view.bounds;
+        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        blur.layer.cornerRadius = radius;
+        blur.layer.cornerCurve = kCACornerCurveContinuous;
+        blur.layer.masksToBounds = YES;
+        blur.userInteractionEnabled = NO;
+        [view insertSubview:blur atIndex:0];
+    }
 }
 
 + (void)applyPrimaryButtonStyle:(UIButton *)button {

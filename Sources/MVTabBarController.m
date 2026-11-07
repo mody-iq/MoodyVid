@@ -37,10 +37,16 @@
     BOOL dark = MVTheme.shared.isDark;
     self.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
 
+    // Frosted chrome: the wallpaper shows through translucent blurred bars.
+    UIBlurEffectStyle blurStyle = dark ? UIBlurEffectStyleSystemChromeMaterialDark
+                                        : UIBlurEffectStyleSystemChromeMaterialLight;
+    UIColor *chromeTint = [[MVTheme glassCard] colorWithAlphaComponent:0.35];
+
     UITabBarAppearance *bar = [UITabBarAppearance new];
-    [bar configureWithOpaqueBackground];
-    bar.backgroundColor = [MVTheme background];
-    bar.shadowColor = [[MVTheme separator] colorWithAlphaComponent:dark ? 0.12 : 0.10];
+    [bar configureWithTransparentBackground];
+    bar.backgroundEffect = [UIBlurEffect effectWithStyle:blurStyle];
+    bar.backgroundColor = chromeTint;
+    bar.shadowColor = [UIColor clearColor];
     bar.stackedLayoutAppearance.normal.iconColor = [MVTheme secondaryText];
     bar.stackedLayoutAppearance.normal.titleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme secondaryText]};
     bar.stackedLayoutAppearance.selected.iconColor = [MVTheme accent];
@@ -49,14 +55,16 @@
     self.tabBar.scrollEdgeAppearance = bar;
 
     UINavigationBarAppearance *navBar = [UINavigationBarAppearance new];
-    [navBar configureWithOpaqueBackground];
-    navBar.backgroundColor = [MVTheme background];
+    [navBar configureWithTransparentBackground];
+    navBar.backgroundEffect = [UIBlurEffect effectWithStyle:blurStyle];
+    navBar.backgroundColor = chromeTint;
     navBar.shadowColor = [UIColor clearColor];
     navBar.titleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme text]};
     navBar.largeTitleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme text]};
     for (UINavigationController *nav in self.viewControllers) {
         nav.navigationBar.standardAppearance = navBar;
         nav.navigationBar.scrollEdgeAppearance = navBar;
+        nav.navigationBar.compactAppearance = navBar;
         nav.navigationBar.tintColor = [MVTheme accent];
     }
 
