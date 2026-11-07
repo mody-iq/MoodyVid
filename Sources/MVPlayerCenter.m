@@ -638,7 +638,12 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     if (self.audioSessionReady) return;
     self.audioSessionReady = YES;
     NSError *err = nil;
-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:&err];
+    // MoviePlayback is the mode iOS expects for video, and it is what tells the
+    // system the app is a legitimate background-audio client while a video plays.
+    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback
+                                     withOptions:0
+                                           error:&err];
+    [[AVAudioSession sharedInstance] setMode:AVAudioSessionModeMoviePlayback error:nil];
     [[AVAudioSession sharedInstance] setActive:YES error:nil];
 }
 
