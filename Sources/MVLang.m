@@ -190,6 +190,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Link copied": @"تم نسخ الرابط",
             @"Developer": @"المطور",
             @"Contact": @"التواصل",
+            @"Follow me on social media": @"تابعني على مواقع التواصل",
             @"Made with love": @"صُنع بـحب 🧡",
             @"Can't play this file": @"لا يمكن تشغيل هذا الملف",
             @"WebM and MKV aren't supported. You can still share or export it.": @"صيغتا WebM وMKV غير مدعومتين. يمكنك مع ذلك مشاركته أو تصديره.",

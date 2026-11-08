@@ -161,6 +161,242 @@ static CGFloat const kCorner = 18;
 
 @end
 
+#pragma mark - Contact sheet
+
+/// The social accounts offered in the Contact sheet. Add or edit a row here and
+/// both the sheet and its links follow; `url` opens the profile, and the app
+/// scheme in front of it lets iOS jump straight into the app when it is
+/// installed, falling back to the web page otherwise.
+static NSArray<NSDictionary *> *MVContactAccounts(void) {
+    return @[
+        @{ @"name": @"Instagram", @"handle": @"mohammed.mutar",
+           @"icon": @"camera.fill", @"url": @"https://instagram.com/mohammed.mutar",
+           @"scheme": @"instagram://user?username=mohammed.mutar",
+           @"r": @0.93, @"g": @0.36, @"b": @0.55 },
+        @{ @"name": @"Facebook", @"handle": @"Mohammed Mutar",
+           @"icon": @"f.circle.fill", @"url": @"https://facebook.com/mohammed.mutar",
+           @"scheme": @"fb://profile/mohammed.mutar",
+           @"r": @0.23, @"g": @0.46, @"b": @0.90 },
+    ];
+}
+
+/// A quiet rounded row used inside the Contact sheet: a soft tinted icon chip,
+/// the account name and handle, and a small chevron.
+@interface MVContactRow : UIControl
+@property (nonatomic, strong) NSDictionary *account;
+@property (nonatomic, strong) UIView *card;
+@property (nonatomic, strong) UIView *iconBack;
+@property (nonatomic, strong) UIImageView *icon;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UIImageView *chevron;
+@end
+
+@implementation MVContactRow
+
+- (instancetype)initWithAccount:(NSDictionary *)account {
+    if ((self = [super initWithFrame:CGRectZero])) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        _account = account;
+
+        UIColor *brand = [UIColor colorWithRed:[account[@"r"] doubleValue]
+                                        green:[account[@"g"] doubleValue]
+                                         blue:[account[@"b"] doubleValue]
+                                        alpha:1.0];
+
+        _card = [UIView new];
+        _card.translatesAutoresizingMaskIntoConstraints = NO;
+        _card.userInteractionEnabled = NO;
+        _card.backgroundColor = [[MVTheme card] colorWithAlphaComponent:0.55];
+        _card.layer.cornerRadius = 16;
+        _card.layer.cornerCurve = kCACornerCurveContinuous;
+        _card.layer.borderWidth = 0.5;
+        _card.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.22].CGColor;
+        [self addSubview:_card];
+
+        _iconBack = [UIView new];
+        _iconBack.translatesAutoresizingMaskIntoConstraints = NO;
+        _iconBack.backgroundColor = [brand colorWithAlphaComponent:0.16];
+        _iconBack.layer.cornerRadius = 12;
+        _iconBack.layer.masksToBounds = YES;
+        [_card addSubview:_iconBack];
+
+        _icon = [UIImageView new];
+        _icon.translatesAutoresizingMaskIntoConstraints = NO;
+        _icon.image = [UIImage systemImageNamed:account[@"icon"]];
+        _icon.tintColor = brand;
+        _icon.contentMode = UIViewContentModeScaleAspectFit;
+        _icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIFontWeightSemibold];
+        [_card addSubview:_icon];
+
+        _titleLabel = [UILabel new];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _titleLabel.text = account[@"name"];
+        _titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        _titleLabel.textColor = [MVTheme text];
+        [_card addSubview:_titleLabel];
+
+        _subtitleLabel = [UILabel new];
+        _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _subtitleLabel.text = account[@"handle"];
+        _subtitleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        _subtitleLabel.textColor = [MVTheme secondaryText];
+        [_card addSubview:_subtitleLabel];
+
+        _chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.right"]];
+        _chevron.translatesAutoresizingMaskIntoConstraints = NO;
+        _chevron.tintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.5];
+        _chevron.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIFontWeightSemibold];
+        [_card addSubview:_chevron];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_card.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+            [_card.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+            [_card.topAnchor constraintEqualToAnchor:self.topAnchor],
+            [_card.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+            [_card.heightAnchor constraintEqualToConstant:64],
+
+            [_iconBack.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:12],
+            [_iconBack.centerYAnchor constraintEqualToAnchor:_card.centerYAnchor],
+            [_iconBack.widthAnchor constraintEqualToConstant:40],
+            [_iconBack.heightAnchor constraintEqualToConstant:40],
+
+            [_icon.centerXAnchor constraintEqualToAnchor:_iconBack.centerXAnchor],
+            [_icon.centerYAnchor constraintEqualToAnchor:_iconBack.centerYAnchor],
+
+            [_chevron.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-16],
+            [_chevron.centerYAnchor constraintEqualToAnchor:_card.centerYAnchor],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconBack.trailingAnchor constant:13],
+            [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_chevron.leadingAnchor constant:-10],
+            [_titleLabel.bottomAnchor constraintEqualToAnchor:_card.centerYAnchor constant:-1],
+
+            [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+            [_subtitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_chevron.leadingAnchor constant:-10],
+            [_subtitleLabel.topAnchor constraintEqualToAnchor:_card.centerYAnchor constant:1],
+        ]];
+    }
+    return self;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    [UIView animateWithDuration:0.12 animations:^{
+        self.card.backgroundColor = [[MVTheme card] colorWithAlphaComponent:highlighted ? 0.85 : 0.55];
+    }];
+}
+
+@end
+
+/// The small pop-up shown by the Contact row: a frosted sheet listing the social
+/// accounts, each row opening the profile in its app (or the browser).
+@interface MVContactSheetViewController : UIViewController
+@end
+
+@implementation MVContactSheetViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    // A frosted, quiet sheet: a soft material behind a small stack of accounts,
+    // no loud colours — the tint is only on the icon chips.
+    self.view.backgroundColor = UIColor.clearColor;
+    UIVisualEffectView *backdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    backdrop.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:backdrop];
+
+    UIView *panel = [UIView new];
+    panel.translatesAutoresizingMaskIntoConstraints = NO;
+    panel.backgroundColor = UIColor.clearColor;
+    [self.view addSubview:panel];
+
+    // Grabber, so the sheet reads as something you can pull down to dismiss.
+    UIView *grabber = [UIView new];
+    grabber.translatesAutoresizingMaskIntoConstraints = NO;
+    grabber.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.35];
+    grabber.layer.cornerRadius = 2.5;
+    [panel addSubview:grabber];
+
+    UILabel *title = [UILabel new];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.text = [MVLang t:@"Contact"];
+    title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+    title.textColor = [MVTheme text];
+    title.textAlignment = NSTextAlignmentCenter;
+    [panel addSubview:title];
+
+    UILabel *subtitle = [UILabel new];
+    subtitle.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitle.text = [MVLang t:@"Follow me on social media"];
+    subtitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    subtitle.textColor = [MVTheme secondaryText];
+    subtitle.textAlignment = NSTextAlignmentCenter;
+    subtitle.numberOfLines = 2;
+    [panel addSubview:subtitle];
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 12;
+    [panel addSubview:stack];
+
+    for (NSDictionary *account in MVContactAccounts()) {
+        MVContactRow *row = [[MVContactRow alloc] initWithAccount:account];
+        [row addTarget:self action:@selector(accountTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [stack addArrangedSubview:row];
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [backdrop.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [backdrop.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [backdrop.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [backdrop.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [panel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [panel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [panel.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [panel.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [grabber.topAnchor constraintEqualToAnchor:panel.topAnchor constant:8],
+        [grabber.centerXAnchor constraintEqualToAnchor:panel.centerXAnchor],
+        [grabber.widthAnchor constraintEqualToConstant:38],
+        [grabber.heightAnchor constraintEqualToConstant:5],
+
+        [title.topAnchor constraintEqualToAnchor:grabber.bottomAnchor constant:16],
+        [title.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:24],
+        [title.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-24],
+
+        [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:4],
+        [subtitle.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:24],
+        [subtitle.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-24],
+
+        [stack.topAnchor constraintEqualToAnchor:subtitle.bottomAnchor constant:18],
+        [stack.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:20],
+        [stack.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-20],
+    ]];
+}
+
+- (void)accountTapped:(MVContactRow *)row {
+    if (row.account) [self openAccount:row.account];
+}
+
+- (void)openAccount:(NSDictionary *)account {
+    UIApplication *app = UIApplication.sharedApplication;
+    NSURL *web = [NSURL URLWithString:account[@"url"]];
+    NSURL *scheme = [NSURL URLWithString:account[@"scheme"]];
+    // Prefer the app (a direct jump to the profile), but never dead-end: if the
+    // app is not installed, open the web profile instead.
+    if (scheme && [app canOpenURL:scheme]) {
+        [app openURL:scheme options:@{} completionHandler:nil];
+    } else if (web) {
+        [app openURL:web options:@{} completionHandler:nil];
+    }
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
+
+
 @interface MVSettingsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UIView *footerBar;
@@ -394,8 +630,9 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
                 [cell configureIcon:@"person.crop.circle.fill" tint:[MVTheme success]];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Contact"];
-                cell.subtitleLabel.text = @"Moh.mutar7@gmail.com";
-                [cell configureIcon:@"envelope.fill" tint:[MVTheme warning]];
+                cell.subtitleLabel.text = [MVLang t:@"Follow me on social media"];
+                [cell configureIcon:@"at" tint:[MVTheme accent]];
+                [cell setHasChevron:YES];
             }
             break;
         }
@@ -420,20 +657,30 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
             if (indexPath.row == 1) [self clearCache];
             break;
         case MVMoreSectionAbout:
-            if (indexPath.row == 2) [self copyDeveloperEmail];
+            if (indexPath.row == 2) [self showContactSheet];
             break;
         default:
             break;
     }
 }
 
-- (void)copyDeveloperEmail {
-    UIPasteboard.generalPasteboard.string = @"Moh.mutar7@gmail.com";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Copied"]
-                                                                  message:@"Moh.mutar7@gmail.com"
-                                                           preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+- (void)showContactSheet {
+    MVContactSheetViewController *sheet = [MVContactSheetViewController new];
+    sheet.modalPresentationStyle = UIModalPresentationPageSheet;
+    if (@available(iOS 15.0, *)) {
+        UISheetPresentationController *pc = sheet.sheetPresentationController;
+        pc.prefersGrabberVisible = NO;
+        pc.preferredCornerRadius = 28;
+        if (@available(iOS 16.0, *)) {
+            // A small, quiet pop-up that hugs its content, not a full-height page.
+            pc.detents = @[[UISheetPresentationControllerDetent customDetentWithResolver:^CGFloat(id<UISheetPresentationControllerDetentResolutionContext> context) {
+                return 330.0;
+            }]];
+        } else {
+            pc.detents = @[UISheetPresentationControllerDetent.mediumDetent];
+        }
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (void)showLanguageMenu {
