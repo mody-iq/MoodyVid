@@ -102,6 +102,14 @@ python3 scripts/make_icon.py "$APP_DIR/AppIcon.png" 1024
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER:-1}" "$APP_DIR/Info.plist"
 printf 'APPL????' > "$APP_DIR/PkgInfo"
 
+# Profile pictures shown on the Contact sheet, copied next to the icon so the
+# app can load them from its own bundle.
+echo "== Contact avatars"
+if [ -d Resources/avatars ]; then
+  mkdir -p "$APP_DIR/avatars"
+  cp Resources/avatars/*.png "$APP_DIR/avatars/" 2>/dev/null || true
+fi
+
 echo "== Assemble (Python + yt-dlp)"
 python3 scripts/assemble.py \
   --app "$APP_DIR" \
