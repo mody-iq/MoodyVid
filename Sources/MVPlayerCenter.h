@@ -7,6 +7,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// UI (for example the parked in-app browser) can move out of its way.
 FOUNDATION_EXPORT NSNotificationName const MVPlayerBarVisibilityDidChangeNotification;
 
+/// Posted when playback is stopped (the mini bar's close button), so any screen
+/// still showing its own player UI can close it as well.
+FOUNDATION_EXPORT NSNotificationName const MVPlayerDidStopNotification;
+
 /// A single, always-on AVPlayer owned by the app rather than by one screen.
 ///
 /// Playback started from Downloads or Files keeps playing while the user moves

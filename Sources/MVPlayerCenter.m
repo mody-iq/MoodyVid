@@ -10,6 +10,7 @@ static CGFloat const kMiniThumb = 46;
 static CGFloat const kSeekSeconds = 15.0;
 
 NSNotificationName const MVPlayerBarVisibilityDidChangeNotification = @"MVPlayerBarVisibilityDidChangeNotification";
+NSNotificationName const MVPlayerDidStopNotification = @"MVPlayerDidStopNotification";
 
 /// A small tinted icon button used in the mini bar.
 static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
@@ -529,6 +530,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 /// makes the presenting tab's -viewWillDisappear run, and the Files tab re-shows
 /// the mini bar there, landing it on top of the full-screen controls.
 @property (nonatomic) BOOL fullPlayerVisible;
+/// YES after the user closes the mini bar, until they start playback again. No
+/// code path may re-show the bar while this is set: switching tabs runs the
+/// Files tab's -viewWillDisappear, which hands control back to the bar, and that
+/// used to resurrect a bar the user had just dismissed.
+@property (nonatomic) BOOL dismissed;
 @property (nonatomic, strong) id timeObserver;
 @property (nonatomic) BOOL audioSessionReady;
 // Playlist the previous/next buttons move through.
@@ -669,6 +675,8 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)playQueue:(NSArray<NSURL *> *)urls titles:(NSArray<NSString *> *)titles fromIndex:(NSInteger)index {
     if (!urls.count) return;
     if (index < 0 || index >= (NSInteger)urls.count) index = 0;
+    // The user asked for this playback, so the mini bar may show again.
+    self.dismissed = NO;
     self.queue = [urls copy];
     self.queueTitles = titles.count == urls.count ? [titles copy] : @[];
     self.queueIndex = index;
@@ -861,6 +869,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)stop {
     self.generation++;
+    // The user dismissed the bar. Remember it, or switching tabs would bring it
+    // straight back through the inline-card hand-back.
+    self.dismissed = YES;
     if (self.itemStatusObserver) {
         [NSNotificationCenter.defaultCenter removeObserver:self.itemStatusObserver];
         self.itemStatusObserver = nil;
@@ -874,6 +885,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo = nil;
     MPNowPlayingInfoCenter.defaultCenter.playbackState = MPNowPlayingPlaybackStateStopped;
     [self hideBar];
+    [NSNotificationCenter.defaultCenter postNotificationName:MVPlayerDidStopNotification object:self];
 }
 
 #pragma mark - Seeking
@@ -976,6 +988,8 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     // Never over the full-screen player: its own transport is the control there,
     // and the mini bar would sit right on top of it.
     if (self.fullPlayerVisible) return;
+    // The user closed the bar; only a new playback brings it back.
+    if (self.dismissed) return;
     UIWindow *window = self.bar.window ?: [self keyWindow];
     if (!window) return;
     if (self.bar.superview != window) {
