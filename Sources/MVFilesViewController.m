@@ -145,7 +145,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     if (self.cardOpen) {
         [self cardStateChanged];
         // The card is back on screen and is the control again.
-        [[MVPlayerCenter shared] hideFloatingBar];
+        [MVPlayerCenter shared].inlinePlayerActive = YES;
     }
 }
 
@@ -404,7 +404,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [self.headerView layoutIfNeeded];
     [self sizeHeaderToFit];
     [self cardStateChanged];
-    [center hideFloatingBar];
+    center.inlinePlayerActive = YES;
 
     if (!self.cardObserver) {
         __weak typeof(self) weakSelf = self;
@@ -454,7 +454,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [self sizeHeaderToFit];
     self.playerCard.hidden = YES;
     // Hand control back to the floating mini bar (playback itself continues).
-    [[MVPlayerCenter shared] showFloatingBar];
+    [MVPlayerCenter shared].inlinePlayerActive = NO;
 }
 
 /// Moves the inline playback to the full-screen player, where the picture is
@@ -466,10 +466,12 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
-    // Moving to another tab or folder: playback continues via the mini bar so
-    // it is still controllable, even though the card is no longer visible.
-    if (self.cardOpen && self.view.window) {
-        [[MVPlayerCenter shared] showFloatingBar];
+    // Presenting the full-screen player also runs this, but the card stays behind
+    // it and is still the control, so keep the flag set in that case. Otherwise
+    // (another tab or folder) hand back to the mini bar, which the player center
+    // suppresses while the full-screen player is up.
+    if (!MVPlayerCenter.shared.fullPlayerVisible) {
+        [MVPlayerCenter shared].inlinePlayerActive = NO;
     }
 }
 

@@ -164,6 +164,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @interface MVFullPlayerViewController : UIViewController <UIGestureRecognizerDelegate>
 @property (nonatomic, strong, nullable) AVPlayer *player;
 @property (nonatomic, copy, nullable) void (^onClose)(void);
+/// Called whenever the player goes away, however it was dismissed, so the mini
+/// bar can be restored without depending on the close button.
+@property (nonatomic, copy, nullable) void (^onDismiss)(void);
 @property (nonatomic, copy, nullable) void (^onPrev)(void);
 @property (nonatomic, copy, nullable) void (^onNext)(void);
 @property (nonatomic, copy, nullable) void (^onSeekBack)(void);
@@ -429,6 +432,13 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     return b;
 }
 
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    // Fires for every dismissal path (button, swipe, interrupted presentation),
+    // so the mini bar always comes back and never stays hidden forever.
+    if (self.onDismiss) self.onDismiss();
+}
+
 - (void)closeTapped {
     if (self.onClose) self.onClose();
     [self dismissViewControllerAnimated:YES completion:nil];
@@ -514,6 +524,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @property (nonatomic, strong) AVPlayer *internalPlayer;
 @property (nonatomic, copy, nullable) NSString *currentTitle;
 @property (nonatomic, strong) MVFloatingPlayerBar *bar;
+/// YES while the full-screen player is presented. The mini bar must not be
+/// re-shown over it, which is otherwise easy to trigger: presenting the player
+/// makes the presenting tab's -viewWillDisappear run, and the Files tab re-shows
+/// the mini bar there, landing it on top of the full-screen controls.
+@property (nonatomic) BOOL fullPlayerVisible;
 @property (nonatomic, strong) id timeObserver;
 @property (nonatomic) BOOL audioSessionReady;
 // Playlist the previous/next buttons move through.
@@ -958,6 +973,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)showBar {
+    // Never over the full-screen player: its own transport is the control there,
+    // and the mini bar would sit right on top of it.
+    if (self.fullPlayerVisible) return;
     UIWindow *window = self.bar.window ?: [self keyWindow];
     if (!window) return;
     if (self.bar.superview != window) {
@@ -986,6 +1004,12 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)hideFloatingBar { [self hideBar]; }
 - (void)showFloatingBar { [self showBar]; }
+
+- (void)setInlinePlayerActive:(BOOL)active {
+    _inlinePlayerActive = active;
+    if (active) [self hideBar];
+    else if (!self.fullPlayerVisible) [self showBar];
+}
 
 - (BOOL)floatingBarVisible { return self.bar.superview != nil && self.bar.alpha > 0.01; }
 
@@ -1065,6 +1089,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     __weak typeof(self) weakSelf = self;
     full.title = self.currentTitle;
     full.player = self.internalPlayer;
+    // Set before presenting: -presentViewController synchronously triggers the
+    // presenting tab's -viewWillDisappear, which tries to show the mini bar.
+    self.fullPlayerVisible = YES;
     full.onClose = ^{
         // The player keeps running on its own — take the mini bar back up and
         // resync its state. No polling: nothing paused it.
@@ -1077,14 +1104,24 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     full.onSeekForward = ^{ [weakSelf seekForward]; };
 
     // Hidden while the full player is up, so it never shows behind it.
-    self.bar.alpha = 0;
+    [self hideBar];
     if (!self.isPlaying) [self.internalPlayer play];
     full.modalPresentationStyle = UIModalPresentationFullScreen;
+    // Restore the mini bar when the player is dismissed, unless the tab we land
+    // on shows its own inline card (then the card is the control, not the bar).
+    full.onDismiss = ^{
+        weakSelf.fullPlayerVisible = NO;
+        [weakSelf refreshMiniBar];
+        if (!weakSelf.inlinePlayerActive) [weakSelf showBar];
+    };
     [top presentViewController:full animated:YES completion:nil];
 
-    // If iOS refused the presentation, do not leave the bar hidden forever.
+    // If iOS refused the presentation, do not leave the mini bar hidden forever.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!full.presentingViewController) [weakSelf showBar];
+        if (!full.presentingViewController) {
+            weakSelf.fullPlayerVisible = NO;
+            [weakSelf showBar];
+        }
     });
 }
 
