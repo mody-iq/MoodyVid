@@ -34,6 +34,15 @@ FOUNDATION_EXPORT NSNotificationName const MVPlayerBarVisibilityDidChangeNotific
 /// Shows the floating mini bar again.
 - (void)showFloatingBar;
 
+/// YES while a tab is showing its own inline player card. The card replaces the
+/// mini bar, so setting this YES hides the bar and setting it NO brings it back
+/// (unless the full-screen player is up). Setting it NO on tab switch keeps the
+/// bar off the full-screen player's controls.
+@property (nonatomic) BOOL inlinePlayerActive;
+
+/// YES while the full-screen player is presented over the app.
+@property (nonatomic, readonly) BOOL fullPlayerVisible;
+
 /// Replaces the artwork shown in the floating mini-bar.
 - (void)setThumbnailImage:(UIImage *)image;
 
