@@ -671,14 +671,9 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         UISheetPresentationController *pc = sheet.sheetPresentationController;
         pc.prefersGrabberVisible = NO;
         pc.preferredCornerRadius = 28;
-        if (@available(iOS 16.0, *)) {
-            // A small, quiet pop-up that hugs its content, not a full-height page.
-            pc.detents = @[[UISheetPresentationControllerDetent customDetentWithResolver:^CGFloat(id<UISheetPresentationControllerDetentResolutionContext> context) {
-                return 330.0;
-            }]];
-        } else {
-            pc.detents = @[UISheetPresentationControllerDetent.mediumDetent];
-        }
+        // A small, quiet pop-up rather than a full-height page. The medium detent
+        // is available from iOS 15, the app's floor, so no higher guard is needed.
+        pc.detents = @[UISheetPresentationControllerDetent.mediumDetent];
     }
     [self presentViewController:sheet animated:YES completion:nil];
 }
