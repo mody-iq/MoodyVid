@@ -164,18 +164,21 @@ static CGFloat const kCorner = 18;
 #pragma mark - Contact sheet
 
 /// The social accounts offered in the Contact sheet. Add or edit a row here and
-/// both the sheet and its links follow; `url` opens the profile, and the app
-/// scheme in front of it lets iOS jump straight into the app when it is
-/// installed, falling back to the web page otherwise.
+/// both the sheet and its links follow: `url` opens the profile and the app
+/// scheme lets iOS jump into the app when it is installed. `avatar` names a PNG
+/// in Resources/avatars (without the extension); when it is missing or cannot be
+/// loaded, the `icon` SF Symbol is shown instead.
 static NSArray<NSDictionary *> *MVContactAccounts(void) {
     return @[
-        @{ @"name": @"Instagram", @"handle": @"mohammed.mutar",
-           @"icon": @"camera.fill", @"url": @"https://instagram.com/mohammed.mutar",
-           @"scheme": @"instagram://user?username=mohammed.mutar",
+        @{ @"name": @"Instagram", @"handle": @"1mody_11",
+           @"icon": @"camera.fill", @"avatar": @"instagram",
+           @"url": @"https://instagram.com/1mody_11",
+           @"scheme": @"instagram://user?username=1mody_11",
            @"r": @0.93, @"g": @0.36, @"b": @0.55 },
-        @{ @"name": @"Facebook", @"handle": @"Mohammed Mutar",
-           @"icon": @"f.circle.fill", @"url": @"https://facebook.com/mohammed.mutar",
-           @"scheme": @"fb://profile/mohammed.mutar",
+        @{ @"name": @"Facebook", @"handle": @"حمودي الجبوري",
+           @"icon": @"f.circle.fill", @"avatar": @"facebook",
+           @"url": @"https://www.facebook.com/Mohammed.K.Mutar",
+           @"scheme": @"fb://profile/Mohammed.K.Mutar",
            @"r": @0.23, @"g": @0.46, @"b": @0.90 },
     ];
 }
@@ -187,6 +190,7 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
 @property (nonatomic, strong) UIView *card;
 @property (nonatomic, strong) UIView *iconBack;
 @property (nonatomic, strong) UIImageView *icon;
+@property (nonatomic, strong) UIImageView *avatarView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UIImageView *chevron;
@@ -217,9 +221,18 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
         _iconBack = [UIView new];
         _iconBack.translatesAutoresizingMaskIntoConstraints = NO;
         _iconBack.backgroundColor = [brand colorWithAlphaComponent:0.16];
-        _iconBack.layer.cornerRadius = 12;
+        _iconBack.layer.cornerRadius = 20;   // half of 40, so the chip is a circle
         _iconBack.layer.masksToBounds = YES;
         [_card addSubview:_iconBack];
+
+        // The profile picture, when the account ships one; otherwise the tinted
+        // SF Symbol sits in the same circle. The avatar is pre-rounded in the
+        // PNG, so it needs no clipping of its own.
+        _avatarView = [UIImageView new];
+        _avatarView.translatesAutoresizingMaskIntoConstraints = NO;
+        _avatarView.contentMode = UIViewContentModeScaleAspectFill;
+        _avatarView.hidden = YES;
+        [_iconBack addSubview:_avatarView];
 
         _icon = [UIImageView new];
         _icon.translatesAutoresizingMaskIntoConstraints = NO;
@@ -227,7 +240,7 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
         _icon.tintColor = brand;
         _icon.contentMode = UIViewContentModeScaleAspectFit;
         _icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIFontWeightSemibold];
-        [_card addSubview:_icon];
+        [_iconBack addSubview:_icon];
 
         _titleLabel = [UILabel new];
         _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -261,6 +274,11 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
             [_iconBack.widthAnchor constraintEqualToConstant:40],
             [_iconBack.heightAnchor constraintEqualToConstant:40],
 
+            [_avatarView.leadingAnchor constraintEqualToAnchor:_iconBack.leadingAnchor],
+            [_avatarView.trailingAnchor constraintEqualToAnchor:_iconBack.trailingAnchor],
+            [_avatarView.topAnchor constraintEqualToAnchor:_iconBack.topAnchor],
+            [_avatarView.bottomAnchor constraintEqualToAnchor:_iconBack.bottomAnchor],
+
             [_icon.centerXAnchor constraintEqualToAnchor:_iconBack.centerXAnchor],
             [_icon.centerYAnchor constraintEqualToAnchor:_iconBack.centerYAnchor],
 
@@ -275,8 +293,38 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
             [_subtitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_chevron.leadingAnchor constant:-10],
             [_subtitleLabel.topAnchor constraintEqualToAnchor:_card.centerYAnchor constant:1],
         ]];
+
+        // Arabic reads right to left, so mirror the whole row: avatar on the
+        // right and chevron on the left.
+        if (MVLang.shared.isRTL) {
+            self.semanticContentAttribute = UISemanticContentAttributeForceRightToLeft;
+            for (UIView *v in @[_card, _iconBack, _avatarView, _icon, _titleLabel, _subtitleLabel, _chevron]) {
+                v.semanticContentAttribute = UISemanticContentAttributeForceRightToLeft;
+            }
+        }
+        [self applyAvatar];
     }
     return self;
+}
+
+/// Loads the account's bundled profile picture into the icon chip, falling back
+/// to the SF Symbol when no image ships with the app.
+- (void)applyAvatar {
+    NSString *name = self.account[@"avatar"];
+    UIImage *image = nil;
+    if (name.length) {
+        NSString *path = [NSBundle.mainBundle pathForResource:name ofType:@"png" inDirectory:@"avatars"];
+        if (!path) path = [NSBundle.mainBundle pathForResource:name ofType:@"png"];
+        if (path) image = [UIImage imageWithContentsOfFile:path];
+    }
+    if (image) {
+        self.avatarView.image = image;
+        self.avatarView.hidden = NO;
+        self.icon.hidden = YES;
+    } else {
+        self.avatarView.hidden = YES;
+        self.icon.hidden = NO;
+    }
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
