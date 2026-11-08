@@ -136,6 +136,10 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     for (NSString *name in @[MVDownloadStoreDidChangeNotification, MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
     }
+    // Closing the mini bar stops playback; the inline card must not stay open
+    // showing a stopped video, or it would come back on the next visit.
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(playerDidStop)
+                                               name:MVPlayerDidStopNotification object:nil];
     [self refresh];
 }
 
@@ -442,6 +446,11 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 - (void)cardScrubEnd {
     [self cardStateChanged];
+}
+
+- (void)playerDidStop {
+    if (!self.cardOpen) return;
+    [self closeInlinePlayer];
 }
 
 - (void)closeInlinePlayer {
