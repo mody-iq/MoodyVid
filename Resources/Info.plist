@@ -69,6 +69,11 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>instagram</string>
+		<string>fb</string>
+	</array>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>يحتاج MoodyVid إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
