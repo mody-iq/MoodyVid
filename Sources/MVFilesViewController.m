@@ -14,6 +14,21 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeSize = 2,
 };
 
+/// The player surface's backing layer IS the AVPlayerLayer, so Auto Layout keeps
+/// the picture exactly the size of the view through every rotation. Framing a
+/// manual sublayer instead left it stale: the frame was set from bounds that had
+/// not been resized yet, so after a turn the video sat small in a corner, and
+/// turning back left it zoomed.
+@interface MVVideoSurfaceView : UIView
+/// The view's backing layer, typed so callers can set videoGravity/player.
+@property (nonatomic, readonly) AVPlayerLayer *playerLayer;
+@end
+
+@implementation MVVideoSurfaceView
++ (Class)layerClass { return AVPlayerLayer.class; }
+- (AVPlayerLayer *)playerLayer { return (AVPlayerLayer *)self.layer; }
+@end
+
 @interface MVFilesViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *emptyLabel;
@@ -27,8 +42,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 // full-screen modal. It carries the same transport as the floating mini bar
 // (previous / 15s back / play-pause / 15s forward / next) plus a scrubber.
 @property (nonatomic, strong) UIView *playerCard;
-@property (nonatomic, strong) UIView *videoSurface;
-@property (nonatomic, strong) AVPlayerLayer *videoLayer;
+@property (nonatomic, strong) MVVideoSurfaceView *videoSurface;
 @property (nonatomic, strong) UILabel *nowTitleLabel;
 @property (nonatomic, strong) UIButton *prevButton;
 @property (nonatomic, strong) UIButton *backButton;
@@ -209,13 +223,14 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.playerCard.clipsToBounds = YES;
     [MVTheme applyCardStyle:self.playerCard cornerRadius:20];
 
-    self.videoSurface = [UIView new];
+    self.videoSurface = [MVVideoSurfaceView new];
     self.videoSurface.translatesAutoresizingMaskIntoConstraints = NO;
     self.videoSurface.backgroundColor = [[MVTheme background] colorWithAlphaComponent:0.25];
     self.videoSurface.layer.masksToBounds = YES;
     self.videoSurface.layer.cornerRadius = 14;
     self.videoSurface.layer.borderWidth = 0.5;
     self.videoSurface.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.3].CGColor;
+    self.videoSurface.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
     [self.playerCard addSubview:self.videoSurface];
 
     self.nowTitleLabel = [UILabel new];
@@ -394,19 +409,17 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.cardOpen = YES;
     self.playerCard.hidden = NO;
 
-    if (!self.videoLayer) {
-        self.videoLayer = [AVPlayerLayer playerLayerWithPlayer:center.player];
-        self.videoLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        self.videoLayer.frame = self.videoSurface.bounds;
-        self.videoLayer.masksToBounds = YES;
-        [self.videoSurface.layer addSublayer:self.videoLayer];
-    }
+    // The surface's own layer is the AVPlayerLayer, so Auto Layout sizes the
+    // picture — no manual frame to go stale on rotation.
+    self.videoSurface.playerLayer.player = center.player;
+    [self.videoSurface setNeedsLayout];
 
     // Height derived from the card's real width so there is no empty band
     // under the transport on very wide phones.
     [self updateCardHeight];
     [self.headerView layoutIfNeeded];
     [self sizeHeaderToFit];
+    [self.videoSurface layoutIfNeeded];
     [self cardStateChanged];
     center.inlinePlayerActive = YES;
 
@@ -457,8 +470,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.cardOpen = NO;
     self.cardHeight.constant = 0;
     [self.cardTicker invalidate];
-    [self.videoLayer removeFromSuperlayer];
-    self.videoLayer = nil;
+    self.videoSurface.playerLayer.player = nil;
     [self.headerView layoutIfNeeded];
     [self sizeHeaderToFit];
     self.playerCard.hidden = YES;
@@ -500,7 +512,6 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     for (CALayer *layer in [self.view.layer.sublayers copy]) {
         if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
     }
-    if (self.videoLayer) self.videoLayer.frame = self.videoSurface.bounds;
 
     // A rotation changes the width: resize the card and re-fit the header so the
     // video keeps its 16:9 shape and the transport stays attached to it.
