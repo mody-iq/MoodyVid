@@ -305,7 +305,7 @@ static const NSUInteger kDefaultConcurrent = 3;
     if (!task) return;
     [[MVFastDownloader shared] cancelTask:task];
     if (deleteFile) {
-        if (task.tempPath.length) [[NSFileManager defaultManager] removeItemAtPath:task.tempPath error:nil];
+        [MVFastDownloader removePartFilesForTask:task];
         if (task.path.length) [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     task.state = MVTaskStateCancelled;
@@ -319,7 +319,7 @@ static const NSUInteger kDefaultConcurrent = 3;
     if (!task) return;
     [[MVFastDownloader shared] cancelTask:task];
     if (deleteFile) {
-        if (task.tempPath.length) [[NSFileManager defaultManager] removeItemAtPath:task.tempPath error:nil];
+        [MVFastDownloader removePartFilesForTask:task];
         if (task.path.length) [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     [MVTaskStore.shared remove:task];

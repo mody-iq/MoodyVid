@@ -37,6 +37,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// A global cap in bytes/second, applied to every transfer. 0 disables it.
 @property (nonatomic) long long speedLimit;
 
+/// Deletes every partial file a task left behind: the single-file `.part` and
+/// the numbered `.partN` pieces of a segmented transfer. Called when the user
+/// really deletes a row, so no orphan bytes stay on disk.
++ (void)removePartFilesForTask:(MVDownloadTask *)task;
+
 @end
 
 NS_ASSUME_NONNULL_END

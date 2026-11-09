@@ -57,6 +57,10 @@ typedef NS_ENUM(NSInteger, MVTaskState) {
 
 @property (nonatomic) BOOL acceptsRanges;
 @property (nonatomic) NSUInteger connections;
+/// The byte plan of a multi-connection transfer, as @[@(start), @(end)] pairs
+/// (inclusive). Empty for a single-connection transfer. Persisted so a relaunch
+/// can resume each segment where it stopped instead of re-planning.
+@property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *segments;
 @property (nonatomic, copy, nullable) NSString *etag;
 @property (nonatomic, copy, nullable) NSString *lastModified;
 

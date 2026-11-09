@@ -5,6 +5,7 @@
 
 + (instancetype)taskFromDictionary:(NSDictionary *)dict {
     MVDownloadTask *task = [MVDownloadTask new];
+    task.segments = @[];
     task.identifier = [dict[@"id"] isKindOfClass:NSString.class] ? dict[@"id"] : NSUUID.UUID.UUIDString;
     task.source = (MVTaskSource)[dict[@"source"] integerValue];
     task.state = (MVTaskState)[dict[@"state"] integerValue];
@@ -22,6 +23,15 @@
     task.phase = [dict[@"phase"] isKindOfClass:NSString.class] ? dict[@"phase"] : nil;
     task.acceptsRanges = [dict[@"ranges"] boolValue];
     task.connections = (NSUInteger)MAX(1, [dict[@"connections"] integerValue]);
+    NSMutableArray<NSArray<NSNumber *> *> *segments = [NSMutableArray array];
+    if ([dict[@"segments"] isKindOfClass:NSArray.class]) {
+        for (id pair in dict[@"segments"]) {
+            if (![pair isKindOfClass:NSArray.class] || [pair count] != 2) continue;
+            if (![pair[0] isKindOfClass:NSNumber.class] || ![pair[1] isKindOfClass:NSNumber.class]) continue;
+            [segments addObject:@[pair[0], pair[1]]];
+        }
+    }
+    task.segments = segments;
     task.etag = [dict[@"etag"] isKindOfClass:NSString.class] ? dict[@"etag"] : nil;
     task.lastModified = [dict[@"lastModified"] isKindOfClass:NSString.class] ? dict[@"lastModified"] : nil;
     task.createdAt = [dict[@"createdAt"] doubleValue];
@@ -50,6 +60,7 @@
     if (self.phase) dict[@"phase"] = self.phase;
     dict[@"ranges"] = @(self.acceptsRanges);
     dict[@"connections"] = @(self.connections);
+    if (self.segments.count) dict[@"segments"] = self.segments;
     if (self.etag) dict[@"etag"] = self.etag;
     if (self.lastModified) dict[@"lastModified"] = self.lastModified;
     dict[@"createdAt"] = @(self.createdAt);
