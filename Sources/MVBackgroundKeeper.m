@@ -1,4 +1,5 @@
 #import "MVBackgroundKeeper.h"
+#import "MVLog.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 
@@ -64,23 +65,37 @@
 
     // Belt and braces: the background task buys the first minutes even if the
     // audio session is momentarily refused (for example during a phone call).
+    //
+    // Its expiry must NOT stop the audio: the silent track is what actually
+    // keeps the process alive for a long download, and the task is only the
+    // short-term guarantee. Releasing the assertion here while leaving the
+    // player running is the whole point of having both.
     if (self.backgroundTask == UIBackgroundTaskInvalid) {
         __weak typeof(self) weakSelf = self;
         self.backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"MoodyVid download keep-alive"
                                                                         expirationHandler:^{
             typeof(self) self_ = weakSelf;
-            if (self_) [self_ stopHolding];
+            if (self_) [self_ expireBackgroundTask];
         }];
     }
+}
+
+/// Called when the short-term assertion runs out. The audio keeps running.
+- (void)expireBackgroundTask {
+    MVLogInfo(@"background: task assertion expired, audio keep-alive continues");
+    self.backgroundTask = UIBackgroundTaskInvalid;
 }
 
 - (void)stopHolding {
     [self.player stop];
     self.player = nil;
-    if (self.backgroundTask != UIBackgroundTaskInvalid) {
-        [UIApplication.sharedApplication endBackgroundTask:self.backgroundTask];
-        self.backgroundTask = UIBackgroundTaskInvalid;
-    }
+    [self endBackgroundTaskIfNeeded];
+}
+
+- (void)endBackgroundTaskIfNeeded {
+    if (self.backgroundTask == UIBackgroundTaskInvalid) return;
+    [UIApplication.sharedApplication endBackgroundTask:self.backgroundTask];
+    self.backgroundTask = UIBackgroundTaskInvalid;
 }
 
 /// Writes a one-second silent WAV once, then reuses it. Generating it in code
