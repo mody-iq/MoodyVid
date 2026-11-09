@@ -623,7 +623,6 @@ didCompleteWithError:(NSError *)error {
 - (void)finish:(MVTransfer *)transfer {
     if (transfer.finishing) return;
     transfer.finishing = YES;
-    MVDownloadTask *task = transfer.task;
 
     [self invalidateThrottle:transfer];
     for (MVSegment *segment in transfer.segments) [self closeSegment:segment];

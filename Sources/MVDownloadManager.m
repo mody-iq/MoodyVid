@@ -42,7 +42,6 @@ static const NSUInteger kDefaultConcurrent = 3;
         _wifiOnly = [defaults boolForKey:@"MVWifiOnly"];
         [MVFastDownloader shared].speedLimit = _speedLimit;
         [MVHLSDownloader shared].speedLimit = _speedLimit;
-    [MVMPDDownloader shared].speedLimit = _speedLimit;
         [MVMPDDownloader shared].speedLimit = _speedLimit;
         _maxConnections = MIN(16, MAX(1, _maxConnections));
         _maxConcurrentTasks = MIN(5, MAX(1, _maxConcurrentTasks));

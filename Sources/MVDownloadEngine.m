@@ -4,6 +4,7 @@
 #import "MVLang.h"
 #import "MVMediaConverter.h"
 #import "MVBackgroundKeeper.h"
+#import "MVLog.h"
 #import <Photos/Photos.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -83,6 +84,7 @@ static const NSUInteger kMaxConcurrent = 2;
 #pragma mark - Queue
 
 - (void)downloadURL:(NSString *)url quality:(NSString *)quality completion:(void (^)(NSString *, NSString *))completion {
+    MVLogInfo(@"engine: queue %@ (%@)", url, quality ?: @"best");
     MVDownloadRecord *record = [MVDownloadStore.shared addURL:url quality:quality];
     record.state = MVDownloadStateWaiting;
     [MVDownloadStore.shared update:record];
@@ -140,6 +142,7 @@ static const NSUInteger kMaxConcurrent = 2;
 }
 
 - (void)startJob:(MVDownloadJob *)job {
+    MVLogInfo(@"engine: start %@ (%@)", job.url, job.quality);
     MVDownloadRecord *record = [self recordFor:job.identifier];
     record.state = MVDownloadStateActive;
     [MVDownloadStore.shared update:record];
@@ -280,6 +283,7 @@ static const NSUInteger kMaxConcurrent = 2;
     }
 
     if (error) {
+        MVLogError(@"engine: failed %@: %@", job.url, error);
         record.state = MVDownloadStateFailed;
         record.error = error;
         [MVDownloadStore.shared update:record];
@@ -317,6 +321,7 @@ static const NSUInteger kMaxConcurrent = 2;
     record.error = nil;  // drop the transient "Merging…"/"Converting…" phase text
     record.totalBytes = [self fileSize:path];
     record.state = MVDownloadStateCompleted;
+    MVLogInfo(@"engine: done %@ -> %@", job.url, path);
     [MVDownloadStore.shared update:record];
     [[MVPython shared] forgetTask:job.identifier];
     [self notifyFinished:record];

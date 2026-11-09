@@ -268,22 +268,18 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Pause all": @"إيقاف الكل مؤقتاً",
             @"Resume all": @"استئناف الكل",
             @"Retry all": @"إعادة محاولة الكل",
-            @"Downloads": @"التنزيلات",
             @"All": @"الكل",
             @"Videos": @"فيديوهات",
             @"Documents": @"مستندات",
             @"Archives": @"أرشيف",
             @"Apps": @"تطبيقات",
             @"Other": @"أخرى",
-            @"Queued": @"في الانتظار",
-            @"Paused": @"متوقف مؤقتاً",
             @"Download failed": @"فشل التنزيل",
             @"Connections": @"اتصالات",
             @"Direct file": @"ملف مباشر",
             @"On": @"مفعّل",
             @"Off": @"معطّل",
             @"Send the log to the developer": @"أرسل السجل إلى المطوّر",
-            @"Download this video": @"حمّل هذا الفيديو",
         };
     });
     return table;

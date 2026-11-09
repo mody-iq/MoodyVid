@@ -300,6 +300,7 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
     if (self.kind == MVRowKindRecord) return nil;
     switch (self.task.source) {
         case MVTaskSourceHLS:     return @"dot.radiowaves.left.and.right";
+        case MVTaskSourceDASH:    return @"dot.radiowaves.left.and.right";
         case MVTaskSourceTorrent: return @"arrow.up.arrow.down.circle";
         default:                  return nil;
     }
@@ -311,6 +312,7 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
     switch (task.source) {
         case MVTaskSourceDirect:  [parts addObject:[MVLang t:@"Direct file"]]; break;
         case MVTaskSourceHLS:     [parts addObject:[MVLang t:@"Stream (HLS)"]]; break;
+        case MVTaskSourceDASH:    [parts addObject:[MVLang t:@"Stream (DASH)"]]; break;
         case MVTaskSourceTorrent: [parts addObject:[MVLang t:@"Torrent"]]; break;
         case MVTaskSourceYtDlp:   [parts addObject:@"yt-dlp"]; break;
     }
@@ -475,10 +477,16 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
         return;
     }
     [self updateQueueLabel];
+    // Only the yt-dlp rows have a `configureWithRecord:`; a task row uses a
+    // different cell class and would be sent a record it cannot take.
     for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows) {
-        MVDownloadCell *cell = (MVDownloadCell *)[self.tableView cellForRowAtIndexPath:indexPath];
-        if ([cell isKindOfClass:MVDownloadCell.class] && indexPath.row < (NSInteger)now.count) {
-            [cell configureWithRecord:now[indexPath.row]];
+        if (indexPath.row >= (NSInteger)now.count) continue;
+        MVDownloadRow *row = now[indexPath.row];
+        UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:indexPath];
+        if (row.kind == MVRowKindRecord && [cell isKindOfClass:MVDownloadCell.class]) {
+            [(MVDownloadCell *)cell configureWithRecord:row.record];
+        } else if (row.kind == MVRowKindTask && [cell isKindOfClass:MVTaskCell.class]) {
+            [(MVTaskCell *)cell configureWithTask:row.task];
         }
     }
     self.emptyLabel.hidden = now.count > 0;
