@@ -19,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// best / 720p / 480p / audio. `completion` runs on the main queue.
 - (void)downloadURL:(NSString *)url
             quality:(NSString *)quality
-         completion:(void (^)(NSString *_Nullable filePath, NSString *_Nullable error))completion;
+         completion:(void (^_Nullable)(NSString *_Nullable filePath, NSString *_Nullable error))completion;
 
 /// Stops a queued or running download; its record is marked cancelled.
 - (void)cancelDownload:(NSString *)identifier;
