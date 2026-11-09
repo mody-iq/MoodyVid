@@ -1,100 +1,53 @@
 #import "MVBrowserViewController.h"
 #import "MVBrowserHistory.h"
+#import "MVBrowserHome.h"
+#import "MVBrowserTab.h"
 #import "MVLang.h"
 #import "MVTheme.h"
 #import "MVPaths.h"
 #import "MVDownloadEngine.h"
+#import "MVDownloadManager.h"
 #import "MVPlayerCenter.h"
+#import "MVAdBlocker.h"
+#import "MVMediaProbe.h"
+#import "MVSnifferItem.h"
+#import "MVSnifferScript.h"
+#import "MVSnifferSheet.h"
+#import "MVSnifferStore.h"
+#import "MVTabsViewController.h"
+#import "MVLog.h"
 #import <WebKit/WebKit.h>
+#import <objc/runtime.h>
 
-/// Injected into every page. It finds the most promising playing video and adds
-/// a small Download button over it, then tells the app about it.
-///
-/// Everything is wrapped so a hostile or broken page can never break the app:
-/// the script only posts messages through the single `moodyvid` handler.
-static NSString *const kInjectedScript = @""
-"(function(){\n"
-"  if (window.__moodyvidInstalled) return; window.__moodyvidInstalled = true;\n"
-"  function post(o){ try { window.webkit.messageHandlers.moodyvid.postMessage(o); } catch(e){} }\n"
-"  function score(v){\n"
-"    var r=v.getBoundingClientRect();\n"
-"    return (v.duration||0) * Math.sqrt(Math.max(1, r.width*r.height)) + (v.currentTime>0?1e6:0);\n"
-"  }\n"
-"  function best(){\n"
-"    var b=null, bs=0;\n"
-"    document.querySelectorAll('video').forEach(function(v){\n"
-"      if ((v.videoWidth||0) < 100) return;\n"
-"      var s=score(v); if (s>bs){ bs=s; b=v; }\n"
-"    });\n"
-"    return b;\n"
-"  }\n"
-"  function place(){\n"
-"    var v=best(); if(!v) return;\n"
-"    if (v.__moodyvidBtn && v.__moodyvidBtn.parentNode) return;\n"
-"    var b=document.createElement('div');\n"
-"    b.textContent='⬇ __MV_DOWNLOAD__';\n"
-"    b.style.cssText='z-index:2147483647;padding:8px 14px;'\n"
-"      +'border-radius:999px;background:#0FA0B0;color:#fff;font:600 14px -apple-system,sans-serif;'\n"
-"      +'box-shadow:0 4px 14px rgba(0,0,0,.45);cursor:pointer';\n"
-"    b.addEventListener('click',function(ev){\n"
-"      ev.preventDefault(); ev.stopPropagation();\n"
-"      post({type:'tap', src:v.currentSrc||v.src||'', page:location.href, title:document.title||''});\n"
-"    });\n"
-"    b.style.position='fixed';\n"
-"    b.style.top='84px'; b.style.right='12px';\n"
-"    document.body.appendChild(b);\n"
-"    v.__moodyvidBtn=b;\n"
-"  }\n"
-"  function scan(){\n"
-"    var v=best();\n"
-"    if (v) post({type:'found', src:v.currentSrc||v.src||'', page:location.href, title:document.title||''});\n"
-"  }\n"
-"  document.addEventListener('DOMContentLoaded', place);\n"
-"  setInterval(function(){ place(); scan(); }, 1500);\n"
-"  post({type:'ready'});\n"
-"})();\n";
+static NSString *const kSnifferHandler = @"moodyvidSniff";
+/// Eight tabs is what the switcher grid stays readable with on a phone.
+static const NSUInteger kMaxTabs = 8;
 
-static NSString *const kMessageHandler = @"moodyvid";
+#pragma mark - Weak script message handler
 
-@interface MVBrowserViewController () <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UITextFieldDelegate>
-@property (nonatomic, strong) WKWebView *web;
-@property (nonatomic, strong) UITextField *addressField;
-@property (nonatomic, strong) UIProgressView *loadBar;
-@property (nonatomic, strong) UIButton *backButton;
-@property (nonatomic, strong) UIButton *forwardButton;
-@property (nonatomic, strong) UIButton *favoriteButton;
-@property (nonatomic, strong) UIButton *downloadButton;
-@property (nonatomic, strong) UIButton *minimizeButton;
-@property (nonatomic, strong) UIStackView *foundBar;
-@property (nonatomic, strong) UILabel *foundLabel;
-@property (nonatomic, copy, nullable) NSString *foundURL;
-@property (nonatomic, copy, nullable) NSString *foundTitle;
-@property (nonatomic, strong) NSLayoutConstraint *foundHeight;
+/// WKUserContentController retains its message handlers, which would keep the
+/// browser alive forever. This proxy forwards messages but only holds the browser
+/// weakly, so the retain cycle is broken.
+@interface MVWeakScriptHandler : NSObject <WKScriptMessageHandler>
+@property (nonatomic, weak, nullable) id<WKScriptMessageHandler> target;
++ (instancetype)handlerWithTarget:(id<WKScriptMessageHandler>)target;
 @end
 
-@interface MVBrowserViewController ()
-/// The address to open once the view exists. Set by the presentation
-/// helpers before the view is loaded, so it cannot live in the header.
-@property (nonatomic, copy, nullable) NSString *initialURL;
-/// YES when this instance is a popup opened by a page, which gets a Close button.
-@property (nonatomic) BOOL isPopup;
-/// Where the page was scrolled to when the user minimized it, so returning to
-/// the parked browser lands on the same spot instead of the top.
-@property (nonatomic) double savedScrollY;
-
-- (void)minimize;
-+ (void)restoreParked;
-+ (void)discardParked;
-+ (void)showParkedCard;
-+ (void)hideParkedCard;
-+ (void)moveParkedCardForPlayer;
-+ (nullable UIViewController *)topPresenter;
+@implementation MVWeakScriptHandler
++ (instancetype)handlerWithTarget:(id<WKScriptMessageHandler>)target {
+    MVWeakScriptHandler *proxy = [MVWeakScriptHandler new];
+    proxy.target = target;
+    return proxy;
+}
+- (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+    [self.target userContentController:controller didReceiveScriptMessage:message];
+}
 @end
 
-#pragma mark - Parked (minimized) browser
+#pragma mark - Parked card
 
-/// The floating chip that stands in for a browser the user minimized. Tapping it
-/// brings the same page back; it is the browser's answer to the player's mini bar.
+/// The floating chip that stands in for a minimized browser. Tapping it brings
+/// the same page back; it is the browser's answer to the player's mini bar.
 @interface MVBrowserParkedCard : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, copy, nullable) void (^onTap)(void);
@@ -172,41 +125,71 @@ static NSString *const kMessageHandler = @"moodyvid";
 - (void)tapped { if (self.onTap) self.onTap(); }
 - (void)closeTapped { if (self.onClose) self.onClose(); }
 
-/// The tap that restores the browser must not also fire when the user aimed at
-/// the close button, otherwise a close would immediately reopen the page.
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
     return ![touch.view isKindOfClass:UIControl.class];
 }
 
 @end
 
-/// The one browser parked at a time, plus its card. Kept as file statics because
-/// a parked browser outlives the view controller that was dismissed to park it.
+/// The one browser parked at a time, plus its card. File statics because a parked
+/// browser outlives the view controller that was dismissed to park it.
 static MVBrowserViewController *gParkedBrowser = nil;
 static UINavigationController *gParkedNav = nil;
 static MVBrowserParkedCard *gParkedCard = nil;
 static NSLayoutConstraint *gParkedCardBottom = nil;
 static id gParkedObserver = nil;
 
+#pragma mark - Browser
+
+@interface MVBrowserViewController () <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler,
+                                       UITextFieldDelegate, MVBrowserHomeViewDelegate>
+@property (nonatomic, strong) UIView *contentView;
+@property (nonatomic, strong) MVBrowserHomeView *homeView;
+@property (nonatomic, strong) UITextField *addressField;
+@property (nonatomic, strong) UIProgressView *loadBar;
+@property (nonatomic, strong) UIButton *backButton;
+@property (nonatomic, strong) UIButton *forwardButton;
+@property (nonatomic, strong) UIButton *homeButton;
+@property (nonatomic, strong) UIButton *tabsButton;
+@property (nonatomic, strong) UIButton *menuButton;
+@property (nonatomic, strong) UIButton *sniffButton;
+@property (nonatomic, strong) UILabel *sniffBadge;
+@property (nonatomic, strong) UIButton *clipboardBanner;
+@property (nonatomic, strong) UILabel *clipboardLabel;
+@property (nonatomic, strong) UIView *toolbar;
+@property (nonatomic, strong) UIStackView *toolbarRow;
+
+@property (nonatomic, strong) NSMutableArray<MVBrowserTab *> *tabs;
+@property (nonatomic, copy, nullable) NSString *activeTabID;
+
+@property (nonatomic, copy, nullable) NSString *initialURL;
+@property (nonatomic) BOOL isPopup;
+@property (nonatomic) BOOL desktopMode;
+@property (nonatomic) BOOL showingHome;
+@property (nonatomic) BOOL userGestureRecently;
+
+- (void)minimize;
++ (void)restoreParked;
++ (void)discardParked;
++ (void)showParkedCard;
++ (void)hideParkedCard;
++ (void)moveParkedCardForPlayer;
++ (nullable UIViewController *)topPresenter;
+@end
 
 @implementation MVBrowserViewController
 
 #pragma mark - Quick access sites
 
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)quickAccessSites {
-    return @[
-        @{@"name": @"YouTube",    @"symbol": @"play.rectangle.fill",   @"color": @"#FF3B30", @"url": @"https://m.youtube.com"},
-        @{@"name": @"TikTok",     @"symbol": @"music.note",            @"color": @"#25F4EE", @"url": @"https://www.tiktok.com"},
-        @{@"name": @"Instagram",  @"symbol": @"camera.fill",           @"color": @"#E1306C", @"url": @"https://www.instagram.com"},
-        @{@"name": @"Facebook",   @"symbol": @"f.circle.fill",         @"color": @"#1877F2", @"url": @"https://m.facebook.com"},
-        @{@"name": @"X",          @"symbol": @"xmark",                 @"color": @"#8E8E93", @"url": @"https://x.com"},
-        @{@"name": @"Twitch",     @"symbol": @"gamecontroller.fill",   @"color": @"#9146FF", @"url": @"https://m.twitch.tv"},
-        @{@"name": @"Reddit",     @"symbol": @"bubble.left.fill",      @"color": @"#FF4500", @"url": @"https://www.reddit.com"},
-        @{@"name": @"Vimeo",      @"symbol": @"v.circle.fill",         @"color": @"#1AB7EA", @"url": @"https://vimeo.com"},
-        @{@"name": @"Dailymotion",@"symbol": @"d.circle.fill",         @"color": @"#00AAFF", @"url": @"https://www.dailymotion.com"},
-        @{@"name": @"SoundCloud", @"symbol": @"waveform",              @"color": @"#FF5500", @"url": @"https://m.soundcloud.com"},
-        @{@"name": @"Pinterest",  @"symbol": @"p.circle.fill",         @"color": @"#E60023", @"url": @"https://www.pinterest.com"},
-    ];
+    NSMutableArray *out = [NSMutableArray array];
+    for (MVBrowserShortcut *shortcut in [MVBrowserHomeView shortcuts]) {
+        [out addObject:@{@"name": shortcut.name ?: @"",
+                         @"symbol": shortcut.symbol ?: @"globe",
+                         @"color": shortcut.color ?: @"#0FA0B0",
+                         @"url": shortcut.url ?: @""}];
+    }
+    return out;
 }
 
 /// A current mobile Safari identity. Presenting this as the user agent is what
@@ -221,22 +204,29 @@ static id gParkedObserver = nil;
     return ua;
 }
 
++ (NSString *)desktopUserAgent {
+    static NSString *ua;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ua = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+              " (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+    });
+    return ua;
+}
+
 #pragma mark - Presentation
 
 + (void)presentFrom:(UIViewController *)presenter url:(NSString *)url {
     NSString *address = url;
-    if (![address containsString:@"://"] && address.length) {
+    if (address.length && ![address containsString:@"://"]) {
         address = [@"https://" stringByAppendingString:address];
     }
 
-    // If a page is already parked, bring it back rather than opening a second
-    // browser on top of it — that is what the minimize button promised the user.
-    // Tapping a *different* site reuses the same browser and just navigates it.
     if (gParkedBrowser) {
         [MVBrowserViewController restoreParked];
-        NSString *current = gParkedBrowser.web.URL.absoluteString ?: @"";
+        NSString *current = gParkedBrowser.activeTab.url ?: @"";
         if (address.length && ![address isEqualToString:current]) {
-            [gParkedBrowser loadAddress:address];
+            [gParkedBrowser openURLInNewTab:address];
         }
         return;
     }
@@ -248,51 +238,934 @@ static id gParkedObserver = nil;
     [presenter presentViewController:nav animated:YES completion:nil];
 }
 
-#pragma mark - Minimize / restore
+#pragma mark - Tabs
 
-/// Minimizes the browser: the page keeps running in the background, a small chip
-/// stands in for it, and tapping that chip returns to the exact same page and
-/// scroll position. This is the browser's twin of the player's mini bar.
-- (void)minimize {
-    // Remember where the page was so the restore lands in the same place.
-    [self.web evaluateJavaScript:@"window.scrollY || 0" completionHandler:^(id result, NSError *error) {
-        if ([result isKindOfClass:NSNumber.class]) self.savedScrollY = [result doubleValue];
+- (MVBrowserTab *)activeTab {
+    for (MVBrowserTab *tab in self.tabs) {
+        if ([tab.identifier isEqualToString:self.activeTabID]) return tab;
+    }
+    return self.tabs.firstObject;
+}
+
+- (MVBrowserTab *)createTabWithURL:(NSString *)url isPopup:(BOOL)isPopup {
+    if (self.tabs.count >= kMaxTabs) {
+        for (MVBrowserTab *old in self.tabs.copy) {
+            if (![old.identifier isEqualToString:self.activeTabID]) {
+                [old.webView removeFromSuperview];
+                [MVSnifferStore.shared clearTab:old.identifier];
+                [self.tabs removeObject:old];
+                break;
+            }
+        }
+    }
+    MVBrowserTab *tab = [MVBrowserTab new];
+    tab.identifier = NSUUID.UUID.UUIDString;
+    tab.isPopup = isPopup;
+    tab.url = url;
+    tab.webView = [self buildWebViewForTab:tab];
+    [self.tabs addObject:tab];
+    return tab;
+}
+
+- (void)selectTab:(MVBrowserTab *)tab {
+    if (!tab) return;
+    MVBrowserTab *previous = self.activeTab;
+    if (previous && previous != tab) {
+        [previous.webView evaluateJavaScript:@"window.scrollY || 0" completionHandler:^(id result, NSError *error) {
+            if ([result isKindOfClass:NSNumber.class]) previous.savedScrollY = [result doubleValue];
+        }];
+        [previous.webView removeFromSuperview];
+    }
+
+    self.activeTabID = tab.identifier;
+    [self.contentView addSubview:tab.webView];
+    [NSLayoutConstraint activateConstraints:@[
+        [tab.webView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+        [tab.webView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+        [tab.webView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        [tab.webView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+    ]];
+
+    if (!tab.url.length) {
+        [self showHome];
+    } else {
+        self.showingHome = NO;
+        self.homeView.hidden = YES;
+        [self.view bringSubviewToFront:self.sniffButton];
+        [self.view bringSubviewToFront:self.loadBar];
+        [self.view bringSubviewToFront:self.clipboardBanner];
+    }
+    if (tab.savedScrollY > 0) {
+        NSString *js = [NSString stringWithFormat:@"window.scrollTo(0, %f);", tab.savedScrollY];
+        [tab.webView evaluateJavaScript:js completionHandler:nil];
+    }
+    [self syncToolbar];
+    [self refreshSniffBadge];
+}
+
+- (void)openURLInNewTab:(NSString *)url {
+    MVBrowserTab *tab = [self createTabWithURL:url isPopup:NO];
+    [self selectTab:tab];
+    if (url.length) {
+        [tab.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:url]]];
+    }
+}
+
+- (void)closeTab:(NSString *)identifier {
+    MVBrowserTab *closing = nil;
+    for (MVBrowserTab *tab in self.tabs) {
+        if ([tab.identifier isEqualToString:identifier]) { closing = tab; break; }
+    }
+    if (!closing) return;
+    [closing.webView evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
+                      completionHandler:nil];
+    [closing.webView removeFromSuperview];
+    [MVSnifferStore.shared clearTab:identifier];
+    [self.tabs removeObject:closing];
+
+    if (!self.tabs.count) [self createTabWithURL:nil isPopup:NO];
+    if ([identifier isEqualToString:self.activeTabID]) {
+        [self selectTab:self.tabs.lastObject];
+    }
+    [self syncToolbar];
+}
+
+#pragma mark - Lifecycle
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.title = [MVLang t:@"Browser"];
+    self.tabs = [NSMutableArray array];
+
+    self.contentView = [UIView new];
+    self.contentView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.contentView.backgroundColor = UIColor.clearColor;
+    self.contentView.clipsToBounds = YES;
+    [self.view addSubview:self.contentView];
+
+    [self buildHomeView];
+    [self buildChrome];
+
+    MVBrowserTab *tab = [self createTabWithURL:self.initialURL isPopup:self.isPopup];
+    self.activeTabID = tab.identifier;
+    [self.contentView addSubview:tab.webView];
+    [NSLayoutConstraint activateConstraints:@[
+        [tab.webView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+        [tab.webView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+        [tab.webView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        [tab.webView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+    ]];
+    if (self.initialURL.length) {
+        self.showingHome = NO;
+        [tab.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:self.initialURL]]];
+    } else {
+        [self showHome];
+    }
+
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                     target:self action:@selector(close)];
+    if (self.isPopup) {
+        self.navigationItem.leftBarButtonItem =
+            [[UIBarButtonItem alloc] initWithTitle:[MVLang t:@"Close"]
+                                            style:UIBarButtonItemStylePlain
+                                           target:self action:@selector(close)];
+    } else {
+        UIBarButtonItem *minimize = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]
+                                                                     style:UIBarButtonItemStylePlain
+                                                                    target:self action:@selector(minimize)];
+        minimize.accessibilityLabel = [MVLang t:@"Minimize"];
+        self.navigationItem.leftBarButtonItem = minimize;
+    }
+
+    [[MVAdBlocker shared] prepare];
+    [self refreshText];
+    [self refreshSniffBadge];
+
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(snifferChanged:)
+                                               name:MVSnifferStoreDidChangeNotification object:nil];
+}
+
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+    for (MVBrowserTab *tab in self.tabs) {
+        [tab.webView.configuration.userContentController removeScriptMessageHandlerForName:kSnifferHandler];
+        @try { [tab.webView removeObserver:self forKeyPath:@"estimatedProgress"]; } @catch (NSException *e) {}
+    }
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [MVTheme applyWallpaperTo:self.view];
+    [self refreshText];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self checkClipboardBanner];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *layer in [self.view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [MVTheme refreshWallpaperIfPattern:self.view];
+    }
+}
+
+#pragma mark - Web view
+
+- (WKWebView *)buildWebViewForTab:(MVBrowserTab *)tab {
+    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    config.websiteDataStore = WKWebsiteDataStore.defaultDataStore;
+    config.allowsInlineMediaPlayback = YES;
+    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
+    config.applicationNameForUserAgent = @"Version/18.0 Mobile/15E148 Safari/604.1";
+
+    WKUserContentController *ucc = [WKUserContentController new];
+    [ucc addScriptMessageHandler:[MVWeakScriptHandler handlerWithTarget:self] name:kSnifferHandler];
+    // Injected at document start, in every frame, in the page world, so a
+    // request made before the page finishes loading is still reported.
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:[MVSnifferScript sourceForHandler:kSnifferHandler]
+                                                    injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                 forMainFrameOnly:NO];
+    [ucc addUserScript:script];
+    config.userContentController = ucc;
+
+    // The ad blocker compiles asynchronously; installing it when ready is enough.
+    [[MVAdBlocker shared] ruleListWithCompletion:^(WKContentRuleList *ruleList) {
+        if (ruleList) [ucc addContentRuleList:ruleList];
     }];
 
+    WKWebView *web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
+    web.customUserAgent = self.desktopMode ? [MVBrowserViewController desktopUserAgent]
+                                           : [MVBrowserViewController safariUserAgent];
+    web.translatesAutoresizingMaskIntoConstraints = NO;
+    web.navigationDelegate = self;
+    web.UIDelegate = self;
+    web.allowsBackForwardNavigationGestures = YES;
+    [web addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
+    return web;
+}
+
+- (void)syncToolbar {
+    MVBrowserTab *tab = self.activeTab;
+    if (tab && !self.showingHome) {
+        self.addressField.text = tab.url.length ? tab.url : @"";
+    } else {
+        self.addressField.text = @"";
+    }
+    self.backButton.enabled = tab.webView.canGoBack;
+    self.forwardButton.enabled = tab.webView.canGoForward;
+    [self.tabsButton setTitle:[NSString stringWithFormat:@"%lu", (unsigned long)self.tabs.count]
+                     forState:UIControlStateNormal];
+}
+
+#pragma mark - Home
+
+- (void)buildHomeView {
+    self.homeView = [[MVBrowserHomeView alloc] initWithFrame:CGRectZero];
+    self.homeView.delegate = self;
+    self.homeView.hidden = YES;
+    [self.view addSubview:self.homeView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.homeView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.homeView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.homeView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.homeView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+    ]];
+}
+
+- (void)showHome {
+    self.showingHome = YES;
+    [self.homeView reload];
+    self.homeView.hidden = NO;
+    [self.view bringSubviewToFront:self.homeView];
+    [self.view bringSubviewToFront:self.sniffButton];
+    [self.view bringSubviewToFront:self.loadBar];
+    [self.view bringSubviewToFront:self.clipboardBanner];
+    [self syncToolbar];
+    [self refreshSniffBadge];
+}
+
+- (void)homeView:(MVBrowserHomeView *)homeView didSelectURL:(NSString *)url title:(NSString *)title {
+    [self loadAddress:url];
+}
+
+- (void)homeViewDidRequestClearHistory:(MVBrowserHomeView *)homeView {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Clear history"]
+                                                                  message:[MVLang t:@"This cannot be undone."]
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Clear history"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [MVBrowserHistory.shared clearHistory];
+        [homeView reload];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Chrome
+
+- (UIButton *)toolbarButton:(NSString *)symbol action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    button.tintColor = [MVTheme accent];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+- (void)buildChrome {
+    self.addressField = [UITextField new];
+    self.addressField.translatesAutoresizingMaskIntoConstraints = NO;
+    self.addressField.borderStyle = UITextBorderStyleRoundedRect;
+    self.addressField.keyboardType = UIKeyboardTypeURL;
+    self.addressField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.addressField.autocorrectionType = UITextAutocorrectionTypeNo;
+    self.addressField.returnKeyType = UIReturnKeyGo;
+    self.addressField.delegate = self;
+    self.addressField.backgroundColor = [MVTheme card];
+    self.addressField.textColor = [MVTheme text];
+    self.addressField.attributedPlaceholder =
+        [[NSAttributedString alloc] initWithString:[MVLang t:@"Search or enter address"]
+                                        attributes:@{NSForegroundColorAttributeName: [MVTheme secondaryText]}];
+
+    self.backButton = [self toolbarButton:@"chevron.backward" action:@selector(goBack)];
+    self.forwardButton = [self toolbarButton:@"chevron.forward" action:@selector(goForward)];
+    self.homeButton = [self toolbarButton:@"house" action:@selector(homeTapped)];
+    self.tabsButton = [self toolbarButton:@"square.on.square" action:@selector(showTabs)];
+    self.menuButton = [self toolbarButton:@"ellipsis.circle" action:@selector(showMenu)];
+    [self.tabsButton setTitleColor:[MVTheme accent] forState:UIControlStateNormal];
+    self.tabsButton.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+
+    self.toolbar = [UIView new];
+    self.toolbar.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyCardStyle:self.toolbar cornerRadius:22];
+    [self.view addSubview:self.toolbar];
+
+    self.toolbarRow = [[UIStackView alloc] initWithArrangedSubviews:
+        @[self.backButton, self.forwardButton, self.addressField, self.homeButton, self.tabsButton, self.menuButton]];
+    self.toolbarRow.translatesAutoresizingMaskIntoConstraints = NO;
+    self.toolbarRow.axis = UILayoutConstraintAxisHorizontal;
+    self.toolbarRow.spacing = 8;
+    self.toolbarRow.alignment = UIStackViewAlignmentCenter;
+    [self.toolbar addSubview:self.toolbarRow];
+
+    // The sniffer button is a floating action button over the page: it carries the
+    // count of everything found in this tab.
+    self.sniffButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.sniffButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.sniffButton setImage:[UIImage systemImageNamed:@"arrow.down.doc.fill"] forState:UIControlStateNormal];
+    self.sniffButton.tintColor = UIColor.whiteColor;
+    self.sniffButton.backgroundColor = [MVTheme accent];
+    self.sniffButton.layer.cornerRadius = 26;
+    self.sniffButton.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.sniffButton.layer.shadowOpacity = 0.3;
+    self.sniffButton.layer.shadowRadius = 8;
+    self.sniffButton.layer.shadowOffset = CGSizeMake(0, 3);
+    self.sniffButton.accessibilityLabel = [MVLang t:@"Found media"];
+    [self.sniffButton addTarget:self action:@selector(showSnifferSheet) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.sniffButton];
+
+    self.sniffBadge = [UILabel new];
+    self.sniffBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    self.sniffBadge.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    self.sniffBadge.textColor = UIColor.whiteColor;
+    self.sniffBadge.backgroundColor = [MVTheme danger];
+    self.sniffBadge.textAlignment = NSTextAlignmentCenter;
+    self.sniffBadge.layer.cornerRadius = 9;
+    self.sniffBadge.layer.masksToBounds = YES;
+    self.sniffBadge.hidden = YES;
+    [self.sniffButton addSubview:self.sniffBadge];
+
+    self.loadBar = [UIProgressView new];
+    self.loadBar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.loadBar.progressTintColor = [MVTheme accent];
+    [self.view addSubview:self.loadBar];
+
+    [self buildClipboardBanner];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.contentView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.contentView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.contentView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.contentView.bottomAnchor constraintEqualToAnchor:self.toolbar.topAnchor constant:-6],
+
+        [self.loadBar.topAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        [self.loadBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.loadBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.loadBar.heightAnchor constraintEqualToConstant:2],
+
+        [self.toolbar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:10],
+        [self.toolbar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-10],
+        [self.toolbar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-6],
+        [self.toolbar.heightAnchor constraintEqualToConstant:46],
+
+        [self.toolbarRow.leadingAnchor constraintEqualToAnchor:self.toolbar.leadingAnchor constant:12],
+        [self.toolbarRow.trailingAnchor constraintEqualToAnchor:self.toolbar.trailingAnchor constant:-12],
+        [self.toolbarRow.topAnchor constraintEqualToAnchor:self.toolbar.topAnchor],
+        [self.toolbarRow.bottomAnchor constraintEqualToAnchor:self.toolbar.bottomAnchor],
+
+        [self.addressField.heightAnchor constraintEqualToConstant:34],
+
+        [self.backButton.widthAnchor constraintEqualToConstant:30],
+        [self.forwardButton.widthAnchor constraintEqualToConstant:30],
+        [self.homeButton.widthAnchor constraintEqualToConstant:30],
+        [self.menuButton.widthAnchor constraintEqualToConstant:30],
+        [self.tabsButton.widthAnchor constraintGreaterThanOrEqualToConstant:30],
+
+        [self.sniffButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
+        [self.sniffButton.bottomAnchor constraintEqualToAnchor:self.toolbar.topAnchor constant:-14],
+        [self.sniffButton.widthAnchor constraintEqualToConstant:52],
+        [self.sniffButton.heightAnchor constraintEqualToConstant:52],
+
+        [self.sniffBadge.topAnchor constraintEqualToAnchor:self.sniffButton.topAnchor constant:-2],
+        [self.sniffBadge.trailingAnchor constraintEqualToAnchor:self.sniffButton.trailingAnchor constant:2],
+        [self.sniffBadge.widthAnchor constraintGreaterThanOrEqualToConstant:18],
+        [self.sniffBadge.heightAnchor constraintEqualToConstant:18],
+    ]];
+}
+
+- (void)buildClipboardBanner {
+    self.clipboardBanner = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.clipboardBanner.translatesAutoresizingMaskIntoConstraints = NO;
+    self.clipboardBanner.backgroundColor = [MVTheme glassCard];
+    [MVTheme applyCardStyle:self.clipboardBanner cornerRadius:14];
+    self.clipboardBanner.hidden = YES;
+    [self.clipboardBanner addTarget:self action:@selector(clipboardBannerTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.clipboardBanner];
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"doc.on.clipboard"]];
+    icon.tintColor = [MVTheme accent];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.clipboardBanner addSubview:icon];
+
+    self.clipboardLabel = [UILabel new];
+    self.clipboardLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.clipboardLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    self.clipboardLabel.textColor = [MVTheme text];
+    self.clipboardLabel.numberOfLines = 1;
+    self.clipboardLabel.text = [MVLang t:@"A link is on the clipboard — tap to open it"];
+    [self.clipboardBanner addSubview:self.clipboardLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.clipboardBanner.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:14],
+        [self.clipboardBanner.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-14],
+        [self.clipboardBanner.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
+        [self.clipboardBanner.heightAnchor constraintEqualToConstant:44],
+
+        [icon.leadingAnchor constraintEqualToAnchor:self.clipboardBanner.leadingAnchor constant:12],
+        [icon.centerYAnchor constraintEqualToAnchor:self.clipboardBanner.centerYAnchor],
+        [icon.widthAnchor constraintEqualToConstant:20],
+        [icon.heightAnchor constraintEqualToConstant:20],
+
+        [self.clipboardLabel.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:10],
+        [self.clipboardLabel.trailingAnchor constraintEqualToAnchor:self.clipboardBanner.trailingAnchor constant:-12],
+        [self.clipboardLabel.centerYAnchor constraintEqualToAnchor:self.clipboardBanner.centerYAnchor],
+    ]];
+}
+
+#pragma mark - Clipboard banner
+
+/// Checks the pasteboard without reading it. iOS 16+ prompts the user before an
+/// app may read the clipboard, and prompting on every launch is hostile, so the
+/// banner only *offers*: the content is read when the user taps.
+- (void)checkClipboardBanner {
+    if (!UIPasteboard.generalPasteboard.hasStrings) {
+        self.clipboardBanner.hidden = YES;
+        return;
+    }
+    self.clipboardBanner.hidden = NO;
+    [self.view bringSubviewToFront:self.clipboardBanner];
+}
+
+- (void)clipboardBannerTapped {
+    NSString *text = UIPasteboard.generalPasteboard.string;
+    self.clipboardBanner.hidden = YES;
+    if (!text.length) return;
+    text = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([text.lowercaseString hasPrefix:@"magnet:"]) {
+        [self routeMagnetLink:text];
+        return;
+    }
+    if (![text.lowercaseString hasPrefix:@"http"]) return;
+    [self loadAddress:text];
+}
+
+#pragma mark - Navigation
+
+- (void)loadAddress:(NSString *)text {
+    NSString *address = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!address.length) return;
+
+    if ([address.lowercaseString hasPrefix:@"magnet:"]) {
+        [self routeMagnetLink:address];
+        return;
+    }
+
+    if (![address containsString:@"://"]) {
+        if ([address containsString:@"."] && ![address containsString:@" "]) {
+            address = [@"https://" stringByAppendingString:address];
+        } else {
+            NSString *query = [address stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
+            address = [@"https://m.duckduckgo.com/?q=" stringByAppendingString:query ?: @""];
+        }
+    }
+    NSURL *url = [NSURL URLWithString:address];
+    if (!url) return;
+
+    self.showingHome = NO;
+    self.homeView.hidden = YES;
+    [self.view bringSubviewToFront:self.sniffButton];
+    [self.view bringSubviewToFront:self.loadBar];
+    [self.view bringSubviewToFront:self.clipboardBanner];
+    MVBrowserTab *tab = self.activeTab;
+    tab.url = address;
+    [tab.webView loadRequest:[NSURLRequest requestWithURL:url]];
+    self.addressField.text = address;
+    [self.addressField resignFirstResponder];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [self loadAddress:textField.text];
+    return YES;
+}
+
+- (void)goBack { MVBrowserTab *tab = self.activeTab; if (tab.webView.canGoBack) [tab.webView goBack]; }
+- (void)goForward { MVBrowserTab *tab = self.activeTab; if (tab.webView.canGoForward) [tab.webView goForward]; }
+- (void)homeTapped { [self showHome]; }
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    if (![keyPath isEqualToString:@"estimatedProgress"]) {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+    WKWebView *web = (WKWebView *)object;
+    if (web != self.activeTab.webView) return;   // only the visible tab drives the bar
+    double progress = web.estimatedProgress;
+    self.loadBar.hidden = progress >= 1.0;
+    [self.loadBar setProgress:(float)progress animated:YES];
+}
+
+#pragma mark - WKNavigationDelegate
+
+- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    MVBrowserTab *tab = [self tabForWebView:webView];
+    tab.loading = YES;
+    if (webView == self.activeTab.webView) [self syncToolbar];
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    MVBrowserTab *tab = [self tabForWebView:webView];
+    if (!tab) return;
+    tab.loading = NO;
+    tab.url = webView.URL.absoluteString;
+    tab.title = webView.title;
+    if (webView == self.activeTab.webView) {
+        self.showingHome = NO;
+        self.homeView.hidden = YES;
+        self.addressField.text = tab.url;
+        [self syncToolbar];
+    }
+    [MVBrowserHistory.shared record:webView.URL.absoluteString title:webView.title];
+
+    // Probe whatever the sniffer has found in this tab so sizes appear in the
+    // sheet without the user waiting on a request per row.
+    NSArray<MVSnifferItem *> *items = [MVSnifferStore.shared itemsForTab:tab.identifier];
+    NSMutableArray<MVSnifferItem *> *unprobed = [NSMutableArray array];
+    for (MVSnifferItem *item in items) if (!item.probed) [unprobed addObject:item];
+    if (unprobed.count) [[MVMediaProbe shared] probeAll:unprobed completion:nil];
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    if (error.code == NSURLErrorCancelled) return;
+    MVLogWarn(@"browser: load failed %@ (%@)", webView.URL.absoluteString, error.localizedDescription);
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Failed"]
+                                                                  message:error.localizedDescription
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+/// Keeps browsing inside the app, and intercepts the schemes the app can handle
+/// itself: magnet links go to the torrent flow, everything else unknown is
+/// offered to the system.
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
+        decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = action.request.URL;
+    NSString *scheme = url.scheme.lowercaseString;
+
+    if ([scheme isEqualToString:@"magnet"]) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        [self routeMagnetLink:url.absoluteString];
+        return;
+    }
+
+    static NSArray *allowed;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ allowed = @[@"http", @"https", @"about", @"data", @"blob", @"file", @"javascript"]; });
+    if (scheme.length && ![allowed containsObject:scheme]) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        if ([UIApplication.sharedApplication canOpenURL:url]) {
+            [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+        }
+        return;
+    }
+
+    // Remember that a tap happened, so a popup opened in the same runloop is
+    // treated as user-initiated and not as an ad.
+    if (action.navigationType == WKNavigationTypeLinkActivated) self.userGestureRecently = YES;
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+/// A response the web view cannot display (an attachment, or a media/file MIME)
+/// is offered as a download instead of failing.
+- (void)webView:(WKWebView *)webView
+    decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse
+        decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
+    if (!navigationResponse.canShowMIMEType) {
+        NSURL *url = navigationResponse.response.URL;
+        NSString *mime = navigationResponse.response.MIMEType;
+        decisionHandler(WKNavigationResponsePolicyCancel);
+        [self offerDownloadForURL:url.absoluteString mime:mime];
+        return;
+    }
+    decisionHandler(WKNavigationResponsePolicyAllow);
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    MVLogWarn(@"browser: web content process terminated, reloading");
+    [webView reload];
+}
+
+#pragma mark - WKUIDelegate
+
+/// Popups. A window opened by a real tap becomes a new tab; a popup with no URL
+/// or one opened without any recent gesture is an ad and is dropped.
+- (WKWebView *)webView:(WKWebView *)webView
+    createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
+               forNavigationAction:(WKNavigationAction *)action
+                    windowFeatures:(WKWindowFeatures *)features {
+    BOOL hasURL = action.request.URL.absoluteString.length > 0;
+    BOOL fromGesture = self.userGestureRecently || action.navigationType == WKNavigationTypeLinkActivated;
+    self.userGestureRecently = NO;
+
+    if (!hasURL || !fromGesture) {
+        MVLogInfo(@"browser: blocked popup (%@)", action.request.URL.absoluteString ?: @"no url");
+        return nil;
+    }
+
+    NSString *address = action.request.URL.absoluteString;
+    MVBrowserTab *tab = [self createTabWithURL:address isPopup:YES];
+    [self selectTab:tab];
+    [tab.webView loadRequest:action.request];
+    return tab.webView;
+}
+
+- (void)webViewDidClose:(WKWebView *)webView {
+    MVBrowserTab *tab = [self tabForWebView:webView];
+    if (tab.isPopup) [self closeTab:tab.identifier];
+}
+
+- (MVBrowserTab *)tabForWebView:(WKWebView *)webView {
+    for (MVBrowserTab *tab in self.tabs) if (tab.webView == webView) return tab;
+    return nil;
+}
+
+#pragma mark - Sniffer
+
+- (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (![message.name isEqualToString:kSnifferHandler]) return;
+    NSDictionary *body = [message.body isKindOfClass:NSDictionary.class] ? message.body : nil;
+    if (!body) return;
+
+    NSString *type = body[@"type"];
+    MVBrowserTab *tab = [self tabForWebView:message.webView];
+    if (!tab) tab = self.activeTab;
+    NSString *tabID = tab.identifier;
+    NSString *pageURL = [body[@"page"] isKindOfClass:NSString.class] ? body[@"page"] : tab.url;
+    NSString *title = [body[@"title"] isKindOfClass:NSString.class] ? body[@"title"] : tab.title;
+
+    if ([type isEqualToString:@"blob"]) {
+        // The page plays a blob: stream the app cannot fetch. The sheet's
+        // "download this page with yt-dlp" action covers this case.
+        MVLogInfo(@"sniffer: blob player on %@", pageURL);
+        return;
+    }
+
+    NSString *src = [body[@"src"] isKindOfClass:NSString.class] ? body[@"src"] : @"";
+    if (!src.length) return;
+
+    MVSnifferItem *item = [MVSnifferItem itemWithURL:src pageURL:pageURL pageTitle:title mime:nil];
+    item.referer = pageURL;
+    if (item.kind == MVSniffKindUnknown) return;   // not a media/file link
+
+    if ([MVSnifferStore.shared addItem:item toTab:tabID]) {
+        // Only probe genuinely new links, once.
+        [[MVMediaProbe shared] probe:item completion:nil];
+    }
+}
+
+- (void)snifferChanged:(NSNotification *)note {
+    NSString *tabID = [note.object isKindOfClass:NSString.class] ? note.object : nil;
+    if (tabID && ![tabID isEqualToString:self.activeTab.identifier]) return;
+    [self refreshSniffBadge];
+}
+
+- (void)refreshSniffBadge {
+    NSUInteger count = [MVSnifferStore.shared countForTab:self.activeTab.identifier];
+    self.sniffBadge.hidden = (count == 0);
+    self.sniffBadge.text = count > 99 ? @"99+" : [NSString stringWithFormat:@"%lu", (unsigned long)count];
+    self.sniffButton.accessibilityValue = [NSString stringWithFormat:@"%lu", (unsigned long)count];
+}
+
+- (void)showSnifferSheet {
+    MVBrowserTab *tab = self.activeTab;
+    MVSnifferSheetViewController *sheet =
+        [[MVSnifferSheetViewController alloc] initWithTabIdentifier:tab.identifier
+                                                          pageURL:tab.url
+                                                        pageTitle:tab.title];
+    sheet.modalPresentationStyle = UIModalPresentationPageSheet;
+    UISheetPresentationController *presentation = sheet.sheetPresentationController;
+    if (presentation) {
+        presentation.detents = @[[UISheetPresentationControllerDetent mediumDetent],
+                                 [UISheetPresentationControllerDetent largeDetent]];
+        presentation.prefersGrabberVisible = YES;
+    }
+    __weak typeof(self) weakSelf = self;
+    sheet.onDownload = ^(NSArray<MVSnifferItem *> *items) {
+        [weakSelf downloadItems:items];
+    };
+    sheet.onDownloadPageWithYTDlp = ^(NSString *pageURL, NSString *pageTitle) {
+        [weakSelf downloadPageWithYTDlp:pageURL title:pageTitle];
+    };
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)downloadItems:(NSArray<MVSnifferItem *> *)items {
+    if (!items.count) return;
+    for (MVSnifferItem *item in items) {
+        [[MVDownloadManager shared] enqueueItem:item];
+    }
+    [self notifyQueued];
+}
+
+/// Hands the page URL to the Python engine, which knows how to extract a video
+/// the sniffer cannot reach (a blob player, a token-protected stream).
+- (void)downloadPageWithYTDlp:(NSString *)pageURL title:(NSString *)title {
+    if (!pageURL.length) return;
+    [[MVDownloadEngine shared] downloadURL:pageURL quality:@"best" completion:nil];
+    [self notifyQueued];
+}
+
+- (void)notifyQueued {
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [NSNotificationCenter.defaultCenter postNotificationName:@"MVShowDownloadsTabNotification" object:nil];
+}
+
+/// A link the web view refused to show (an attachment or a media MIME) is
+/// offered as a download.
+- (void)offerDownloadForURL:(NSString *)url mime:(NSString *)mime {
+    if (!url.length) return;
+    MVSnifferItem *item = [MVSnifferItem itemWithURL:url
+                                             pageURL:self.activeTab.url
+                                           pageTitle:self.activeTab.title
+                                                mime:mime];
+    item.referer = self.activeTab.url;
+    if (item.kind == MVSniffKindUnknown) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:item.displayName
+                                                                  message:[MVLang t:@"Download this file?"]
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Download"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [[MVDownloadManager shared] enqueueItem:item];
+        [self notifyQueued];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)routeMagnetLink:(NSString *)magnet {
+    MVSnifferItem *item = [MVSnifferItem itemWithURL:magnet pageURL:self.activeTab.url
+                                           pageTitle:self.activeTab.title mime:nil];
+    MVDownloadTask *task = [[MVDownloadManager shared] enqueueItem:item];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Torrent"]
+                                                                  message:task.error
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Menu
+
+- (void)showTabs {
+    MVTabsViewController *tabs = [[MVTabsViewController alloc] initWithTabs:self.tabs
+                                                          activeIdentifier:self.activeTabID];
+    tabs.modalPresentationStyle = UIModalPresentationPageSheet;
+    UISheetPresentationController *presentation = tabs.sheetPresentationController;
+    if (presentation) presentation.detents = @[[UISheetPresentationControllerDetent mediumDetent],
+                                               [UISheetPresentationControllerDetent largeDetent]];
+    __weak typeof(self) weakSelf = self;
+    tabs.onSelect = ^(NSString *identifier) {
+        for (MVBrowserTab *tab in weakSelf.tabs) {
+            if ([tab.identifier isEqualToString:identifier]) { [weakSelf selectTab:tab]; break; }
+        }
+    };
+    tabs.onClose = ^(NSString *identifier) { [weakSelf closeTab:identifier]; };
+    tabs.onNewTab = ^{ [weakSelf openURLInNewTab:nil]; };
+    [self presentViewController:tabs animated:YES completion:nil];
+}
+
+- (void)showMenu {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+
+    MVBrowserTab *tab = self.activeTab;
+    BOOL favorite = [MVBrowserHistory.shared isFavorite:tab.url];
+    [sheet addAction:[UIAlertAction actionWithTitle:(favorite ? [MVLang t:@"Remove bookmark"] : [MVLang t:@"Add bookmark"])
+                                              style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [MVBrowserHistory.shared setFavorite:tab.url title:tab.title favorite:!favorite];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:(self.desktopMode ? [MVLang t:@"Mobile site"] : [MVLang t:@"Desktop site"])
+                                              style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self toggleDesktopMode];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Find on page"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self promptFindInPage];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self shareCurrentPage];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"New tab"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self openURLInNewTab:nil];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Reload"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self.activeTab.webView reload];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.menuButton;
+    sheet.popoverPresentationController.sourceRect = self.menuButton.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)toggleDesktopMode {
+    self.desktopMode = !self.desktopMode;
+    NSString *agent = self.desktopMode ? [MVBrowserViewController desktopUserAgent]
+                                       : [MVBrowserViewController safariUserAgent];
+    // A user-agent change only takes effect on the next load, so reload now.
+    for (MVBrowserTab *tab in self.tabs) tab.webView.customUserAgent = agent;
+    [self.activeTab.webView reload];
+    [self toast:(self.desktopMode ? [MVLang t:@"Desktop site"] : [MVLang t:@"Mobile site"])];
+}
+
+- (void)promptFindInPage {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Find on page"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = [MVLang t:@"Find on page"];
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Find on page"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *text = alert.textFields.firstObject.text;
+        if (text.length) [self findTextOnPage:text];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)findTextOnPage:(NSString *)text {
+    WKFindConfiguration *configuration = [WKFindConfiguration new];
+    configuration.backwards = NO;
+    configuration.wraps = YES;
+    configuration.caseSensitive = NO;
+    __weak typeof(self) weakSelf = self;
+    [self.activeTab.webView findString:text configuration:configuration completionHandler:^(WKFindResult *result) {
+        if (!result.matchFound) [weakSelf toast:[MVLang t:@"Not found"]];
+    }];
+}
+
+- (void)shareCurrentPage {
+    NSString *url = self.activeTab.url;
+    if (!url.length) return;
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL URLWithString:url]]
+                                                                       applicationActivities:nil];
+    share.popoverPresentationController.sourceView = self.menuButton;
+    share.popoverPresentationController.sourceRect = self.menuButton.bounds;
+    [self presentViewController:share animated:YES completion:nil];
+}
+
+- (void)toast:(NSString *)text {
+    UILabel *toast = [UILabel new];
+    toast.translatesAutoresizingMaskIntoConstraints = NO;
+    toast.text = text;
+    toast.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    toast.textColor = UIColor.whiteColor;
+    toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
+    toast.textAlignment = NSTextAlignmentCenter;
+    toast.layer.cornerRadius = 16;
+    toast.layer.masksToBounds = YES;
+    toast.alpha = 0;
+    [self.view addSubview:toast];
+    [NSLayoutConstraint activateConstraints:@[
+        [toast.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [toast.bottomAnchor constraintEqualToAnchor:self.toolbar.topAnchor constant:-14],
+        [toast.heightAnchor constraintEqualToConstant:34],
+        [toast.widthAnchor constraintGreaterThanOrEqualToConstant:140],
+    ]];
+    [UIView animateWithDuration:0.2 animations:^{ toast.alpha = 1; } completion:^(BOOL done) {
+        [UIView animateWithDuration:0.3 delay:1.2 options:0 animations:^{ toast.alpha = 0; }
+                         completion:^(BOOL finished) { [toast removeFromSuperview]; }];
+    }];
+}
+
+#pragma mark - Minimize / restore
+
+- (void)minimize {
+    MVBrowserTab *tab = self.activeTab;
+    [tab.webView evaluateJavaScript:@"window.scrollY || 0" completionHandler:^(id result, NSError *error) {
+        if ([result isKindOfClass:NSNumber.class]) tab.savedScrollY = [result doubleValue];
+    }];
     gParkedBrowser = self;
     gParkedNav = self.navigationController;
-
     [self dismissViewControllerAnimated:YES completion:^{
         [MVBrowserViewController showParkedCard];
     }];
 }
 
-/// Re-presents the parked browser with its page intact.
 + (void)restoreParked {
     MVBrowserViewController *browser = gParkedBrowser;
     if (!browser) return;
-
     UINavigationController *nav = gParkedNav ?: [[UINavigationController alloc] initWithRootViewController:browser];
     [MVBrowserViewController hideParkedCard];
-
     UIViewController *presenter = [MVBrowserViewController topPresenter];
     if (!presenter) return;
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
-    [presenter presentViewController:nav animated:YES completion:^{
-        // Scroll back to where the user left off.
-        double y = browser.savedScrollY;
-        if (y > 0) {
-            NSString *js = [NSString stringWithFormat:@"window.scrollTo(0, %f);", y];
-            [browser.web evaluateJavaScript:js completionHandler:nil];
-        }
-    }];
+    [presenter presentViewController:nav animated:YES completion:nil];
 }
 
-/// Fully closes the parked browser and releases it.
 + (void)discardParked {
     MVBrowserViewController *browser = gParkedBrowser;
-    [browser.web evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
-                  completionHandler:nil];
+    if (browser) {
+        for (MVBrowserTab *tab in browser.tabs) {
+            [tab.webView evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
+                          completionHandler:nil];
+        }
+    }
     [MVBrowserViewController hideParkedCard];
     gParkedBrowser = nil;
     gParkedNav = nil;
@@ -302,12 +1175,11 @@ static id gParkedObserver = nil;
     UIWindow *window = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *ws = (UIWindowScene *)scene;
-        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
-        for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        if (windowScene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *candidate in windowScene.windows) { if (candidate.isKeyWindow) { window = candidate; break; } }
     }
     if (!window) window = UIApplication.sharedApplication.windows.firstObject;
-
     UIViewController *top = window.rootViewController;
     while (top.presentedViewController) top = top.presentedViewController;
     return top;
@@ -318,9 +1190,9 @@ static id gParkedObserver = nil;
     UIWindow *window = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *ws = (UIWindowScene *)scene;
-        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
-        for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        if (windowScene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *candidate in windowScene.windows) { if (candidate.isKeyWindow) { window = candidate; break; } }
     }
     if (!window) window = UIApplication.sharedApplication.windows.firstObject;
     if (!window) return;
@@ -330,8 +1202,9 @@ static id gParkedObserver = nil;
         gParkedCard.onTap = ^{ [MVBrowserViewController restoreParked]; };
         gParkedCard.onClose = ^{ [MVBrowserViewController discardParked]; };
     }
-    NSString *title = gParkedBrowser.web.title;
-    if (!title.length) title = gParkedBrowser.web.URL.host ?: [MVLang t:@"Browser"];
+    MVBrowserTab *tab = gParkedBrowser.activeTab;
+    NSString *title = tab.title;
+    if (!title.length) title = [NSURL URLWithString:tab.url].host ?: [MVLang t:@"Browser"];
     gParkedCard.titleLabel.text = title;
     gParkedCard.accessibilityLabel = title;
     gParkedCard.accessibilityHint = [MVLang t:@"Tap to return to the page"];
@@ -351,7 +1224,6 @@ static id gParkedObserver = nil;
     gParkedCard.alpha = 0;
     [UIView animateWithDuration:0.2 animations:^{ gParkedCard.alpha = 1; }];
 
-    // Watch the player so the two floating bars never sit on top of each other.
     if (!gParkedObserver) {
         gParkedObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVPlayerBarVisibilityDidChangeNotification
                                                                         object:nil queue:NSOperationQueue.mainQueue
@@ -361,7 +1233,6 @@ static id gParkedObserver = nil;
     }
 }
 
-/// Lifts the parked card above the player's mini bar when that bar is on screen.
 + (void)moveParkedCardForPlayer {
     if (!gParkedCardBottom) return;
     BOOL playerUp = MVPlayerCenter.shared.floatingBarVisible;
@@ -379,444 +1250,26 @@ static id gParkedObserver = nil;
     }];
 }
 
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = UIColor.clearColor;
-    self.title = [MVLang t:@"Browser"];
-
-    [self buildWebView];
-    [self buildToolbar];
-
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-                                                     target:self action:@selector(close)];
-    if (self.isPopup) {
-        self.navigationItem.leftBarButtonItem =
-            [[UIBarButtonItem alloc] initWithTitle:[MVLang t:@"Close"]
-                                            style:UIBarButtonItemStylePlain
-                                           target:self action:@selector(close)];
-    } else {
-        // Same idea as the chevron on the video player: shrink the browser into a
-        // floating chip and keep the page alive, so coming back lands on the very
-        // same page instead of reloading from the top.
-        UIBarButtonItem *minimize = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]
-                                                                     style:UIBarButtonItemStylePlain
-                                                                    target:self action:@selector(minimize)];
-        minimize.accessibilityLabel = [MVLang t:@"Minimize"];
-        self.navigationItem.leftBarButtonItem = minimize;
-    }
-
-    if (self.initialURL.length) [self loadAddress:self.initialURL];
-    [self refreshText];
-}
+#pragma mark - Close / text
 
 - (void)close {
-    // A deliberate close throws the parked browser away too, so it cannot pop
-    // back later as a stale chip.
     if (gParkedBrowser == self) [MVBrowserViewController discardParked];
-    // Stop the page's own playback so it does not keep running behind the app.
-    [self.web evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
-               completionHandler:nil];
+    for (MVBrowserTab *tab in self.tabs) {
+        [tab.webView evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})"
+                      completionHandler:nil];
+    }
     [self dismissViewControllerAnimated:YES completion:nil];
 }
-
-/// The store every browser instance shares, so a sign-in made in one place is
-/// still there in the next. `defaultDataStore` is persistent and is the only
-/// choice on iOS 15; `dataStoreForIdentifier:` (iOS 17+) would give us a named
-/// one, but calling it on an older system raises, so it is guarded.
-+ (WKWebsiteDataStore *)sharedDataStore {
-    static WKWebsiteDataStore *store;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        store = WKWebsiteDataStore.defaultDataStore;
-    });
-    return store;
-}
-
-- (void)buildWebView {
-    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
-    config.websiteDataStore = [MVBrowserViewController sharedDataStore];
-    config.allowsInlineMediaPlayback = YES;
-    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-
-    // Google and others refuse to sign a user in when the browser looks embedded.
-    // Reporting plain "Safari" with a current version is what lets the official
-    // sign-in pages load instead of a "this browser is not secure" wall.
-    config.applicationNameForUserAgent = @"Version/18.0 Mobile/15E148 Safari/604.1";
-    config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
-
-    WKUserContentController *ucc = [WKUserContentController new];
-    [ucc addScriptMessageHandler:self name:kMessageHandler];
-    // The page's Download button has to speak the app's language, so the label is
-    // substituted here rather than baked into the script.
-    NSString *script = [kInjectedScript stringByReplacingOccurrencesOfString:@"__MV_DOWNLOAD__"
-                                                                 withString:[MVLang t:@"Download"]];
-    [ucc addUserScript:[[WKUserScript alloc] initWithSource:script
-                                               injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-                                            forMainFrameOnly:NO]];
-    config.userContentController = ucc;
-
-    self.web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
-    self.web.customUserAgent = [MVBrowserViewController safariUserAgent];
-    self.web.translatesAutoresizingMaskIntoConstraints = NO;
-    self.web.navigationDelegate = self;
-    self.web.UIDelegate = self;
-    self.web.allowsBackForwardNavigationGestures = YES;
-    [self.web addObserver:self forKeyPath:@"estimatedProgress" options:NSKeyValueObservingOptionNew context:nil];
-    [self.view addSubview:self.web];
-
-    self.loadBar = [UIProgressView new];
-    self.loadBar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.loadBar.progressTintColor = [MVTheme accent];
-    [self.view addSubview:self.loadBar];
-
-    // A web view has no intrinsic size, so its height must come from constraints.
-    // This is the chain that gives it one: web -> progress bar -> address row.
-    [NSLayoutConstraint activateConstraints:@[
-        [self.web.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [self.web.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.web.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.web.bottomAnchor constraintEqualToAnchor:self.loadBar.topAnchor],
-        [self.loadBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.loadBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        // The progress bar has no intrinsic height either, so give it one.
-        [self.loadBar.heightAnchor constraintEqualToConstant:2],
-    ]];
-}
-
-- (void)buildToolbar {
-    // Address row.
-    self.addressField = [UITextField new];
-    self.addressField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.addressField.borderStyle = UITextBorderStyleRoundedRect;
-    self.addressField.keyboardType = UIKeyboardTypeURL;
-    self.addressField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    self.addressField.autocorrectionType = UITextAutocorrectionTypeNo;
-    self.addressField.returnKeyType = UIReturnKeyGo;
-    self.addressField.delegate = self;
-    self.addressField.backgroundColor = [MVTheme card];
-    self.addressField.textColor = [MVTheme text];
-    self.addressField.attributedPlaceholder =
-        [[NSAttributedString alloc] initWithString:[MVLang t:@"Search or enter address"]
-                                        attributes:@{NSForegroundColorAttributeName: [MVTheme secondaryText]}];
-
-    self.backButton = [self toolbarButton:@"chevron.backward" action:@selector(goBack)];
-    self.forwardButton = [self toolbarButton:@"chevron.forward" action:@selector(goForward)];
-    self.favoriteButton = [self toolbarButton:@"star" action:@selector(toggleFavorite)];
-
-    // Always-available download for the page currently open. The button injected
-    // into the page can be covered by the site's own overlay, so the user needs a
-    // control the page cannot take away.
-    self.downloadButton = [self toolbarButton:@"arrow.down.circle" action:@selector(downloadCurrentPage)];
-
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[self.backButton, self.forwardButton, self.addressField, self.downloadButton, self.favoriteButton]];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.spacing = 8;
-    row.alignment = UIStackViewAlignmentCenter;
-    [self.view addSubview:row];
-
-    // "Media found" bar, hidden until the sniffer has something to offer.
-    self.foundBar = [UIStackView new];
-    self.foundBar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.foundBar.axis = UILayoutConstraintAxisHorizontal;
-    self.foundBar.spacing = 10;
-    self.foundBar.alignment = UIStackViewAlignmentCenter;
-    self.foundBar.backgroundColor = [MVTheme card];
-    self.foundBar.layer.cornerRadius = 12;
-    self.foundBar.layer.cornerCurve = kCACornerCurveContinuous;
-    self.foundBar.layoutMarginsRelativeArrangement = YES;
-    self.foundBar.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(8, 12, 8, 12);
-    self.foundBar.hidden = YES;
-    // It sits in the layout chain, so an empty bar must take no space at all.
-    self.foundHeight = [self.foundBar.heightAnchor constraintEqualToConstant:0];
-    self.foundHeight.active = YES;
-
-    self.foundLabel = [UILabel new];
-    self.foundLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-    self.foundLabel.textColor = [MVTheme text];
-    self.foundLabel.numberOfLines = 2;
-    self.foundLabel.text = [MVLang t:@"Media found"];
-    UIButton *grab = [UIButton buttonWithType:UIButtonTypeSystem];
-    [grab setTitle:[MVLang t:@"Download"] forState:UIControlStateNormal];
-    [grab addTarget:self action:@selector(downloadFound) forControlEvents:UIControlEventTouchUpInside];
-    [MVTheme applyPrimaryButtonStyle:grab];
-    [grab.heightAnchor constraintEqualToConstant:34].active = YES;
-    [grab.widthAnchor constraintGreaterThanOrEqualToConstant:100].active = YES;
-    [self.foundBar addArrangedSubview:self.foundLabel];
-    [self.foundBar addArrangedSubview:grab];
-    [self.view addSubview:self.foundBar];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [row.topAnchor constraintEqualToAnchor:self.loadBar.bottomAnchor constant:8],
-        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
-        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
-        [self.foundBar.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:8],
-        [self.foundBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
-        [self.foundBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
-        // Anchors the whole chain: web view, bar, address row and found bar all
-        // derive their height from this one relationship to the safe area.
-        [self.foundBar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-8],
-        [self.addressField.heightAnchor constraintEqualToConstant:36],
-        [self.backButton.widthAnchor constraintEqualToConstant:32],
-        [self.forwardButton.widthAnchor constraintEqualToConstant:32],
-        [self.favoriteButton.widthAnchor constraintEqualToConstant:32],
-        [self.downloadButton.widthAnchor constraintEqualToConstant:32],
-    ]];
-
-}
-
-- (UIButton *)toolbarButton:(NSString *)symbol action:(SEL)action {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
-    b.tintColor = [MVTheme accent];
-    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return b;
-}
-
-#pragma mark - Navigation
-
-- (void)loadAddress:(NSString *)text {
-    NSString *address = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (!address.length) return;
-    if (![address containsString:@"://"]) {
-        // A bare word is a search, anything with a dot is a host.
-        if ([address containsString:@"."] && ![address containsString:@" "]) {
-            address = [@"https://" stringByAppendingString:address];
-        } else {
-            NSString *q = [address stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-            address = [@"https://m.duckduckgo.com/?q=" stringByAppendingString:q ?: @""];
-        }
-    }
-    NSURL *url = [NSURL URLWithString:address];
-    if (!url) return;
-    [self.web loadRequest:[NSURLRequest requestWithURL:url]];
-}
-
-- (BOOL)textFieldShouldReturn:(UITextField *)textField {
-    [self loadAddress:textField.text];
-    [textField resignFirstResponder];
-    return YES;
-}
-
-- (void)goBack { if (self.web.canGoBack) [self.web goBack]; }
-- (void)goForward { if (self.web.canGoForward) [self.web goForward]; }
-
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
-    if ([keyPath isEqualToString:@"estimatedProgress"]) {
-        double p = self.web.estimatedProgress;
-        self.loadBar.hidden = p >= 1.0;
-        [self.loadBar setProgress:(float)p animated:YES];
-    } else {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-    }
-}
-
-- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
-    self.addressField.text = webView.URL.absoluteString;
-    self.backButton.enabled = webView.canGoBack;
-    self.forwardButton.enabled = webView.canGoForward;
-    [self updateFavoriteButton];
-    [MVBrowserHistory.shared record:webView.URL.absoluteString title:webView.title];
-}
-
-- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    if (error.code == NSURLErrorCancelled) return;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Failed"]
-                                                                  message:error.localizedDescription
-                                                           preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-/// Keep the browsing inside the app instead of jumping to Safari.
-- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
-        decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
-    NSString *scheme = action.request.URL.scheme.lowercaseString;
-    if (scheme && ![@[@"http", @"https", @"about", @"data", @"blob", @"file"] containsObject:scheme]) {
-        decisionHandler(WKNavigationActionPolicyCancel);
-        return;
-    }
-    decisionHandler(WKNavigationActionPolicyAllow);
-}
-
-/// Popups (sign-in windows, target="_blank" links) open as a real child web view
-/// sharing the session, so the flow continues instead of silently doing nothing.
-- (WKWebView *)webView:(WKWebView *)webView
-    createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
-               forNavigationAction:(WKNavigationAction *)action
-                    windowFeatures:(WKWindowFeatures *)features {
-    if (!action.request.URL) return nil;
-
-    // Keep the popup on our own store, otherwise the login would land in a
-    // different cookie jar and the sign-in would not stick.
-    configuration.websiteDataStore = [MVBrowserViewController sharedDataStore];
-
-    MVBrowserViewController *popup = [MVBrowserViewController new];
-    popup.initialURL = action.request.URL.absoluteString;
-    popup.isPopup = YES;
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:popup];
-    [self presentViewController:nav animated:YES completion:nil];
-    return nil;
-}
-
-#pragma mark - Sniffer
-
-- (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)message {
-    if (![message.name isEqualToString:kMessageHandler]) return;
-    NSDictionary *body = [message.body isKindOfClass:NSDictionary.class] ? message.body : nil;
-    if (!body) return;
-    NSString *type = body[@"type"];
-    NSString *src = [body[@"src"] isKindOfClass:NSString.class] ? body[@"src"] : @"";
-
-    if ([type isEqualToString:@"tap"]) {
-        // The button on the video: the user has decided, so download it now. A
-        // blob: source (what YouTube's player uses) cannot be fetched, and on some
-        // players currentSrc is empty; both fall through to the page address,
-        // which the engine knows how to extract. The old guard returned early on
-        // an empty src, so the tap was dropped and the button looked dead.
-        NSString *target = [self looksLikeMedia:src] ? src : self.web.URL.absoluteString;
-        if (!target.length) return;
-        [self startDownloadOf:target title:body[@"title"]];
-    } else if ([type isEqualToString:@"found"]) {
-        if (!src.length || [src hasPrefix:@"blob:"]) return;  // blob URLs cannot be fetched
-        self.foundURL = src;
-        self.foundTitle = body[@"title"];
-        [self showFoundBar];
-    }
-}
-
-- (void)showFoundBar {
-    if (self.foundBar.hidden) {
-        self.foundBar.hidden = NO;
-        self.foundHeight.constant = 46;
-        [UIView animateWithDuration:0.2 animations:^{ self.foundBar.alpha = 1; }];
-    }
-    NSString *name = self.foundTitle.length ? self.foundTitle : [MVLang t:@"Media found"];
-    self.foundLabel.text = name;
-}
-
-/// The toolbar's Download button. Prefers a media URL the sniffer found; falls
-/// back to the page address, which the engine knows how to extract.
-- (void)downloadCurrentPage {
-    NSString *target = self.foundURL.length ? self.foundURL : self.web.URL.absoluteString;
-    if (!target.length) return;
-    [self startDownloadOf:target title:self.foundTitle ?: self.web.title];
-}
-
-- (void)downloadFound {
-    if (self.foundURL.length) [self startDownloadOf:self.foundURL title:self.foundTitle];
-}
-
-/// Downloads `url` as media when it is a direct stream, otherwise hands the page
-/// address to the engine, which knows how to extract a page's video.
-- (void)startDownloadOf:(NSString *)url title:(NSString *)title {
-    NSString *target = [self looksLikeMedia:url] ? url : self.web.URL.absoluteString;
-    if (!target.length) return;
-    [self showDownloadSheetFor:target title:title];
-}
-
-/// The quality sheet. Shown immediately, with no network round trip first: a
-/// sheet that waits on yt-dlp leaves the user staring at a spinner when the
-/// probe stalls.
-- (void)showDownloadSheetFor:(NSString *)url title:(NSString *)title {
-    UIAlertController *sheet =
-        [UIAlertController alertControllerWithTitle:(title.length ? title : [MVLang t:@"Download"])
-                                            message:nil
-                                     preferredStyle:UIAlertControllerStyleActionSheet];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Best available"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self queueDownload:url quality:@"best"];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"1080p" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self queueDownload:url quality:@"1080"];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"720p" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self queueDownload:url quality:@"720p"];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"480p" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self queueDownload:url quality:@"480p"];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Audio only (M4A)"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self queueDownload:url quality:@"audio"];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-
-    sheet.popoverPresentationController.sourceView = self.view;
-    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-
-
-- (BOOL)looksLikeMedia:(NSString *)url {
-    static NSArray *needles;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        needles = @[@".mp4", @".m4v", @".mov", @".webm", @".mkv", @".m3u8", @".mp3", @".m4a", @"/videoplayback"];
-    });
-    NSString *lower = url.lowercaseString;
-    for (NSString *n in needles) if ([lower containsString:n]) return YES;
-    return NO;
-}
-
-- (void)queueDownload:(NSString *)url quality:(NSString *)quality {
-    [[MVDownloadEngine shared] downloadURL:url quality:quality completion:^(NSString *filePath, NSString *error) {
-        if (error && !filePath.length) {
-            NSLog(@"MoodyVid: browser download failed: %@", error);
-        }
-    }];
-}
-
-#pragma mark - Favorites
-
-- (void)toggleFavorite {
-    NSString *address = self.web.URL.absoluteString;
-    if (!address.length) return;
-    BOOL wasFavorite = [MVBrowserHistory.shared isFavorite:address];
-    [MVBrowserHistory.shared setFavorite:address title:self.web.title favorite:!wasFavorite];
-    [self updateFavoriteButton];
-}
-
-- (void)updateFavoriteButton {
-    BOOL fav = [MVBrowserHistory.shared isFavorite:self.web.URL.absoluteString];
-    [self.favoriteButton setImage:[UIImage systemImageNamed:fav ? @"star.fill" : @"star"] forState:UIControlStateNormal];
-}
-
-#pragma mark - Language
 
 - (void)refreshText {
     self.title = [MVLang t:@"Browser"];
     self.addressField.attributedPlaceholder =
         [[NSAttributedString alloc] initWithString:[MVLang t:@"Search or enter address"]
                                         attributes:@{NSForegroundColorAttributeName: [MVTheme secondaryText]}];
+    self.clipboardLabel.text = [MVLang t:@"A link is on the clipboard — tap to open it"];
+    self.sniffButton.accessibilityLabel = [MVLang t:@"Found media"];
     self.view.semanticContentAttribute = MVLang.shared.isRTL
         ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [MVTheme applyWallpaperTo:self.view];
-    [self refreshText];
-}
-
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    for (CALayer *layer in [self.view.layer.sublayers copy]) {
-        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
-    }
-}
-
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
-        [MVTheme refreshWallpaperIfPattern:self.view];
-    }
-}
-
-- (void)dealloc {
-    [self.web removeObserver:self forKeyPath:@"estimatedProgress"];
-    [self.web.configuration.userContentController removeScriptMessageHandlerForName:kMessageHandler];
 }
 
 @end

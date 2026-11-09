@@ -3,11 +3,16 @@
 #import "MVPlayerCenter.h"
 #import "MVDownloadStore.h"
 #import "MVDownloadEngine.h"
+#import "MVDownloadTask.h"
+#import "MVTaskStore.h"
+#import "MVDownloadManager.h"
+#import "MVTaskCell.h"
 #import "MVPaths.h"
 #import "MVLang.h"
 #import "MVTheme.h"
 
 static NSString *const kDoneCell = @"MVDoneCell";
+static NSString *const kTaskCell = @"MVTaskCell";
 
 // The round button at the end of a row: a progress ring with a stop square while
 // the download runs, and a plain icon once it has finished.
@@ -211,6 +216,117 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
 @end
 
+#pragma mark - Unified row
+
+/// A row in the Downloads list. The list shows two kinds of download: the
+/// records the Python/yt-dlp engine wrote, and the tasks the new manager owns
+/// (direct files today, HLS and torrents later). Wrapping both lets one table
+/// render them without either engine knowing about the other.
+typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
+
+@interface MVDownloadRow : NSObject
+@property (nonatomic) MVRowKind kind;
+@property (nonatomic, strong, nullable) MVDownloadRecord *record;
+@property (nonatomic, strong, nullable) MVDownloadTask *task;
+@property (nonatomic, readonly) NSString *identifier;
+@property (nonatomic, readonly) BOOL isActive;
+@property (nonatomic, readonly) BOOL isFinished;
+@property (nonatomic, readonly) NSTimeInterval createdAt;
+@property (nonatomic, readonly) NSString *title;
+@property (nonatomic, readonly) NSString *url;
+@property (nonatomic, readonly) NSString *path;
+@property (nonatomic, readonly) NSString *statusText;
+@property (nonatomic, readonly) NSString *sourceSymbol;
++ (instancetype)rowWithRecord:(MVDownloadRecord *)record;
++ (instancetype)rowWithTask:(MVDownloadTask *)task;
+
+/// The status line shown under a task's title in its detail sheet.
++ (NSString *)detailMessageForTask:(MVDownloadTask *)task;
+@end
+
+@implementation MVDownloadRow
+
++ (instancetype)rowWithRecord:(MVDownloadRecord *)record {
+    MVDownloadRow *row = [MVDownloadRow new];
+    row.kind = MVRowKindRecord;
+    row.record = record;
+    return row;
+}
+
++ (instancetype)rowWithTask:(MVDownloadTask *)task {
+    MVDownloadRow *row = [MVDownloadRow new];
+    row.kind = MVRowKindTask;
+    row.task = task;
+    return row;
+}
+
+- (NSString *)identifier {
+    return self.kind == MVRowKindRecord ? self.record.identifier : self.task.identifier;
+}
+
+- (BOOL)isActive {
+    return self.kind == MVRowKindRecord ? self.record.isActive : self.task.isActive;
+}
+
+- (BOOL)isFinished {
+    return self.kind == MVRowKindRecord ? self.record.isFinished : self.task.isFinished;
+}
+
+- (NSTimeInterval)createdAt {
+    return self.kind == MVRowKindRecord ? self.record.createdAt : self.task.createdAt;
+}
+
+- (NSString *)title {
+    NSString *value = self.kind == MVRowKindRecord ? self.record.title : self.task.title;
+    return value.length ? value : self.url;
+}
+
+- (NSString *)url {
+    return self.kind == MVRowKindRecord ? self.record.url : self.task.url;
+}
+
+- (NSString *)path {
+    return self.kind == MVRowKindRecord ? self.record.path : self.task.path;
+}
+
+- (NSString *)statusText {
+    if (self.kind == MVRowKindRecord) return self.record.error;
+    return self.task.error ?: self.task.phase;
+}
+
+/// A small glyph that says which engine produced the row, so a torrent or a
+/// stream is recognisable at a glance.
+- (NSString *)sourceSymbol {
+    if (self.kind == MVRowKindRecord) return nil;
+    switch (self.task.source) {
+        case MVTaskSourceHLS:     return @"dot.radiowaves.left.and.right";
+        case MVTaskSourceTorrent: return @"arrow.up.arrow.down.circle";
+        default:                  return nil;
+    }
+}
+
+/// "MP4 · 12.3 MB · 6 connections · 3.1 MB/s" for a task's detail sheet.
++ (NSString *)detailMessageForTask:(MVDownloadTask *)task {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    switch (task.source) {
+        case MVTaskSourceDirect:  [parts addObject:[MVLang t:@"Direct file"]]; break;
+        case MVTaskSourceHLS:     [parts addObject:[MVLang t:@"Stream (HLS)"]]; break;
+        case MVTaskSourceTorrent: [parts addObject:[MVLang t:@"Torrent"]]; break;
+        case MVTaskSourceYtDlp:   [parts addObject:@"yt-dlp"]; break;
+    }
+    if (task.totalBytes > 0) [parts addObject:[MVPaths formatBytes:task.totalBytes]];
+    if (task.state == MVTaskStateRunning) {
+        [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)task.connections,
+                          [MVLang t:@"Connections"]]];
+        if (task.speed > 0) [parts addObject:[MVPaths formatSpeed:task.speed]];
+        if (task.eta > 0) [parts addObject:[MVPaths formatDuration:task.eta]];
+    }
+    if (task.error.length) [parts addObject:task.error];
+    return [parts componentsJoinedByString:@" · "];
+}
+
+@end
+
 @interface MVDownloadsViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *emptyLabel;
@@ -238,6 +354,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.35];
     self.tableView.tableFooterView = [UIView new];
     [self.tableView registerClass:MVDownloadCell.class forCellReuseIdentifier:kDoneCell];
+    [self.tableView registerClass:MVTaskCell.class forCellReuseIdentifier:kTaskCell];
     // A slim header that shows how many items are still waiting, so the queue
     // reads like a list instead of a mystery: "3 waiting · 2 downloading".
     self.queueLabel = [UILabel new];
@@ -281,6 +398,12 @@ static NSString *const kDoneCell = @"MVDoneCell";
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(storeDidChange)
                                                name:MVDownloadStoreDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(storeDidChange)
+                                               name:MVTaskStoreDidChangeNotification object:nil];
+    // The browser's sniffer posts this when it queues a download, so tapping
+    // "Download" can bring the user to the list that now holds the new row.
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(showNewestTask)
+                                               name:@"MVShowDownloadsTabNotification" object:nil];
     for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
     }
@@ -309,7 +432,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 }
 
 - (void)reloadList {
-    self.shownIdentifiers = [[self records] valueForKey:@"identifier"];
+    self.shownIdentifiers = [[self rows] valueForKey:@"identifier"];
     [self updateQueueLabel];
     [self.tableView reloadData];
 }
@@ -317,11 +440,15 @@ static NSString *const kDoneCell = @"MVDoneCell";
 /// The queue summary line above the rows: how many are still downloading and
 /// how many are waiting their turn. Hidden entirely when nothing is running.
 - (void)updateQueueLabel {
-    NSArray<MVDownloadRecord *> *all = MVDownloadStore.shared.records;
     NSUInteger active = 0, waiting = 0;
-    for (MVDownloadRecord *r in all) {
-        if (r.state == MVDownloadStateActive) active++;
-        if (r.state == MVDownloadStateWaiting) waiting++;
+    for (MVDownloadRow *row in [self rows]) {
+        if (row.kind == MVRowKindRecord) {
+            if (row.record.state == MVDownloadStateActive) active++;
+            if (row.record.state == MVDownloadStateWaiting) waiting++;
+        } else {
+            if (row.task.state == MVTaskStateRunning) active++;
+            if (row.task.state == MVTaskStateQueued) waiting++;
+        }
     }
     NSString *text = @"";
     if (active || waiting) {
@@ -338,7 +465,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
 /// would cancel a tap on the stop button halfway through, so when the same rows
 /// are still in the same order only the visible cells are refreshed in place.
 - (void)storeDidChange {
-    NSArray<MVDownloadRecord *> *now = [self records];
+    NSArray<MVDownloadRow *> *now = [self rows];
     BOOL sameRows = (now.count == self.shownIdentifiers.count);
     for (NSUInteger i = 0; sameRows && i < now.count; i++) {
         if (![now[i].identifier isEqualToString:self.shownIdentifiers[i]]) sameRows = NO;
@@ -357,17 +484,23 @@ static NSString *const kDoneCell = @"MVDoneCell";
     self.emptyLabel.hidden = now.count > 0;
 }
 
-- (NSArray<MVDownloadRecord *> *)records {
-    // One list, newest first, with whatever is still downloading pinned to the
-    // top so it is the first thing seen. There is no Active/Completed split any
-    // more: a row shows its own progress bar while it is still running.
-    NSArray *all = [MVDownloadStore.shared.records sortedArrayUsingComparator:^NSComparisonResult(MVDownloadRecord *a, MVDownloadRecord *b) {
+/// The unified list: the yt-dlp records and the manager's tasks in one place,
+/// newest first, with anything still running pinned to the top.
+- (NSArray<MVDownloadRow *> *)rows {
+    NSMutableArray<MVDownloadRow *> *all = [NSMutableArray array];
+    for (MVDownloadRecord *record in MVDownloadStore.shared.records) {
+        [all addObject:[MVDownloadRow rowWithRecord:record]];
+    }
+    for (MVDownloadTask *task in MVTaskStore.shared.tasks) {
+        [all addObject:[MVDownloadRow rowWithTask:task]];
+    }
+    [all sortUsingComparator:^NSComparisonResult(MVDownloadRow *a, MVDownloadRow *b) {
         if (a.isActive != b.isActive) return a.isActive ? NSOrderedAscending : NSOrderedDescending;
         return a.createdAt > b.createdAt ? NSOrderedAscending : NSOrderedDescending;
     }];
     if (!self.filter.length) return all;
-    NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(MVDownloadRecord *r, NSDictionary *b) {
-        NSString *hay = [NSString stringWithFormat:@"%@ %@", r.title ?: @"", r.url ?: @""];
+    NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(MVDownloadRow *row, NSDictionary *b) {
+        NSString *hay = [NSString stringWithFormat:@"%@ %@", row.title ?: @"", row.url ?: @""];
         return [hay localizedCaseInsensitiveContainsString:self.filter];
     }];
     return [all filteredArrayUsingPredicate:p];
@@ -379,43 +512,76 @@ static NSString *const kDoneCell = @"MVDoneCell";
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    NSArray *records = [self records];
-    self.emptyLabel.hidden = records.count > 0;
-    return records.count;
+    NSArray *rows = [self rows];
+    self.emptyLabel.hidden = rows.count > 0;
+    return rows.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    MVDownloadRow *row = [self rows][indexPath.row];
+    __weak typeof(self) weakSelf = self;
+
+    if (row.kind == MVRowKindTask) {
+        MVTaskCell *cell = [tableView dequeueReusableCellWithIdentifier:kTaskCell forIndexPath:indexPath];
+        [cell configureWithTask:row.task];
+        __weak MVTaskCell *weakCell = cell;
+        cell.onAction = ^{ [weakSelf taskActionTapped:row.task sourceView:weakCell]; };
+        return cell;
+    }
+
     MVDownloadCell *cell = [tableView dequeueReusableCellWithIdentifier:kDoneCell forIndexPath:indexPath];
-    MVDownloadRecord *record = [self records][indexPath.row];
+    MVDownloadRecord *record = row.record;
     [cell configureWithRecord:record];
 
     // The round button cancels a running download; on a finished row it opens
     // the same menu as tapping the row.
-    __weak typeof(self) weakSelf = self;
     __weak MVDownloadCell *weakCell = cell;
     cell.onAction = ^{
         if (record.isActive) {
             [[MVDownloadEngine shared] cancelDownload:record.identifier];
         } else {
-            [weakSelf showMenuForRecord:record sourceView:weakCell];
+            [weakSelf showMenuForRow:row sourceView:weakCell];
         }
     };
     return cell;
 }
 
+/// The trailing button on a task row: pause while it runs, resume when it is
+/// paused or failed, and the detail menu once it is done.
+- (void)taskActionTapped:(MVDownloadTask *)task sourceView:(UIView *)source {
+    MVDownloadRow *row = [MVDownloadRow rowWithTask:task];
+    switch (task.state) {
+        case MVTaskStateRunning:
+        case MVTaskStateQueued:
+            [[MVDownloadManager shared] pauseTask:task];
+            break;
+        case MVTaskStatePaused:
+        case MVTaskStateFailed:
+            [[MVDownloadManager shared] resumeTask:task];
+            break;
+        default:
+            [self showMenuForRow:row sourceView:source];
+            break;
+    }
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.editingMode) return;
-    [self showMenuForRecord:[self records][indexPath.row] sourceView:[tableView cellForRowAtIndexPath:indexPath]];
+    [self showMenuForRow:[self rows][indexPath.row] sourceView:[tableView cellForRowAtIndexPath:indexPath]];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    MVDownloadRecord *record = [self records][indexPath.row];
-    if (record.isActive) {
+    MVDownloadRow *row = [self rows][indexPath.row];
+    if (row.isActive) {
         UIContextualAction *cancel = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                             title:[MVLang t:@"Cancel"]
                                                                           handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+            if (row.kind == MVRowKindTask) {
+                [[MVDownloadManager shared] cancelTask:row.task deleteFile:NO];
+            } else {
+                [[MVDownloadEngine shared] cancelDownload:row.record.identifier];
+            }
             done(YES);
         }];
         cancel.backgroundColor = [MVTheme danger];
@@ -424,7 +590,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                      title:[MVLang t:@"Delete"]
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-        [self confirmDelete:record];
+        [self confirmDeleteRow:row];
         done(YES);
     }];
     del.backgroundColor = [MVTheme warning];
@@ -436,11 +602,16 @@ static NSString *const kDoneCell = @"MVDoneCell";
     CGPoint point = [gesture locationInView:self.tableView];
     NSIndexPath *indexPath = [self.tableView indexPathForRowAtPoint:point];
     if (!indexPath) return;
-    [self showMenuForRecord:[self records][indexPath.row]
-                 sourceView:[self.tableView cellForRowAtIndexPath:indexPath]];
+    [self showMenuForRow:[self rows][indexPath.row]
+               sourceView:[self.tableView cellForRowAtIndexPath:indexPath]];
 }
 
-- (void)showMenuForRecord:(MVDownloadRecord *)record sourceView:(UIView *)source {
+- (void)showMenuForRow:(MVDownloadRow *)row sourceView:(UIView *)source {
+    if (row.kind == MVRowKindTask) {
+        [self showMenuForTask:row.task sourceView:source];
+        return;
+    }
+    MVDownloadRecord *record = row.record;
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:record.title
                                                                   message:nil
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
@@ -471,15 +642,92 @@ static NSString *const kDoneCell = @"MVDoneCell";
         }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-        [self confirmDelete:record];
+        [self confirmDeleteRow:row];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentMenu:sheet sourceView:source];
+}
 
+/// The detail sheet for a task the manager owns. It offers the actions that make
+/// sense for the task's engine and state.
+- (void)showMenuForTask:(MVDownloadTask *)task sourceView:(UIView *)source {
+    MVDownloadRow *row = [MVDownloadRow rowWithTask:task];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:task.title
+                                                                  message:[MVDownloadRow detailMessageForTask:task]
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+
+    if (task.state == MVTaskStateCompleted && task.path.length) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Play"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self playFileAtPath:task.path title:task.title];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Save to Photos"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] saveToPhotos:task.path completion:^(NSString *fp, NSString *err) {
+                if (fp && !err) [self alert:[MVLang t:@"Saved"] message:[MVLang t:@"Saved to Photos"]];
+                else if (err) [self alert:[MVLang t:@"Failed"] message:err];
+            }];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            UIActivityViewController *share = [[UIActivityViewController alloc]
+                initWithActivityItems:@[[NSURL fileURLWithPath:task.path]] applicationActivities:nil];
+            share.popoverPresentationController.sourceView = source ?: self.view;
+            share.popoverPresentationController.sourceRect = source ? source.bounds : self.view.bounds;
+            [self presentViewController:share animated:YES completion:nil];
+        }]];
+    }
+
+    if (task.state == MVTaskStateRunning || task.state == MVTaskStateQueued) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Pause"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadManager shared] pauseTask:task];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel download"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [[MVDownloadManager shared] cancelTask:task deleteFile:NO];
+        }]];
+    } else if (task.state == MVTaskStatePaused || task.state == MVTaskStateFailed) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Resume"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadManager shared] resumeTask:task];
+        }]];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Copy link"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIPasteboard.generalPasteboard.string = task.url;
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [self confirmDeleteRow:row];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentMenu:sheet sourceView:source];
+}
+
+- (void)presentMenu:(UIAlertController *)sheet sourceView:(UIView *)source {
     // Required on iPad, and harmless on iPhone. CGRect is a struct, so it needs
     // a ternary rather than `?:`.
     sheet.popoverPresentationController.sourceView = source ?: self.view;
     sheet.popoverPresentationController.sourceRect = source ? source.bounds : self.view.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+/// Plays a single file through the shared player, using the whole visible list
+/// as the queue so the mini bar's next/previous still work.
+- (void)playFileAtPath:(NSString *)path title:(NSString *)title {
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    NSInteger index = 0;
+    for (MVDownloadRow *row in [self rows]) {
+        if (!row.isFinished || !row.path.length) continue;
+        NSString *ext = row.path.pathExtension.lowercaseString;
+        if (![@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"] containsObject:ext]) continue;
+        [urls addObject:[NSURL fileURLWithPath:row.path]];
+        [titles addObject:row.title.length ? row.title : row.path.lastPathComponent.stringByDeletingPathExtension];
+        if ([row.path isEqualToString:path]) index = (NSInteger)urls.count - 1;
+    }
+    if (!urls.count) {
+        [self alert:[MVLang t:@"Can't play this file"]
+            message:[MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]];
+        return;
+    }
+    [[MVPlayerCenter shared] playQueue:urls titles:titles fromIndex:index];
+    [[MVPlayerCenter shared] presentCurrentPlayer];
 }
 
 - (void)playFile:(MVDownloadRecord *)record {
@@ -492,7 +740,7 @@ static NSString *const kDoneCell = @"MVDoneCell";
         playable = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"]];
     });
 
-    NSArray<MVDownloadRecord *> *records = [self records];
+    NSArray<MVDownloadRow *> *rows = [self rows];
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
     NSMutableArray<NSString *> *titles = [NSMutableArray array];
     NSInteger index = 0;
@@ -553,16 +801,30 @@ static NSString *const kDoneCell = @"MVDoneCell";
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)confirmDelete:(MVDownloadRecord *)record {
+- (void)confirmDeleteRow:(MVDownloadRow *)row {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Delete this file?"]
                                                                   message:[MVLang t:@"This cannot be undone."]
                                                            preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-        if (record.path.length) [[NSFileManager defaultManager] removeItemAtPath:record.path error:nil];
-        [MVDownloadStore.shared remove:record];
+        if (row.kind == MVRowKindTask) {
+            [[MVDownloadManager shared] removeTask:row.task deleteFile:YES];
+        } else {
+            if (row.path.length) [[NSFileManager defaultManager] removeItemAtPath:row.path error:nil];
+            [MVDownloadStore.shared remove:row.record];
+        }
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+/// Called by the browser when it queues a download: reload and scroll to the
+/// newest row so the tap has a visible result.
+- (void)showNewestTask {
+    [self reloadList];
+    if ([self rows].count) {
+        [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]
+                              atScrollPosition:UITableViewScrollPositionTop animated:YES];
+    }
 }
 
 
@@ -586,12 +848,14 @@ static NSString *const kDoneCell = @"MVDoneCell";
 - (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
                                             forRowAtIndexPath:(NSIndexPath *)indexPath {
     if (editingStyle != UITableViewCellEditingStyleDelete) return;
-    MVDownloadRecord *record = [self records][indexPath.row];
-    if (record.isActive) {
-        [[MVDownloadEngine shared] cancelDownload:record.identifier];
+    MVDownloadRow *row = [self rows][indexPath.row];
+    if (row.kind == MVRowKindTask) {
+        [[MVDownloadManager shared] removeTask:row.task deleteFile:YES];
+    } else if (row.isActive) {
+        [[MVDownloadEngine shared] cancelDownload:row.record.identifier];
     } else {
-        if (record.path.length) [[NSFileManager defaultManager] removeItemAtPath:record.path error:nil];
-        [MVDownloadStore.shared remove:record];
+        if (row.path.length) [[NSFileManager defaultManager] removeItemAtPath:row.path error:nil];
+        [MVDownloadStore.shared remove:row.record];
     }
 }
 

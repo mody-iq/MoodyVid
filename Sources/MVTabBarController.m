@@ -23,6 +23,14 @@
                                                name:MVLangDidChangeNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(applyTheme)
                                                name:MVThemeDidChangeNotification object:nil];
+    // The browser queues a download and then asks the shell to show the list, so
+    // the tap has a visible result even when the browser was opened from Home.
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(showDownloadsTab)
+                                               name:@"MVShowDownloadsTabNotification" object:nil];
+}
+
+- (void)showDownloadsTab {
+    if (self.selectedIndex != 1) self.selectedIndex = 1;
 }
 
 - (UIViewController *)wrap:(UIViewController *)root symbol:(NSString *)symbol {

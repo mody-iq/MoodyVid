@@ -3,6 +3,11 @@
 #import "MVTheme.h"
 #import "MVPaths.h"
 #import "MVPython.h"
+#import "MVAdBlocker.h"
+#import "MVLog.h"
+#import "MVDownloadManager.h"
+#import "MVSnifferStore.h"
+#import <WebKit/WebKit.h>
 
 static NSString *const kCell = @"MVCell";
 static CGFloat const kCorner = 18;
@@ -555,25 +560,31 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     MVMoreSectionLanguage = 0,
     MVMoreSectionAppearance,
     MVMoreSectionWallpaper,
+    MVMoreSectionBrowser,
+    MVMoreSectionDownloads,
     MVMoreSectionStorage,
     MVMoreSectionAbout,
 };
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 7; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case MVMoreSectionLanguage:   return 1;
         case MVMoreSectionAppearance: return 1;
         case MVMoreSectionWallpaper:  return 1;
+        case MVMoreSectionBrowser:    return 3;
+        case MVMoreSectionDownloads:  return 3;
         case MVMoreSectionStorage:    return 2;
-        case MVMoreSectionAbout:      return 3;
+        case MVMoreSectionAbout:      return 4;
         default: return 0;
     }
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
+        case MVMoreSectionBrowser:    return [MVLang t:@"Browser"];
+        case MVMoreSectionDownloads:  return [MVLang t:@"Download engine"];
         case MVMoreSectionStorage:    return [MVLang t:@"Storage"];
         case MVMoreSectionAbout:      return [MVLang t:@"About"];
         default: return nil;
@@ -651,6 +662,45 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
             [cell setHasChevron:YES];
             break;
         }
+        case MVMoreSectionBrowser: {
+            MVDownloadManager *manager = MVDownloadManager.shared;
+            if (indexPath.row == 0) {
+                cell.titleLabel.text = [MVLang t:@"Ad and popup blocking"];
+                cell.subtitleLabel.text = MVAdBlocker.shared.enabled ? [MVLang t:@"On"] : [MVLang t:@"Off"];
+                [cell configureIcon:@"shield.lefthalf.filled" tint:[MVTheme success]];
+                [cell setHasChevron:YES];
+            } else if (indexPath.row == 1) {
+                cell.titleLabel.text = [MVLang t:@"Clear browser data"];
+                cell.subtitleLabel.text = [MVLang t:@"Tap to clear"];
+                [cell configureIcon:@"safari.fill" tint:[MVTheme accent]];
+                [cell setHasChevron:YES];
+            } else {
+                cell.titleLabel.text = [MVLang t:@"Wi-Fi only"];
+                cell.subtitleLabel.text = manager.wifiOnly ? [MVLang t:@"On"] : [MVLang t:@"Off"];
+                [cell configureIcon:@"wifi" tint:[MVTheme warning]];
+            }
+            break;
+        }
+        case MVMoreSectionDownloads: {
+            MVDownloadManager *manager = MVDownloadManager.shared;
+            if (indexPath.row == 0) {
+                cell.titleLabel.text = [MVLang t:@"Connections per download"];
+                cell.subtitleLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)manager.maxConnections];
+                [cell configureIcon:@"arrow.triangle.branch" tint:[MVTheme accent]];
+                [cell setHasChevron:YES];
+            } else if (indexPath.row == 1) {
+                cell.titleLabel.text = [MVLang t:@"Concurrent downloads"];
+                cell.subtitleLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)manager.maxConcurrentTasks];
+                [cell configureIcon:@"square.stack.3d.up.fill" tint:[MVTheme accentSoft]];
+                [cell setHasChevron:YES];
+            } else {
+                cell.titleLabel.text = [MVLang t:@"Speed limit"];
+                cell.subtitleLabel.text = [self speedLimitLabel];
+                [cell configureIcon:@"speedometer" tint:[MVTheme warning]];
+                [cell setHasChevron:YES];
+            }
+            break;
+        }
         case MVMoreSectionStorage: {
             if (indexPath.row == 0) {
                 cell.titleLabel.text = [MVLang t:@"Storage"];
@@ -676,6 +726,11 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
                 cell.titleLabel.text = [MVLang t:@"Developer"];
                 cell.subtitleLabel.text = @"Mohammed-Mutar 🇮🇶";
                 [cell configureIcon:@"person.crop.circle.fill" tint:[MVTheme success]];
+            } else if (indexPath.row == 2) {
+                cell.titleLabel.text = [MVLang t:@"Share logs"];
+                cell.subtitleLabel.text = [MVLang t:@"Send the log to the developer"];
+                [cell configureIcon:@"doc.text.magnifyingglass" tint:[MVTheme accentSoft]];
+                [cell setHasChevron:YES];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Contact"];
                 cell.subtitleLabel.text = [MVLang t:@"Follow me on social media"];
@@ -701,15 +756,151 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionWallpaper:
             [self showWallpaperMenu];
             break;
+        case MVMoreSectionBrowser:
+            if (indexPath.row == 0) [self toggleAdBlock];
+            else if (indexPath.row == 1) [self confirmClearBrowserData];
+            else [self toggleWifiOnly];
+            break;
+        case MVMoreSectionDownloads:
+            if (indexPath.row == 0) [self showConnectionsMenu];
+            else if (indexPath.row == 1) [self showConcurrentMenu];
+            else [self showSpeedLimitMenu];
+            break;
         case MVMoreSectionStorage:
             if (indexPath.row == 1) [self clearCache];
             break;
         case MVMoreSectionAbout:
-            if (indexPath.row == 2) [self showContactSheet];
+            if (indexPath.row == 2) [self shareLogs];
+            else if (indexPath.row == 3) [self showContactSheet];
             break;
         default:
             break;
     }
+}
+
+#pragma mark - Browser & download settings
+
+- (NSString *)speedLimitLabel {
+    long long limit = MVDownloadManager.shared.speedLimit;
+    if (limit <= 0) return [MVLang t:@"Unlimited"];
+    return [NSString stringWithFormat:@"%@/s", [MVPaths formatBytes:limit]];
+}
+
+- (void)toggleAdBlock {
+    MVAdBlocker.shared.enabled = !MVAdBlocker.shared.enabled;
+    [self.tableView reloadData];
+}
+
+- (void)toggleWifiOnly {
+    MVDownloadManager.shared.wifiOnly = !MVDownloadManager.shared.wifiOnly;
+    [self.tableView reloadData];
+}
+
+- (void)showConnectionsMenu {
+    NSArray<NSNumber *> *options = @[@1, @2, @4, @6, @8, @12, @16];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Connections per download"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSNumber *value in options) {
+        NSString *title = [NSString stringWithFormat:@"%@%@", value, (value.integerValue == (NSInteger)MVDownloadManager.shared.maxConnections) ? @" ✓" : @""];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            MVDownloadManager.shared.maxConnections = value.unsignedIntegerValue;
+            [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentSheet:sheet];
+}
+
+- (void)showConcurrentMenu {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Concurrent downloads"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSNumber *value in @[@1, @2, @3, @4, @5]) {
+        NSString *title = [NSString stringWithFormat:@"%@%@", value, (value.integerValue == (NSInteger)MVDownloadManager.shared.maxConcurrentTasks) ? @" ✓" : @""];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            MVDownloadManager.shared.maxConcurrentTasks = value.unsignedIntegerValue;
+            [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentSheet:sheet];
+}
+
+- (void)showSpeedLimitMenu {
+    NSArray<NSArray *> *options = @[
+        @[[MVLang t:@"Unlimited"], @0],
+        [@[[NSString stringWithFormat:@"256 KB/s"], @(256 * 1024)] mutableCopy],
+        [@[[NSString stringWithFormat:@"512 KB/s"], @(512 * 1024)] mutableCopy],
+        [@[[NSString stringWithFormat:@"1 MB/s"], @(1024 * 1024)] mutableCopy],
+        [@[[NSString stringWithFormat:@"2 MB/s"], @(2 * 1024 * 1024)] mutableCopy],
+        [@[[NSString stringWithFormat:@"5 MB/s"], @(5 * 1024 * 1024)] mutableCopy],
+    ];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Speed limit"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSArray *option in options) {
+        long long value = [option[1] longLongValue];
+        NSString *title = [NSString stringWithFormat:@"%@%@", option[0], (value == MVDownloadManager.shared.speedLimit) ? @" ✓" : @""];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            MVDownloadManager.shared.speedLimit = value;
+            [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentSheet:sheet];
+}
+
+- (void)presentSheet:(UIAlertController *)sheet {
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2,
+                                                                self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+/// Clears cookies, caches and local storage for the in-app browser, plus the
+/// sniffer's per-tab lists. The download history and files are untouched.
+- (void)confirmClearBrowserData {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Clear browser data"]
+                                                                  message:[MVLang t:@"This cannot be undone."]
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Clear browser data"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
+        NSSet *types = [WKWebsiteDataStore allWebsiteDataTypes];
+        NSDate *epoch = [NSDate dateWithTimeIntervalSince1970:0];
+        [store removeDataOfTypes:types modifiedSince:epoch completionHandler:^{
+            MVLogInfo(@"settings: browser data cleared");
+        }];
+        [MVSnifferStore.shared clearAll];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *done = [UIAlertController alertControllerWithTitle:[MVLang t:@"Browser data cleared"]
+                                                                         message:nil
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+            [done addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:done animated:YES completion:nil];
+        });
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+/// Shares the rotating log file, so a failure on the device can be reported
+/// without a computer.
+- (void)shareLogs {
+    NSArray<NSURL *> *urls = [MVLog logFileURLs];
+    if (!urls.count) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Share logs"]
+                                                                      message:[MVLang t:@"No files"]
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:urls applicationActivities:nil];
+    share.popoverPresentationController.sourceView = self.view;
+    share.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2,
+                                                                self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:share animated:YES completion:nil];
 }
 
 - (void)showContactSheet {
