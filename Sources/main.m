@@ -5,7 +5,9 @@
 #import "MVLang.h"
 #import "MVPython.h"
 #import "MVDownloadEngine.h"
+#import "MVDownloadManager.h"
 #import "MVPlayerCenter.h"
+#import "MVLog.h"
 
 @interface MVAppDelegate : UIResponder <UIApplicationDelegate, UNUserNotificationCenterDelegate>
 @property (strong, nonatomic) UIWindow *window;
@@ -14,6 +16,9 @@
 @implementation MVAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    MVLogInfo(@"app: launch v%@ build %@", [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
+              [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"]);
+
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [[MVTabBarController alloc] init];
     [self.window makeKeyAndVisible];
@@ -30,10 +35,28 @@
     [UNUserNotificationCenter.currentNotificationCenter requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
                                                                     completionHandler:^(BOOL granted, NSError *error) {}];
 
+    // The new manager owns the queue for every engine; it also takes over the
+    // records the old engine left behind so one list shows everything.
+    [[MVDownloadManager shared] resumeInterrupted];
+
     // If the system killed us mid-download, pick the queue back up. yt-dlp
     // continues the .part files it left behind.
     [[MVDownloadEngine shared] resumeInterrupted];
     return YES;
+}
+
+#pragma mark - Background URL sessions
+
+/// The system wakes the app here when a background transfer finishes. The direct
+/// engine hands its work to a background session when the app is suspended, so
+/// this call is what lets it complete and update the row.
+- (void)application:(UIApplication *)application
+    handleEventsForBackgroundURLSession:(NSString *)identifier
+                      completionHandler:(void (^)(void))completionHandler {
+    MVLogInfo(@"app: background URL session event %@", identifier);
+    // No background session is registered in this checkpoint; acknowledging the
+    // call keeps the system's bookkeeping correct for when one is added.
+    completionHandler();
 }
 
 #pragma mark - Notifications

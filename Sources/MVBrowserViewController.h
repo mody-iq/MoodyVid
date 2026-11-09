@@ -3,19 +3,21 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// The in-app browser, opened from the Quick Access tiles on Home.
+/// The in-app browser: a multi-tab WKWebView with a home page, a media sniffer
+/// and a download sheet.
 ///
-/// It is a plain WKWebView with an injected script that finds the video the page
-/// is playing and puts a Download button over it. Some sites hide their stream
-/// behind blob URLs or DRM, so the sniffer also records media requests the page
-/// makes; the user picks from whatever was found.
+/// It is the front door of the app. Any page can be browsed, every media or file
+/// link the page touches is collected, and whatever is found can be sent to the
+/// download manager with one tap. A page whose stream cannot be reached directly
+/// (a blob player, a site yt-dlp knows) is handed to the Python engine instead.
 @interface MVBrowserViewController : UIViewController
 
 /// Opens the browser on `url`. When `url` has no scheme, https:// is assumed.
+/// Re-uses the parked browser when one exists.
 + (void)presentFrom:(UIViewController *)presenter url:(NSString *)url;
 
-/// Sites shown as Quick Access tiles on Home. Each is name, symbol, hex tint and
-/// the address the tile opens.
+/// Sites shown as Quick Access tiles on Home. Derived from the browser's own
+/// shortcut grid so the two lists cannot drift apart.
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)quickAccessSites;
 
 @end
