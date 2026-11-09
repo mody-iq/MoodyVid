@@ -34,7 +34,7 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
 @property (nonatomic, strong) UIStackView *bookmarkList;
 @property (nonatomic, strong) UIStackView *historyList;
 @property (nonatomic, strong) UILabel *historyEmpty;
-@property (nonatomic, strong) UIStackView *bookmarkEmpty;
+@property (nonatomic, strong) UILabel *bookmarkEmpty;
 @end
 
 @implementation MVBrowserHomeView

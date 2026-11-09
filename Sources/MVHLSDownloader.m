@@ -43,7 +43,7 @@ static const NSInteger kMaxSegmentRetries = 3;
 @property (nonatomic, strong) MVDownloadTask *task;
 @property (nonatomic, strong) NSMutableArray<MVHLSSegment *> *segments;
 /// The fMP4 init segment (EXT-X-MAP), if the playlist names one.
-@property (nonatomic, strong, nullable) MVHLSSegment *initSegment;
+@property (nonatomic, strong, nullable) MVHLSSegment *mapSegment;
 @property (nonatomic) BOOL isFMP4;
 @property (nonatomic) BOOL paused;
 @property (nonatomic) BOOL cancelled;
@@ -165,10 +165,10 @@ static const NSInteger kMaxSegmentRetries = 3;
 
         // An fMP4 stream begins with an init segment; it must be written first
         // so the joined file starts with the moov box the media needs.
-        if (job.initSegment) {
+        if (job.mapSegment) {
             NSError *initError = nil;
-            NSData *initData = [self syncGet:job.initSegment.url
-                                     headers:[MVMediaProbe headersForURL:job.initSegment.url
+            NSData *initData = [self syncGet:job.mapSegment.url
+                                     headers:[MVMediaProbe headersForURL:job.mapSegment.url
                                                                  referer:job.task.referer]
                                        error:&initError];
             if (!initData.length) {
@@ -295,7 +295,7 @@ static const NSInteger kMaxSegmentRetries = 3;
         init.byteStart = -1;
         init.byteLength = -1;
         init.key = nil;
-        job.initSegment = init;
+        job.mapSegment = init;
         job.isFMP4 = YES;
     }
     // Drop any segment whose URI line never arrived (malformed playlist).
@@ -408,7 +408,7 @@ static const NSInteger kMaxSegmentRetries = 3;
     task.phase = [MVLang t:@"Joining segments"];
 
     NSArray<MVHLSSegment *> *segments = [job.segments copy];
-    MVHLSSegment *initSegment = job.initSegment;
+    MVHLSSegment *mapSegment = job.mapSegment;
     BOOL isFMP4 = job.isFMP4;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSFileManager *fm = NSFileManager.defaultManager;
@@ -417,7 +417,7 @@ static const NSInteger kMaxSegmentRetries = 3;
         [fm createFileAtPath:joined contents:nil attributes:nil];
         NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:joined];
         BOOL ok = (out != nil);
-        if (initSegment) {
+        if (mapSegment) {
             NSData *initData = [NSData dataWithContentsOfFile:[self segmentPathForJob:job index:-1]];
             if (initData.length) [out writeData:initData];
         }
