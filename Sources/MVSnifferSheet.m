@@ -116,7 +116,8 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
     [parts addObject:[MVLang t:[MVSnifferItem titleKeyForKind:item.kind]]];
     if (item.totalBytes > 0) [parts addObject:[MVPaths formatBytes:item.totalBytes]];
     else if (!item.probed) [parts addObject:[MVLang t:@"Checking…"]];
-    if (item.kind == MVSniffKindHLS || item.kind == MVSniffKindDASH) {
+    // HLS has an engine now; only DASH and torrent are still pending.
+    if (item.kind == MVSniffKindDASH || item.kind == MVSniffKindTorrent) {
         [parts addObject:[MVLang t:@"Later update"]];
     }
     self.detailLabel.text = [parts componentsJoinedByString:@" • "];
