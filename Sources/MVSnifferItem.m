@@ -167,7 +167,7 @@ static NSDictionary<NSString *, NSNumber *> *MVKindByExtension(void) {
     NSURLComponents *components = [NSURLComponents componentsWithString:self.url];
     NSString *last = components.path.lastPathComponent;
     if (last.length && ![last isEqualToString:@"/"]) {
-        return last.removingPercentEncoding ?: last;
+        return [last stringByRemovingPercentEncoding] ?: last;
     }
     return components.host ?: self.url;
 }

@@ -1094,7 +1094,7 @@ static id gParkedObserver = nil;
     configuration.wraps = YES;
     configuration.caseSensitive = NO;
     __weak typeof(self) weakSelf = self;
-    [self.activeTab.webView findString:text configuration:configuration completionHandler:^(WKFindResult *result) {
+    [self.activeTab.webView findString:text withConfiguration:configuration completionHandler:^(WKFindResult *result) {
         if (!result.matchFound) [weakSelf toast:[MVLang t:@"Not found"]];
     }];
 }
