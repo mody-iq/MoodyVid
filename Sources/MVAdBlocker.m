@@ -19,6 +19,15 @@ static NSString *const kRulesTemplate = @""
 "{\"trigger\":{\"url-filter\":\".*\"},\"action\":{\"type\":\"css-display-none\",\"selector\":\"iframe[src*='ads'],iframe[src*='doubleclick'],iframe[src*='googlesyndication'],iframe[src*='adservice'],iframe[id*='google_ads'],iframe[class*='ad-'],div[id^='div-gpt-ad'],div[class*='adsbygoogle'],div[class*='ad-container'],div[class*='ad-wrapper'],div[class*='sponsored'],div[id*='taboola'],div[id*='outbrain'],ins.adsbygoogle,.adsbygoogle\"}}\n"
 "]\n";
 
+/// A second, deliberately tiny list. WebKit rejects a whole list when any single
+/// rule fails to compile, so when the full list is refused the blocker falls back
+/// to these rules instead of leaving the browser with no blocking at all.
+static NSString *const kRulesFallback = @""
+"[\n"
+"{\"trigger\":{\"url-filter\":\".*\",\"if-domain\":[\"*doubleclick.net\",\"*googlesyndication.com\",\"*googleadservices.com\",\"*google-analytics.com\",\"*googletagmanager.com\",\"*outbrain.com\",\"*taboola.com\",\"*criteo.com\",\"*adnxs.com\",\"*amazon-adsystem.com\",\"*propellerads.com\",\"*onclickads.net\",\"*adsterra.com\"]},\"action\":{\"type\":\"block\"}},\n"
+"{\"trigger\":{\"url-filter\":\".*\"},\"action\":{\"type\":\"css-display-none\",\"selector\":\"ins.adsbygoogle,.adsbygoogle,iframe[src*='doubleclick'],iframe[src*='googlesyndication']\"}}\n"
+"]\n";
+
 @implementation MVAdBlocker {
     WKContentRuleList *_list;
     BOOL _compiling;
@@ -54,18 +63,31 @@ static NSString *const kRulesTemplate = @""
 - (void)prepare {
     if (_list || _compiling || !self.enabled) return;
     _compiling = YES;
+    [self compileRules:kRulesTemplate identifier:kRuleListID fallback:YES];
+}
 
+/// WebKit refuses a whole list when one rule does not compile. A rejected list is
+/// retried once with a minimal, known-good set, so a bad rule degrades blocking
+/// instead of disabling it.
+- (void)compileRules:(NSString *)rules identifier:(NSString *)identifier fallback:(BOOL)allowFallback {
     // A fresh compile is needed after a WebKit data reset, so the list is always
     // built from source rather than assumed to be in the store.
-    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:kRuleListID
-                                                      encodedContentRuleList:kRulesTemplate
+    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:identifier
+                                                      encodedContentRuleList:rules
                                                            completionHandler:^(WKContentRuleList *ruleList, NSError *error) {
-        self->_compiling = NO;
         if (error || !ruleList) {
-            MVLogWarn(@"adblock: compile failed: %@", error.localizedDescription);
+            MVLogWarn(@"adblock: compile failed (%@): %@", identifier, error.localizedDescription);
+            if (allowFallback) {
+                [self compileRules:kRulesFallback
+                        identifier:[kRuleListID stringByAppendingString:@"Basic"]
+                          fallback:NO];
+                return;
+            }
+            self->_compiling = NO;
             [self flushWaiters:nil];
             return;
         }
+        self->_compiling = NO;
         self->_list = ruleList;
         MVLogInfo(@"adblock: rule list %@ compiled", ruleList.identifier);
         [self flushWaiters:ruleList];
