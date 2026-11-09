@@ -449,7 +449,7 @@ didReceiveResponse:(NSURLResponse *)response
     if (!segment) return;
 
     NSData *chunk = [data copy];
-    segment.written += (long long)chunk.length;
+    @synchronized (segment) { segment.written += (long long)chunk.length; }
 
     dispatch_async(_writeQueue, ^{
         NSFileHandle *handle = segment.handle;
@@ -510,7 +510,9 @@ didCompleteWithError:(NSError *)error {
         return;
     }
     // Short read: the segment did not reach its end.
-    if (segment.expectedLength > 0 && segment.written < segment.expectedLength) {
+    long long written;
+    @synchronized (segment) { written = segment.written; }
+    if (segment.expectedLength > 0 && written < segment.expectedLength) {
         [self segmentFailedForTask:urlTask message:[MVLang t:@"Download incomplete"]];
         return;
     }
@@ -575,7 +577,9 @@ didCompleteWithError:(NSError *)error {
     long long done = 0, total = 0;
     for (MVSegment *segment in transfer.segments) {
         long long expected = segment.expectedLength;
-        done += (expected > 0) ? MIN(segment.written, expected) : segment.written;
+        long long written;
+        @synchronized (segment) { written = segment.written; }
+        done += (expected > 0) ? MIN(written, expected) : written;
         total += MAX(0, expected);
     }
     transfer.task.doneBytes = done;
@@ -680,6 +684,9 @@ didCompleteWithError:(NSError *)error {
     }
 
     if (!ok) {
+        // Do not leave a half-joined file at the final path: the next attempt
+        // would overwrite it anyway, but a stray file confuses the user now.
+        if (![fm fileExistsAtPath:task.path ?: @""]) [fm removeItemAtPath:final error:nil];
         [self fail:transfer message:[MVLang t:@"Could not save the file"]];
         return;
     }
