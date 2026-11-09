@@ -13,6 +13,22 @@ PKGS="$BUILD_DIR/app_packages"
 
 echo "== SDK: $SDK"
 
+# Fetch a URL to a path, retrying on any failure. GitHub and SourceForge both
+# return transient 5xx (seen: "curl: (56) ... 504") often enough that a single
+# attempt makes the whole build flaky. Each retry waits longer than the last.
+fetch() {
+  local url="$1" out="$2" attempt=1
+  while [ "$attempt" -le 5 ]; do
+    if curl -fsSL --connect-timeout 30 --retry 2 --retry-delay 5 -o "$out" "$url"; then
+      if [ -s "$out" ]; then return 0; fi
+    fi
+    echo "  fetch attempt $attempt failed for $url; retrying in $((attempt * 10))s"
+    sleep $((attempt * 10))
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 rm -rf "$BUILD_DIR"
 mkdir -p "$APP_DIR" "$PYFW" "$PKGS"
 
@@ -32,7 +48,34 @@ if [ ! -d "$XC" ]; then
 fi
 
 echo "== yt-dlp (nightly build)"
-curl -fsSL --retry 3 -o "$BUILD_DIR/yt-dlp" https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp
+# The nightly asset is the freshest extractor set, which matters because sites
+# break often. The stable release is the fallback when the nightly CDN is down.
+YTDLP_OK=0
+for YTDLP_REPO in yt-dlp/yt-dlp-nightly-builds yt-dlp/yt-dlp; do
+  # The nightly repo publishes only pre-releases, so "latest" would be skipped:
+  # read the newest tag explicitly, then download that release's asset.
+  YTDLP_TAG="$(gh release list --repo "$YTDLP_REPO" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+  if [ -n "$YTDLP_TAG" ] &&
+     gh release download "$YTDLP_TAG" --repo "$YTDLP_REPO" --pattern yt-dlp --dir "$BUILD_DIR" --clobber; then
+    YTDLP_OK=1
+    break
+  fi
+  if fetch "https://github.com/$YTDLP_REPO/releases/latest/download/yt-dlp" "$BUILD_DIR/yt-dlp"; then
+    YTDLP_OK=1
+    break
+  fi
+done
+if [ "$YTDLP_OK" -ne 1 ] || [ ! -s "$BUILD_DIR/yt-dlp" ]; then
+  echo "ERROR: could not download yt-dlp from any source"
+  exit 1
+fi
+# A zipapp starts with a shebang; a truncated download or an HTML error page does
+# not. Catching it here beats a confusing failure during the on-device import.
+if ! head -c 2 "$BUILD_DIR/yt-dlp" | grep -q '#!'; then
+  echo "ERROR: yt-dlp download does not look like a Python zipapp"
+  head -c 200 "$BUILD_DIR/yt-dlp" || true
+  exit 1
+fi
 ls -lh "$BUILD_DIR/yt-dlp"
 
 echo "== Python packages"
@@ -47,7 +90,7 @@ echo "== LAME (static MP3 encoder for iOS)"
 LAME_DIR="$BUILD_DIR/lame"
 LAME_TAR="$BUILD_DIR/lame.tar.gz"
 LAME_VER="3.100"
-curl -fsSL --retry 3 -o "$LAME_TAR" "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-${LAME_VER}.tar.gz"
+fetch "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-${LAME_VER}.tar.gz" "$LAME_TAR"
 mkdir -p "$LAME_DIR"
 tar -xzf "$LAME_TAR" -C "$LAME_DIR" --strip-components=1
 (

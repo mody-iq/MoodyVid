@@ -9,4 +9,8 @@
 - Home brand = `MVGradientLabel` (kCGTextClip gradient text) + glassy badge.
 - Python: MVPython startOnQueue imports `downloader` (yt-dlp) at launch so first download doesn't stall.
 - Traps: `.CGColor` after `?:` mis-binds → resolve colors into locals first. Big heredoc writes truncate; use file_editor/python.
-- See daily logs: 2026-11-06.md, 2026-11-07.md.
+- Browser (rebuilt 2026-11-09): multi-tab (MVBrowserTab, max 8), home page (MVBrowserHome: shortcuts/bookmarks/history), tab grid (MVTabsViewController), sniffer (MVSnifferScript injected at documentStart + MVSnifferStore per tab + MVMediaProbe HEAD/Range with cookies+referer), ad blocker (MVAdBlocker WKContentRuleList), found-media sheet (MVSnifferSheet). Popups without a user gesture are dropped; magnet links route to the manager.
+- Download stack: MVDownloadTask/MVTaskStore (JSON in App Support, atomic, corruption-tolerant), MVDownloadManager (queue: maxConcurrentTasks, maxConnections, speedLimit, wifiOnly), MVFastDownloader (single-connection direct file, Range resume, ETag guard, real throttle). HLS/torrent engines NOT built — they create an honest failed row with a localized reason.
+- Downloads tab shows BOTH engines in one list via `MVDownloadRow` (wraps MVDownloadRecord and MVDownloadTask). Adding a new row kind = extend MVDownloadRow + cellForRow.
+- ObjC API traps hit in CI: `WKWebView findString:withConfiguration:completionHandler:` (NOT `configuration:`); `stringByRemovingPercentEncoding` (NOT `.removingPercentEncoding` property); `WKContentRuleList` has no `.rules`.
+- See daily logs: 2026-11-06.md, 2026-11-09.md.
