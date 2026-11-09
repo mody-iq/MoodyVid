@@ -1,6 +1,7 @@
 #import "MVDownloadManager.h"
 #import "MVTaskStore.h"
 #import "MVFastDownloader.h"
+#import "MVHLSDownloader.h"
 #import "MVPaths.h"
 #import "MVMediaProbe.h"
 #import "MVLang.h"
@@ -39,6 +40,7 @@ static const NSUInteger kDefaultConcurrent = 3;
         _speedLimit = [defaults integerForKey:@"MVSpeedLimit"];
         _wifiOnly = [defaults boolForKey:@"MVWifiOnly"];
         [MVFastDownloader shared].speedLimit = _speedLimit;
+        [MVHLSDownloader shared].speedLimit = _speedLimit;
         _maxConnections = MIN(16, MAX(1, _maxConnections));
         _maxConcurrentTasks = MIN(5, MAX(1, _maxConcurrentTasks));
 
@@ -65,6 +67,7 @@ static const NSUInteger kDefaultConcurrent = 3;
     _speedLimit = MAX(0, speedLimit);
     [NSUserDefaults.standardUserDefaults setInteger:_speedLimit forKey:@"MVSpeedLimit"];
     [MVFastDownloader shared].speedLimit = _speedLimit;
+    [MVHLSDownloader shared].speedLimit = _speedLimit;
 }
 
 - (void)setWifiOnly:(BOOL)wifiOnly {
@@ -129,7 +132,7 @@ static const NSUInteger kDefaultConcurrent = 3;
     switch (item.kind) {
         case MVSniffKindHLS:
         case MVSniffKindDASH:
-            return [self enqueueDeferredItem:item reason:[MVLang t:@"Stream downloads arrive in a later update"]];
+            return [self enqueueHLSItem:item];
         case MVSniffKindTorrent:
             return [self enqueueDeferredItem:item reason:[MVLang t:@"Torrent downloads arrive in a later update"]];
         default:
@@ -143,6 +146,52 @@ static const NSUInteger kDefaultConcurrent = 3;
                     suggestedName:item.suggestedFilename.length ? item.suggestedFilename : item.displayName
                          category:nil
                          expected:item.totalBytes];
+}
+
+/// Queues a stream (HLS or DASH). The HLS engine reads the playlist and joins
+/// the segments; a DASH manifest is not yet understood, so it is deferred with
+/// an honest reason rather than started and failed deep inside the engine.
+- (MVDownloadTask *)enqueueHLSItem:(MVSnifferItem *)item {
+    if (item.kind == MVSniffKindDASH) {
+        return [self enqueueDeferredItem:item reason:[MVLang t:@"DASH streams arrive in a later update"]];
+    }
+    MVDownloadTask *existing = [MVTaskStore.shared taskWithURL:item.url];
+    if (existing) {
+        [MVTaskStore.shared moveToTop:existing];
+        if (existing.state == MVTaskStateFailed) [self resumeTask:existing];
+        return existing;
+    }
+    MVDownloadTask *task = [MVDownloadTask new];
+    task.identifier = NSUUID.UUID.UUIDString;
+    task.source = MVTaskSourceHLS;
+    task.state = MVTaskStateQueued;
+    task.url = item.url;
+    task.referer = item.referer ?: item.pageURL;
+    task.title = item.pageTitle.length ? item.pageTitle : item.displayName;
+    task.suggestedFilename = [self mp4NameForItem:item];
+    task.category = @"Videos";
+    task.totalBytes = MAX(0, item.totalBytes);
+    task.createdAt = NSDate.date.timeIntervalSince1970;
+    task.priority = (NSInteger)task.createdAt;
+    [MVTaskStore.shared add:task];
+    MVLogInfo(@"manager: queued HLS %@", task.title);
+    [self pump];
+    return task;
+}
+
+/// A stream has no filename of its own, so the title becomes one with an .mp4
+/// extension. The segment list cannot be probed for a total size up front, so
+/// the progress bar stays indeterminate until the join finishes.
+- (NSString *)mp4NameForItem:(MVSnifferItem *)item {
+    NSString *base = item.displayName.length ? item.displayName : item.pageTitle;
+    if (!base.length) base = @"stream";
+    base = [MVPaths sanitizeFilename:base];
+    NSString *ext = base.pathExtension.lowercaseString;
+    if ([ext isEqualToString:@"m3u8"] || [ext isEqualToString:@"mpd"] || !ext.length) {
+        base = [base stringByDeletingPathExtension];
+        base = [base stringByAppendingPathExtension:@"mp4"];
+    }
+    return base.length ? base : @"stream.mp4";
 }
 
 /// Records a task for a kind whose engine is not built yet, with an explicit,
@@ -199,7 +248,7 @@ static const NSUInteger kDefaultConcurrent = 3;
 
     for (MVDownloadTask *task in queued) {
         if (self.runningCount >= self.maxConcurrentTasks) break;
-        if (task.source != MVTaskSourceDirect) continue;   // other engines come later
+        if (task.source != MVTaskSourceDirect && task.source != MVTaskSourceHLS) continue;
         [self startTask:task];
     }
     [self updateBackgroundTask];
@@ -214,30 +263,36 @@ static const NSUInteger kDefaultConcurrent = 3;
     [MVTaskStore.shared update:task];
 
     __weak typeof(self) weakSelf = self;
-    [[MVFastDownloader shared] startTask:task
-        progress:^(MVDownloadTask *t) {
-            // The downloader already computed the rate; the manager only stores.
-            [weakSelf updateSpeedForTask:t];
-            [MVTaskStore.shared update:t];
-        }
-        finished:^(MVDownloadTask *t) {
-            typeof(self) self_ = weakSelf;
-            if (!self_) return;
-            t.state = MVTaskStateCompleted;
-            t.error = nil;
-            t.phase = nil;
-            [MVTaskStore.shared update:t];
-            [self_ notifyFinished:t];
-            [self_ pump];
-        }
-        failed:^(MVDownloadTask *t, NSString *message) {
-            typeof(self) self_ = weakSelf;
-            if (!self_) return;
-            t.state = MVTaskStateFailed;
-            t.error = message;
-            [MVTaskStore.shared update:t];
-            [self_ pump];
-        }];
+    void (^onProgress)(MVDownloadTask *) = ^(MVDownloadTask *t) {
+        // The engine already computed the rate; the manager only stores.
+        [weakSelf updateSpeedForTask:t];
+        [MVTaskStore.shared update:t];
+    };
+    void (^onFinished)(MVDownloadTask *) = ^(MVDownloadTask *t) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        t.state = MVTaskStateCompleted;
+        t.error = nil;
+        t.phase = nil;
+        [MVTaskStore.shared update:t];
+        [self_ notifyFinished:t];
+        [self_ pump];
+    };
+    void (^onFailed)(MVDownloadTask *, NSString *) = ^(MVDownloadTask *t, NSString *message) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        t.state = MVTaskStateFailed;
+        t.error = message;
+        t.phase = nil;
+        [MVTaskStore.shared update:t];
+        [self_ pump];
+    };
+
+    if (task.source == MVTaskSourceHLS) {
+        [[MVHLSDownloader shared] startTask:task progress:onProgress finished:onFinished failed:onFailed];
+    } else {
+        [[MVFastDownloader shared] startTask:task progress:onProgress finished:onFinished failed:onFailed];
+    }
     [self updateBackgroundTask];
 }
 
@@ -272,12 +327,10 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 - (void)resumeTask:(MVDownloadTask *)task {
     if (!task) return;
-    if (task.source != MVTaskSourceDirect) {
+    if (task.source != MVTaskSourceDirect && task.source != MVTaskSourceHLS) {
         // Not built yet: keep the honest reason rather than pretending.
         task.state = MVTaskStateFailed;
-        task.error = (task.source == MVTaskSourceTorrent)
-            ? [MVLang t:@"Torrent downloads arrive in a later update"]
-            : [MVLang t:@"Stream downloads arrive in a later update"];
+        task.error = [MVLang t:@"Torrent downloads arrive in a later update"];
         [MVTaskStore.shared update:task];
         return;
     }
@@ -291,7 +344,10 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 - (void)pauseTask:(MVDownloadTask *)task {
     if (!task) return;
-    if (task.state == MVTaskStateRunning) [[MVFastDownloader shared] pauseTask:task];
+    if (task.state == MVTaskStateRunning) {
+        if (task.source == MVTaskSourceHLS) [[MVHLSDownloader shared] pauseTask:task];
+        else [[MVFastDownloader shared] pauseTask:task];
+    }
     if (task.state == MVTaskStateQueued || task.state == MVTaskStateRunning) {
         task.state = MVTaskStatePaused;
         task.speed = 0;
@@ -303,9 +359,11 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 - (void)cancelTask:(MVDownloadTask *)task deleteFile:(BOOL)deleteFile {
     if (!task) return;
-    [[MVFastDownloader shared] cancelTask:task];
+    if (task.source == MVTaskSourceHLS) [[MVHLSDownloader shared] cancelTask:task];
+    else [[MVFastDownloader shared] cancelTask:task];
     if (deleteFile) {
-        [MVFastDownloader removePartFilesForTask:task];
+        if (task.source == MVTaskSourceHLS) [MVHLSDownloader removePartFilesForTask:task];
+        else [MVFastDownloader removePartFilesForTask:task];
         if (task.path.length) [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     task.state = MVTaskStateCancelled;
@@ -317,9 +375,11 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 - (void)removeTask:(MVDownloadTask *)task deleteFile:(BOOL)deleteFile {
     if (!task) return;
-    [[MVFastDownloader shared] cancelTask:task];
+    if (task.source == MVTaskSourceHLS) [[MVHLSDownloader shared] cancelTask:task];
+    else [[MVFastDownloader shared] cancelTask:task];
     if (deleteFile) {
-        [MVFastDownloader removePartFilesForTask:task];
+        if (task.source == MVTaskSourceHLS) [MVHLSDownloader removePartFilesForTask:task];
+        else [MVFastDownloader removePartFilesForTask:task];
         if (task.path.length) [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     [MVTaskStore.shared remove:task];

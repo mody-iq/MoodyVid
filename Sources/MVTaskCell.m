@@ -150,6 +150,13 @@
             break;
     }
 
+    // A phase ("Joining segments", "Merging…") is more useful than a byte count
+    // while the engine is busy with work that moves no bytes.
+    if (task.phase.length) {
+        if (task.totalBytes <= 0) return task.phase;
+        return [NSString stringWithFormat:@"%@ • %@", task.phase,
+                [MVPaths formatBytes:task.totalBytes]];
+    }
     if (task.totalBytes <= 0) {
         if (task.doneBytes > 0) return [NSString stringWithFormat:@"%@ • %@",
                                         [MVPaths formatBytes:task.doneBytes], [MVLang t:@"Downloading"]];
