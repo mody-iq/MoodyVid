@@ -35,7 +35,7 @@ static const NSInteger kMaxSegments = 100000;
 @property (nonatomic, copy, nullable) NSString *base;
 /// SegmentTemplate addressing.
 @property (nonatomic, copy, nullable) NSString *mediaTemplate;
-@property (nonatomic, copy, nullable) NSString *initTemplate;
+@property (nonatomic, copy, nullable) NSString *mapTemplate;
 @property (nonatomic) NSInteger startNumber;
 @property (nonatomic) double timescale;
 @property (nonatomic) double duration;
@@ -45,8 +45,8 @@ static const NSInteger kMaxSegments = 100000;
 @property (nonatomic, copy, nullable) NSString *listInit;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *listURLs;   ///< @{url, range}
 /// SegmentBase addressing: the init byte range inside the single resource.
-@property (nonatomic) long long initStart;
-@property (nonatomic) long long initLength;
+@property (nonatomic) long long mapStart;
+@property (nonatomic) long long mapLength;
 /// YES when a `<BaseURL>` was declared for this representation (or its
 /// AdaptationSet), so a single-resource download has a real media URL.
 @property (nonatomic) BOOL hasBase;
@@ -58,8 +58,8 @@ static const NSInteger kMaxSegments = 100000;
         _timeline = [NSMutableArray array];
         _listURLs = [NSMutableArray array];
         _startNumber = 1;
-        _initStart = -1;
-        _initLength = -1;
+        _mapStart = -1;
+        _mapLength = -1;
     }
     return self;
 }
@@ -277,7 +277,7 @@ didStartElement:(NSString *)elementName
     if ([name isEqualToString:@"segmenttemplate"]) {
         if (_currentRep && _openTemplate) {
             _currentRep.mediaTemplate = _openTemplate[@"media"];
-            _currentRep.initTemplate = _openTemplate[@"initialization"];
+            _currentRep.mapTemplate = _openTemplate[@"initialization"];
             if (_openTemplate[@"startNumber"]) _currentRep.startNumber = [_openTemplate[@"startNumber"] integerValue];
             if (_openTemplate[@"timescale"]) _currentRep.timescale = [_openTemplate[@"timescale"] doubleValue];
             if (_openTemplate[@"duration"]) _currentRep.duration = [_openTemplate[@"duration"] doubleValue];
@@ -310,7 +310,7 @@ didStartElement:(NSString *)elementName
             // A representation may inherit its addressing from the AdaptationSet.
             if (!_currentRep.mediaTemplate.length && _setTemplate) {
                 _currentRep.mediaTemplate = _setTemplate[@"media"];
-                _currentRep.initTemplate = _setTemplate[@"initialization"];
+                _currentRep.mapTemplate = _setTemplate[@"initialization"];
                 if (_setTemplate[@"startNumber"]) _currentRep.startNumber = [_setTemplate[@"startNumber"] integerValue];
                 if (_setTemplate[@"timescale"]) _currentRep.timescale = [_setTemplate[@"timescale"] doubleValue];
                 if (_setTemplate[@"duration"]) _currentRep.duration = [_setTemplate[@"duration"] doubleValue];
@@ -320,7 +320,7 @@ didStartElement:(NSString *)elementName
                 _currentRep.listInit = _setList[@"initialization"];
                 [_currentRep.listURLs addObjectsFromArray:_setList[@"urls"]];
             }
-            if (_currentRep.initStart < 0 && _setBase) [self applySegmentBase:_setBase to:_currentRep];
+            if (_currentRep.mapStart < 0 && _setBase) [self applySegmentBase:_setBase to:_currentRep];
             if (_setHasBase) _currentRep.hasBase = YES;
             _currentRep.isVideo = [self repLooksLikeVideo:_currentRep];
             [self.representations addObject:_currentRep];
@@ -341,8 +341,8 @@ didStartElement:(NSString *)elementName
     if (![range isKindOfClass:NSString.class] || !range.length) return;
     NSArray<NSString *> *parts = [range componentsSeparatedByString:@"-"];
     if (parts.count != 2) return;
-    rep.initStart = parts[0].longLongValue;
-    rep.initLength = parts[1].longLongValue - parts[0].longLongValue + 1;
+    rep.mapStart = parts[0].longLongValue;
+    rep.mapLength = parts[1].longLongValue - parts[0].longLongValue + 1;
 }
 
 /// YES when the representation carries video, by mimeType or codec.
@@ -559,8 +559,8 @@ didStartElement:(NSString *)elementName
 
     // SegmentTemplate: build the URLs from the template.
     if (rep.mediaTemplate.length) {
-        if (rep.initTemplate.length) {
-            job.mapSegment = [self segmentForURL:[self fillTemplate:rep.initTemplate rep:rep number:rep.startNumber time:0]
+        if (rep.mapTemplate.length) {
+            job.mapSegment = [self segmentForURL:[self fillTemplate:rep.mapTemplate rep:rep number:rep.startNumber time:0]
                                            index:-1 start:-1 length:-1];
         }
         NSInteger number = rep.startNumber;
@@ -600,8 +600,8 @@ didStartElement:(NSString *)elementName
     // base must have been declared, otherwise this is a manifest with no media
     // addressing and there is nothing to download.
     if (rep.hasBase) {
-        if (rep.initStart >= 0) {
-            job.mapSegment = [self segmentForURL:base index:-1 start:rep.initStart length:rep.initLength];
+        if (rep.mapStart >= 0) {
+            job.mapSegment = [self segmentForURL:base index:-1 start:rep.mapStart length:rep.mapLength];
         }
         [job.segments addObject:[self segmentForURL:base index:0 start:-1 length:-1]];
         return YES;
