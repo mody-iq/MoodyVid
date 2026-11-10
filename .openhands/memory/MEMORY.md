@@ -19,3 +19,6 @@
 - Build script `scripts/build.sh` fetches yt-dlp nightly by explicit tag then stable, with a `fetch()` retry helper (upstream 504s made builds red).
 - ObjC trap: ANY property whose name starts with `init` (initSegment, initTemplate, initStart…) makes clang read its getter as an init method → rename (mapSegment/mapTemplate/mapStart).
 - See daily logs: 2026-11-06.md, 2026-11-09.md.
+
+- yt-dlp page downloads need the LIVE page URL. `tab.url` only updates on `didFinishNavigation`, so a SPA (YouTube) leaves it stale; the sniffer script now reports `location` changes and the download reads `webView.URL`. See `.openhands/memory/2026-11-10.md`.
+- YouTube player clients: `android` works (combined mp4); web styles (tv_simply/web_safari/mweb/web_embedded) are bot-blocked. Datacenter IPs are blocked, so device testing matters.
