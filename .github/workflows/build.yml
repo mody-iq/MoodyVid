@@ -6,6 +6,11 @@ on:
       - '**.md'
       - 'LICENSE'
   workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Build a side-by-side test copy (own bundle id, name and icon colour)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -57,11 +62,19 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
           GH_TOKEN: ${{ github.token }}
+          # The side-by-side copy keeps its own identity so it installs next to the
+          # shipping app instead of replacing it. Both share the same Documents
+          # folder inside their own container, so the two are fully independent.
+          MV_APP_NAME: ${{ inputs.variant && 'MoodyVidTest' || 'MoodyVid' }}
+          MV_BUNDLE_ID: ${{ inputs.variant && 'com.mody.moodyvid.test' || 'com.mody.moodyvid' }}
+          MV_DISPLAY_NAME: ${{ inputs.variant && 'MoodyVid Test' || 'MoodyVid' }}
+          MV_ICON_TOP: ${{ inputs.variant && '150,90,220' || '18,172,186' }}
+          MV_ICON_BOTTOM: ${{ inputs.variant && '95,50,160' || '8,116,132' }}
         run: bash scripts/build.sh
 
       - name: Upload IPA
         uses: actions/upload-artifact@v7
         with:
-          name: MoodyVid-ipa
-          path: build/MoodyVid.ipa
+          name: ${{ inputs.variant && 'MoodyVidTest-ipa' || 'MoodyVid-ipa' }}
+          path: ${{ inputs.variant && 'build/MoodyVidTest.ipa' || 'build/MoodyVid.ipa' }}
           if-no-files-found: error

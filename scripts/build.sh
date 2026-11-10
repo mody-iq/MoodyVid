@@ -1,8 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-APP_NAME="MoodyVid"
-BUNDLE_ID="com.mody.moodyvid"
+APP_NAME="${MV_APP_NAME:-MoodyVid}"
+BUNDLE_ID="${MV_BUNDLE_ID:-com.mody.moodyvid}"
+# Shown under the icon. A side-by-side test build sets these so the two copies
+# are distinguishable on the Home screen.
+DISPLAY_NAME="${MV_DISPLAY_NAME:-MoodyVid}"
+ICON_TOP="${MV_ICON_TOP:-18,172,186}"
+ICON_BOTTOM="${MV_ICON_BOTTOM:-8,116,132}"
 BUILD_DIR="build"
 APP_DIR="$BUILD_DIR/Payload/$APP_NAME.app"
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
@@ -141,8 +146,14 @@ cp Resources/Info.plist "$APP_DIR/Info.plist"
 # The icon is drawn, not committed, so the repository carries no binary and the
 # icon stays sharp at any size. 1024 is the App Store size; iOS downsamples it.
 echo "== App icon"
-python3 scripts/make_icon.py "$APP_DIR/AppIcon.png" 1024
+python3 scripts/make_icon.py "$APP_DIR/AppIcon.png" 1024 "$ICON_TOP" "$ICON_BOTTOM"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER:-1}" "$APP_DIR/Info.plist"
+# A side-by-side build overrides the identity so the copy installs next to the
+# original instead of replacing it. The defaults keep the shipping identity.
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$APP_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DISPLAY_NAME" "$APP_DIR/Info.plist"
 printf 'APPL????' > "$APP_DIR/PkgInfo"
 
 # Profile pictures shown on the Contact sheet, copied next to the icon so the

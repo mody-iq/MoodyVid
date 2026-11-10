@@ -58,10 +58,8 @@ def triangle_alpha(x, y, size):
     return 1.0 if d >= 1.0 else d
 
 
-def render(size):
+def render(size, top_color=(18, 172, 186), bottom_color=(8, 116, 132)):
     radius = size * 0.225
-    top_color = (18, 172, 186)
-    bottom_color = (8, 116, 132)
     rows = []
     for y in range(size):
         t = y / max(1, size - 1)
@@ -84,8 +82,8 @@ def chunk(tag, data):
     return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
 
 
-def write_png(path, size):
-    raw = render(size)
+def write_png(path, size, top_color=(18, 172, 186), bottom_color=(8, 116, 132)):
+    raw = render(size, top_color, bottom_color)
     header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
     png = (b"\x89PNG\r\n\x1a\n"
            + chunk(b"IHDR", header)
@@ -95,13 +93,26 @@ def write_png(path, size):
         f.write(png)
 
 
+def parse_color(text, fallback):
+    """'r,g,b' from the build environment, or the fallback on anything odd."""
+    try:
+        parts = [int(p) for p in text.split(",")]
+        if len(parts) == 3 and all(0 <= p <= 255 for p in parts):
+            return tuple(parts)
+    except (AttributeError, ValueError):
+        pass
+    return fallback
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
         return 1
     path = argv[1]
     size = int(argv[2]) if len(argv) > 2 else 1024
-    write_png(path, size)
+    top = parse_color(argv[3], (18, 172, 186)) if len(argv) > 3 else (18, 172, 186)
+    bottom = parse_color(argv[4], (8, 116, 132)) if len(argv) > 4 else (8, 116, 132)
+    write_png(path, size, top, bottom)
     print(f"icon written: {path} ({size}x{size})")
     return 0
 
