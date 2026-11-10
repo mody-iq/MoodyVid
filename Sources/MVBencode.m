@@ -210,6 +210,21 @@ static NSData *MVBencodeBytes(id object) {
     return nil;
 }
 
+/// Orders two byte strings the way bencode wants dictionary keys ordered: as
+/// raw bytes (memcmp), so a shorter string that is a prefix of a longer one
+/// sorts first. `NSData` has no public `compare:` on Apple's Foundation, so the
+/// bytes are compared here.
+static NSComparisonResult MVBencodeCompareBytes(NSData *a, NSData *b) {
+    NSUInteger common = MIN(a.length, b.length);
+    const uint8_t *pa = a.bytes;
+    const uint8_t *pb = b.bytes;
+    for (NSUInteger i = 0; i < common; i++) {
+        if (pa[i] != pb[i]) return pa[i] < pb[i] ? NSOrderedAscending : NSOrderedDescending;
+    }
+    if (a.length == b.length) return NSOrderedSame;
+    return a.length < b.length ? NSOrderedAscending : NSOrderedDescending;
+}
+
 + (NSData *)encode:(id)object {
     NSMutableData *out = [NSMutableData data];
     if (![self append:object to:out]) return nil;
@@ -246,7 +261,7 @@ static NSData *MVBencodeBytes(id object) {
         NSArray *keys = [dict.allKeys sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
             NSData *da = MVBencodeBytes(a);
             NSData *db = MVBencodeBytes(b);
-            return [da compare:db];
+            return MVBencodeCompareBytes(da, db);
         }];
         for (id key in keys) {
             if (![self append:key to:out]) return NO;
