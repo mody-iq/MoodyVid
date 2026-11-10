@@ -116,8 +116,9 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
     [parts addObject:[MVLang t:[MVSnifferItem titleKeyForKind:item.kind]]];
     if (item.totalBytes > 0) [parts addObject:[MVPaths formatBytes:item.totalBytes]];
     else if (!item.probed) [parts addObject:[MVLang t:@"Checking…"]];
-    // HLS and DASH have engines now; only torrent is still pending.
-    if (item.kind == MVSniffKindTorrent) {
+    // Torrent files download now; a magnet link still needs the BEP 9 metadata
+    // exchange, so only that is marked as pending.
+    if (item.isTorrent && [item.url.lowercaseString hasPrefix:@"magnet:"]) {
         [parts addObject:[MVLang t:@"Later update"]];
     }
     self.detailLabel.text = [parts componentsJoinedByString:@" • "];

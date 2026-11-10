@@ -26,9 +26,10 @@ NS_ASSUME_NONNULL_BEGIN
                             category:(nullable NSString *)category
                             expected:(long long)totalBytes;
 
-/// Queues a sniffed item, choosing the engine from its kind. For an item whose
-/// engine is not built yet the task is still created, but it is marked with a
-/// clear, localised reason so the row is honest instead of stuck at 0%.
+/// Queues a sniffed item, choosing the engine from its kind: HLS, DASH,
+/// torrent, or a plain HTTP file. A magnet link is queued like any other
+/// torrent; its engine reports the honest reason it cannot fetch the metadata
+/// yet rather than leaving the row stuck at 0%.
 - (MVDownloadTask *)enqueueItem:(MVSnifferItem *)item;
 
 /// Resumes a paused or failed task.

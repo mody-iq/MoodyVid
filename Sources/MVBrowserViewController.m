@@ -1065,12 +1065,11 @@ static id gParkedObserver = nil;
 - (void)routeMagnetLink:(NSString *)magnet {
     MVSnifferItem *item = [MVSnifferItem itemWithURL:magnet pageURL:self.activeTab.url
                                            pageTitle:self.activeTab.title mime:nil];
-    MVDownloadTask *task = [[MVDownloadManager shared] enqueueItem:item];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Torrent"]
-                                                                  message:task.error
-                                                           preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    // The magnet is queued like any other torrent. It fails asynchronously with a
+    // localised reason (the BEP 9 metadata exchange is not built yet), so the
+    // downloads row carries the explanation; no alert is needed here.
+    [[MVDownloadManager shared] enqueueItem:item];
+    [self notifyQueued];
 }
 
 #pragma mark - Menu

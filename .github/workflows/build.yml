@@ -58,6 +58,13 @@ jobs:
           python3 --version
           which ldid || true
 
+      # The torrent core (bencode, SHA-1, magnet, metadata, tracker) is pure
+      # Foundation, so it is proven here with the system clang before the device
+      # build — a wrong info-hash or piece offset would otherwise only show up as
+      # a download that never verifies.
+      - name: Run torrent core tests
+        run: bash scripts/torrent-tests.sh
+
       - name: Build IPA
         env:
           BUILD_NUMBER: ${{ github.run_number }}

@@ -318,8 +318,12 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
     }
     if (task.totalBytes > 0) [parts addObject:[MVPaths formatBytes:task.totalBytes]];
     if (task.state == MVTaskStateRunning) {
-        [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)task.connections,
-                          [MVLang t:@"Connections"]]];
+        // A torrent's peer count is not the same as an HTTP connection count,
+        // so the connection figure is only meaningful for the direct engines.
+        if (task.source != MVTaskSourceTorrent) {
+            [parts addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)task.connections,
+                              [MVLang t:@"Connections"]]];
+        }
         if (task.speed > 0) [parts addObject:[MVPaths formatSpeed:task.speed]];
         if (task.eta > 0) [parts addObject:[MVPaths formatDuration:task.eta]];
     }

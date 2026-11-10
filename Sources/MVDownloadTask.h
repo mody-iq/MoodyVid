@@ -9,7 +9,7 @@ typedef NS_ENUM(NSInteger, MVTaskSource) {
     MVTaskSourceYtDlp = 0,    ///< the embedded Python engine
     MVTaskSourceDirect = 1,   ///< a plain HTTP(S) file
     MVTaskSourceHLS = 2,      ///< an .m3u8 playlist
-    MVTaskSourceTorrent = 3,  ///< a magnet link or .torrent (later phase)
+    MVTaskSourceTorrent = 3,  ///< a magnet link or .torrent file
     MVTaskSourceDASH = 4,     ///< an .mpd manifest
 };
 
