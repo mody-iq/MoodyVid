@@ -328,6 +328,30 @@ def _downloaded_path(ydl, info):
     return path if path and os.path.exists(path) else None
 
 
+def _fragment_format(kind, quality):
+    """The yt-dlp selector for ONE stream of a merged download.
+
+    iOS has no ffmpeg, so the app fetches the picture and the sound separately
+    and muxes them itself. The video branch prefers a picture-only MP4 (the mux
+    adds the sound, so a combined file would only waste bandwidth), and falls
+    back to a progressive MP4 for a site that has no separate streams. The audio
+    branch prefers M4A so the mux can copy the track without re-encoding.
+    """
+    if kind == "audio":
+        return "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best[ext=m4a]/best"
+    height = 2160
+    if isinstance(quality, str):
+        digits = quality[:-1] if quality.endswith("p") else quality
+        if digits.isdigit():
+            h = int(digits)
+            if h > 0:
+                height = h
+    return (f"bestvideo[ext=mp4][height<={height}]"
+            f"/bestvideo[height<={height}]"
+            f"/best[ext=mp4][height<={height}]"
+            f"/best[height<={height}]")
+
+
 def download_fragment(url, kind, quality="best", _task=""):
     """Downloads ONE stream (kind="video" or "audio") to a single file.
 
@@ -343,17 +367,7 @@ def download_fragment(url, kind, quality="best", _task=""):
 
     _use_bundled_certificates()
 
-    if kind == "audio":
-        fmt = "bestaudio[ext=m4a]/bestaudio/best[ext=m4a]/best"
-    else:
-        height = 2160
-        if isinstance(quality, str) and quality.isdigit():
-            h = int(quality)
-            if h > 0: height = h
-        # Prefer MP4 at every step so single-file downloads stay playable on
-        # iOS. WebM is considered only when the source offers nothing else.
-        fmt = (f"bestvideo[height<={height}][ext=mp4]/b[height<={height}][ext=mp4]/b[ext=mp4]"
-               f"/b[height<={height}][ext=webm]/bestvideo[height<={height}]")
+    fmt = _fragment_format(kind, quality)
 
     out_dir = _output_dir()
     try:
@@ -368,7 +382,12 @@ def download_fragment(url, kind, quality="best", _task=""):
         try:
             opts = {
                 "format": fmt,
-                "outtmpl": os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s"),
+                # A marker per stream: the video and the audio are separate runs,
+                # and a site with no audio-only format can make both resolve to
+                # the same extension. The marker keeps the two files apart so one
+                # can never overwrite the other.
+                "outtmpl": os.path.join(out_dir,
+                                        "%(title).100B [%(id)s]." + kind + ".%(ext)s"),
                 "quiet": True,
                 "no_warnings": True,
                 "noplaylist": True,

@@ -989,7 +989,8 @@ static id gParkedObserver = nil;
 }
 
 /// Hands the page URL to the Python engine, which knows how to extract a video
-/// the sniffer cannot reach (a blob player, a token-protected stream).
+/// the sniffer cannot reach (a blob player, a token-protected stream). The user
+/// picks the quality, because a high one is fetched as two streams and muxed.
 - (void)downloadPageWithYTDlp:(NSString *)pageURL title:(NSString *)title {
     // Re-read the web view's URL here: the sheet's copy was taken when it opened,
     // and a single-page app may have moved on since.
@@ -997,7 +998,39 @@ static id gParkedObserver = nil;
     NSString *live = tab.webView.URL.absoluteString.length ? tab.webView.URL.absoluteString : pageURL;
     if (!live.length) live = tab.url;
     if (!live.length) return;
-    [[MVDownloadEngine shared] downloadURL:live quality:@"best" completion:nil];
+    [self presentQualitySheetForURL:live title:title];
+}
+
+/// The same quality choices the Home screen offers. A quality of 1080 or higher
+/// is downloaded as a separate video + audio stream and muxed on device.
+- (void)presentQualitySheetForURL:(NSString *)url title:(NSString *)title {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title.length ? title : [MVLang t:@"Choose quality"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray<NSArray<NSString *> *> *options = @[
+        @[@"Best available", @"best"],
+        @[@"1080p HD", @"1080"],
+        @[@"Up to 720p", @"720p"],
+        @[@"Up to 480p", @"480p"],
+        @[@"Audio only (M4A)", @"audio"],
+        @[@"MP3 (audio)", @"mp3"],
+    ];
+    __weak typeof(self) weakSelf = self;
+    for (NSArray<NSString *> *option in options) {
+        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:option[0]]
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            [weakSelf enqueuePageDownload:url quality:option[1]];
+        }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    alert.popoverPresentationController.sourceView = self.sniffButton;
+    alert.popoverPresentationController.sourceRect = self.sniffButton.bounds;
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)enqueuePageDownload:(NSString *)url quality:(NSString *)quality {
+    [[MVDownloadEngine shared] downloadURL:url quality:quality completion:nil];
     [self notifyQueued];
 }
 

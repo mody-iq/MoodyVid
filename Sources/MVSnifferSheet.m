@@ -342,8 +342,14 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
 
 - (void)downloadPage {
     if (!self.pageURL.length || !self.onDownloadPageWithYTDlp) return;
-    self.onDownloadPageWithYTDlp(self.pageURL, self.pageTitle ?: @"");
-    [self dismissSheet];
+    // Dismiss first: the browser then presents its quality sheet, and two
+    // presentations at once are dropped silently.
+    NSString *url = self.pageURL;
+    NSString *title = self.pageTitle ?: @"";
+    void (^handler)(NSString *, NSString *) = self.onDownloadPageWithYTDlp;
+    [self dismissViewControllerAnimated:YES completion:^{
+        handler(url, title);
+    }];
 }
 
 @end

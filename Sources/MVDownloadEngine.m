@@ -29,6 +29,9 @@ static const NSUInteger kMaxConcurrent = 2;
     NSMutableArray<MVDownloadJob *> *_queue;
     NSMutableDictionary<NSString *, MVDownloadJob *> *_running;
     NSMutableSet<NSString *> *_cancelled;
+    /// Fragment files a merged job has written so far, keyed by job id, so a
+    /// cancel that lands between the two streams does not leave them orphaned.
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *_fragments;
     UIBackgroundTaskIdentifier _backgroundTask;
     BOOL _awake;
 }
@@ -46,6 +49,7 @@ static const NSUInteger kMaxConcurrent = 2;
         _queue = [NSMutableArray array];
         _running = [NSMutableDictionary dictionary];
         _cancelled = [NSMutableSet set];
+        _fragments = [NSMutableDictionary dictionary];
         _backgroundTask = UIBackgroundTaskInvalid;
     }
     return self;
@@ -126,12 +130,13 @@ static const NSUInteger kMaxConcurrent = 2;
     [self updateBackgroundTask];
 }
 
-/// True for the height qualities that need a separate video + audio stream
-/// merged back together (1080p and up on YouTube are usually two streams).
+/// True for the qualities that need a separate video + audio stream merged back
+/// together. "best" and 1080p and up are usually two streams on YouTube.
 + (BOOL)isMergedQuality:(NSString *)quality {
     if (!quality.length) return NO;
     if ([quality isEqualToString:@"mp3"]) return NO;
     if ([quality isEqualToString:@"audio"]) return NO;
+    if ([quality isEqualToString:@"best"]) return YES;
     NSInteger h = quality.integerValue;
     return h >= 1080;
 }
@@ -171,8 +176,52 @@ static const NSUInteger kMaxConcurrent = 2;
     }];
 }
 
-/// Questionable — two fragments then mux. Keeps a single record and a single
-/// progress ring across the whole run.
+/// The path a post-download step (mux, encode) writes to. It must differ from
+/// the downloaded fragment: the mux deletes its target before writing, and the
+/// video fragment already ends in `.mp4`, so reusing that name destroyed the
+/// source and produced an empty file.
+- (NSString *)derivedPathFor:(NSString *)sourcePath suffix:(NSString *)suffix ext:(NSString *)ext {
+    NSString *base = sourcePath.stringByDeletingPathExtension;
+    // The fragment name carries a `.video`/`.audio` marker so the two streams
+    // cannot collide; the finished file should not show it.
+    for (NSString *marker in @[@".video", @".audio"]) {
+        if ([base hasSuffix:marker]) {
+            base = [base substringToIndex:base.length - marker.length];
+            break;
+        }
+    }
+    return [[base stringByAppendingString:suffix] stringByAppendingPathExtension:ext];
+}
+
+/// Removes leftover fragments once a merged result exists, or once a run has
+/// failed or been cancelled and the fragments are of no use any more.
+- (void)discardFragments:(NSArray<NSString *> *)paths {
+    for (NSString *path in paths) {
+        if (!path.length) continue;
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    }
+}
+
+/// Remembers a fragment while a merged job runs, so a cancel can clean it up.
+- (void)trackFragment:(NSString *)path forJob:(NSString *)identifier {
+    if (!path.length || !identifier.length) return;
+    NSMutableArray<NSString *> *list = _fragments[identifier];
+    if (!list) {
+        list = [NSMutableArray array];
+        _fragments[identifier] = list;
+    }
+    [list addObject:path];
+}
+
+/// Deletes every fragment still tracked for a job and forgets the job.
+- (void)discardTrackedFragmentsFor:(NSString *)identifier {
+    NSArray<NSString *> *paths = _fragments[identifier];
+    if (paths) [self discardFragments:paths];
+    [_fragments removeObjectForKey:identifier];
+}
+
+/// Two fragments then a native mux. Keeps a single record and a single progress
+/// ring across the whole run: video, then audio, then the remux.
 - (void)startMergedJob:(MVDownloadJob *)job {
     MVDownloadRecord *record = [self recordFor:job.identifier];
     [self setTransient:record message:nil];
@@ -185,8 +234,26 @@ static const NSUInteger kMaxConcurrent = 2;
                  completion:^(NSDictionary *videoResult, NSString *vErr) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
-        if (!videoResult || [videoResult[@"path"] length] == 0) {
+        NSString *videoPath = videoResult[@"path"];
+        if (!videoPath.length) {
             [self_ finishJob:job result:nil error:vErr ?: [MVLang t:@"Unknown error"]];
+            return;
+        }
+        [self_ trackFragment:videoPath forJob:job.identifier];
+        // Some sites only offer one combined file. When the picture already
+        // carries its sound, the second download would fetch the same bytes
+        // again, so finish here — under a clean name, without the `.video` mark.
+        if ([MVMediaConverter hasAudioTrack:videoPath]) {
+            NSString *clean = [self_ derivedPathFor:videoPath suffix:@"" ext:@"mp4"];
+            if (![clean isEqualToString:videoPath]) {
+                [[NSFileManager defaultManager] removeItemAtPath:clean error:nil];
+                [[NSFileManager defaultManager] moveItemAtPath:videoPath toPath:clean error:nil];
+            }
+            [self_ discardTrackedFragmentsFor:job.identifier];
+            NSDictionary *done = @{@"path": clean, @"title": videoResult[@"title"] ?: @"",
+                                   @"thumbnail": videoResult[@"thumbnail"] ?: @"",
+                                   @"ext": @"mp4"};
+            [self_ finishJob:job result:done error:nil];
             return;
         }
         // 2) Audio stream only.
@@ -196,25 +263,29 @@ static const NSUInteger kMaxConcurrent = 2;
                      completion:^(NSDictionary *audioResult, NSString *aErr) {
             typeof(self) self_ = weakSelf;
             if (!self_) return;
-            NSString *videoPath = videoResult[@"path"];
             NSString *audioPath = audioResult[@"path"];
             if (!audioPath.length) {
-                [NSFileManager.defaultManager removeItemAtPath:videoPath error:nil];
+                [self_ discardTrackedFragmentsFor:job.identifier];
                 [self_ finishJob:job result:nil error:aErr ?: [MVLang t:@"Unknown error"]];
                 return;
             }
+            [self_ trackFragment:audioPath forJob:job.identifier];
             [self_ setTransient:[self_ recordFor:job.identifier] message:[MVLang t:@"Merging…"]];
-            // 3) Native remux.
-            NSString *outPath = [[videoPath stringByDeletingPathExtension]
-                                 stringByAppendingPathExtension:@"mp4"];
+            // 3) Native remux to its own name, never over the video fragment.
+            NSString *outPath = [self_ derivedPathFor:videoPath suffix:@"-merged" ext:@"mp4"];
             [MVMediaConverter muxVideo:videoPath audio:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
                 typeof(self) self_ = weakSelf;
                 if (!self_) return;
                 if (ok) {
+                    [self_ discardTrackedFragmentsFor:job.identifier];
                     NSDictionary *merged = @{@"path": outPath, @"title": videoResult[@"title"] ?: @"",
-                                             @"thumbnail": videoResult[@"thumbnail"] ?: @""};
+                                             @"thumbnail": videoResult[@"thumbnail"] ?: @"",
+                                             @"ext": @"mp4"};
                     [self_ finishJob:job result:merged error:nil];
                 } else {
+                    // A half-written merged file would show up as a broken entry.
+                    [self_ discardFragments:@[outPath]];
+                    [self_ discardTrackedFragmentsFor:job.identifier];
                     [self_ finishJob:job result:nil error:err ?: [MVLang t:@"Merge failed"]];
                 }
             }];
@@ -231,25 +302,35 @@ static const NSUInteger kMaxConcurrent = 2;
                  completion:^(NSDictionary *result, NSString *error) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
-        if (!result || [result[@"path"] length] == 0) {
+        NSString *audioPath = result[@"path"];
+        if (!audioPath.length) {
             [self_ finishJob:job result:nil error:error ?: [MVLang t:@"Unknown error"]];
             return;
         }
-        NSString *audioPath = result[@"path"];
-        NSString *outPath = [[audioPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp3"];
+        [self_ trackFragment:audioPath forJob:job.identifier];
+        // A separate name: the encoder opens the target for writing while the
+        // source is still on disk.
+        NSString *outPath = [self_ derivedPathFor:audioPath suffix:@"-mp3" ext:@"mp3"];
         [self_ setTransient:[self_ recordFor:job.identifier] message:[MVLang t:@"Converting…"]];
         [MVMediaConverter convertToMP3:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
             typeof(self) self_ = weakSelf;
             if (!self_) return;
-            NSString *finalPath = outPath;
-            if (!ok && ![NSFileManager.defaultManager fileExistsAtPath:outPath]) {
-                // No encoder built in this binary: keep the un-converted file.
-                finalPath = audioPath;
+            if (ok) {
+                [self_ discardTrackedFragmentsFor:job.identifier];
+                NSDictionary *audio = @{@"path": outPath, @"title": result[@"title"] ?: @"",
+                                        @"thumbnail": result[@"thumbnail"] ?: @"",
+                                        @"ext": @"mp3"};
+                [self_ finishJob:job result:audio error:nil];
+            } else {
+                // No encoder in this build: keep the original audio, drop the
+                // empty target the encoder may have created.
+                [self_ discardFragments:@[outPath]];
+                [self_ discardTrackedFragmentsFor:job.identifier];
+                NSDictionary *audio = @{@"path": audioPath, @"title": result[@"title"] ?: @"",
+                                        @"thumbnail": result[@"thumbnail"] ?: @"",
+                                        @"ext": audioPath.pathExtension.lowercaseString ?: @"m4a"};
+                [self_ finishJob:job result:audio error:nil];
             }
-            NSDictionary *audio = @{@"path": finalPath, @"title": result[@"title"] ?: @"",
-                                    @"thumbnail": result[@"thumbnail"] ?: @"",
-                                    @"ext": finalPath.pathExtension.lowercaseString ?: @"mp3"};
-            [self_ finishJob:job result:audio error:nil];
         }];
     }];
 }
@@ -271,6 +352,10 @@ static const NSUInteger kMaxConcurrent = 2;
 
     if ([_cancelled containsObject:job.identifier]) {
         [_cancelled removeObject:job.identifier];
+        // A cancel can land after the mux produced a file; drop every artefact.
+        NSString *produced = result[@"path"];
+        if (produced.length) [self discardFragments:@[produced]];
+        [self discardTrackedFragmentsFor:job.identifier];
         record.state = MVDownloadStateCancelled;
         record.progress = 0;
         record.speed = 0;
@@ -284,6 +369,7 @@ static const NSUInteger kMaxConcurrent = 2;
 
     if (error) {
         MVLogError(@"engine: failed %@: %@", job.url, error);
+        [self discardTrackedFragmentsFor:job.identifier];
         record.state = MVDownloadStateFailed;
         record.error = error;
         [MVDownloadStore.shared update:record];
@@ -295,6 +381,7 @@ static const NSUInteger kMaxConcurrent = 2;
 
     NSString *path = result[@"path"];
     if (!path.length) {
+        [self discardTrackedFragmentsFor:job.identifier];
         record.state = MVDownloadStateFailed;
         record.error = [MVLang t:@"Unknown error"];
         [MVDownloadStore.shared update:record];

@@ -207,5 +207,41 @@ class ErrorMessageTests(unittest.TestCase):
         self.assertEqual(text, "some brand new failure")
 
 
+class FragmentFormatTests(unittest.TestCase):
+    """The merged path fetches one stream at a time; each selector must ask for
+    exactly one stream and prefer containers the native mux can copy."""
+
+    def setUp(self):
+        import downloader
+        self.downloader = downloader
+
+    def test_video_prefers_a_picture_only_mp4(self):
+        fmt = self.downloader._fragment_format("video", "1080")
+        self.assertTrue(fmt.startswith("bestvideo[ext=mp4][height<=1080]"))
+
+    def test_video_keeps_the_requested_height(self):
+        fmt = self.downloader._fragment_format("video", "2160")
+        self.assertIn("height<=2160", fmt)
+
+    def test_video_falls_back_to_a_progressive_mp4(self):
+        # A site with no separate streams still has to produce a file.
+        fmt = self.downloader._fragment_format("video", "best")
+        self.assertIn("/best[ext=mp4][height<=2160]", fmt)
+
+    def test_audio_prefers_m4a_so_the_mux_can_copy_it(self):
+        fmt = self.downloader._fragment_format("audio", "best")
+        self.assertTrue(fmt.startswith("bestaudio[ext=m4a]"))
+
+    def test_no_fragment_selector_asks_yt_dlp_to_merge(self):
+        for kind in ["video", "audio"]:
+            with self.subTest(kind=kind):
+                self.assertNotIn("+", self.downloader._fragment_format(kind, "1080"))
+
+    def test_every_branch_is_a_fallback_chain(self):
+        for kind in ["video", "audio"]:
+            with self.subTest(kind=kind):
+                self.assertIn("/", self.downloader._fragment_format(kind, "best"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

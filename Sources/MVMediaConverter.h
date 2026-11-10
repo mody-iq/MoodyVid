@@ -26,6 +26,13 @@ NS_ASSUME_NONNULL_BEGIN
                   to:(NSString *)outPath
           completion:(void (^)(BOOL ok, NSString *_Nullable error))completion;
 
+/// YES when the file already carries an audio track.
+///
+/// A "best quality" request downloads a picture-only stream and then the sound,
+/// but some sites only offer one combined file. Checking first lets the caller
+/// skip the second download entirely instead of fetching the same bytes twice.
++ (BOOL)hasAudioTrack:(NSString *)path;
+
 @end
 
 NS_ASSUME_NONNULL_END

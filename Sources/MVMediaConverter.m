@@ -32,19 +32,30 @@
                 error = @"No video track";
             } else {
                 NSError *err = nil;
+                NSError *aerr = nil;
                 AVMutableCompositionTrack *vt = [mix addMutableTrackWithMediaType:AVMediaTypeVideo
                                                                 preferredTrackID:kCMPersistentTrackID_Invalid];
-                [vt insertTimeRange:CMTimeRangeMake(kCMTimeZero, video.duration)
+                // Use the track's own time range: an asset's duration can exceed
+                // what the track actually holds, and an over-long range fails.
+                CMTime videoSpan = vTrack.timeRange.duration;
+                [vt insertTimeRange:CMTimeRangeMake(kCMTimeZero, videoSpan)
                             ofTrack:vTrack atTime:kCMTimeZero error:&err];
-                if (aTrack) {
+                // A progressive fallback already carries sound; adding the second
+                // stream then would leave the file with two audio tracks.
+                BOOL videoHasAudio = [video tracksWithMediaType:AVMediaTypeAudio].count > 0;
+                if (aTrack && !videoHasAudio) {
                     AVMutableCompositionTrack *at = [mix addMutableTrackWithMediaType:AVMediaTypeAudio
                                                                     preferredTrackID:kCMPersistentTrackID_Invalid];
-                    NSError *aerr = nil;
-                    [at insertTimeRange:CMTimeRangeMake(kCMTimeZero, audio.duration)
+                    // Never insert more audio than the picture has: the mux must
+                    // not report success on a track that failed to land.
+                    CMTime audioSpan = aTrack.timeRange.duration;
+                    CMTime span = CMTIME_COMPARE_INLINE(audioSpan, <, videoSpan) ? audioSpan : videoSpan;
+                    [at insertTimeRange:CMTimeRangeMake(kCMTimeZero, span)
                                 ofTrack:aTrack atTime:kCMTimeZero error:&aerr];
                 }
-                if (err) {
-                    error = err.localizedDescription ?: @"Insert failed";
+                if (err || aerr) {
+                    NSError *failure = err ?: aerr;
+                    error = failure.localizedDescription ?: @"Insert failed";
                 } else if ([NSFileManager.defaultManager fileExistsAtPath:outPath]) {
                     [NSFileManager.defaultManager removeItemAtPath:outPath error:nil];
                 }
@@ -77,6 +88,12 @@
             if (completion) completion(ok, error);
         });
     });
+}
+
++ (BOOL)hasAudioTrack:(NSString *)path {
+    if (!path.length) return NO;
+    AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+    return [asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
 }
 
 + (void)convertToMP3:(NSString *)audioPath
