@@ -7,9 +7,11 @@ NS_ASSUME_NONNULL_BEGIN
 ///
 /// Byte strings decode to `NSData`, never `NSString`: the info dictionary has to
 /// be re-encoded byte-for-byte to compute its SHA-1 info-hash, and a lossy
-/// string conversion would change the hash. Dictionary keys are therefore
-/// `NSData` too. Integers decode to `NSNumber` (long long), lists to `NSArray`
-/// and dictionaries to `NSDictionary`.
+/// string conversion would change the hash. Dictionary keys are the exception:
+/// they decode to `NSString` when they are valid UTF-8 (a key is a field name
+/// like `name` or `peers`), so callers can look them up by name; a key that is
+/// not valid UTF-8 stays `NSData`. Integers decode to `NSNumber` (long long),
+/// lists to `NSArray` and dictionaries to `NSDictionary`.
 @interface MVBencode : NSObject
 
 /// Decodes a whole bencoded value. Returns nil and fills `error` on malformed

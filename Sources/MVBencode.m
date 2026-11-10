@@ -112,7 +112,11 @@
         if (!key) return nil;
         id value = [self readValue];
         if (!value) return nil;
-        dict[key] = value;
+        // A key is a byte string, but in every real dictionary (a torrent's info
+        // dict, a tracker response) it is UTF-8 text, and the callers look keys
+        // up by name. Keep the byte form only for a key that is not valid UTF-8.
+        NSString *text = [[NSString alloc] initWithData:key encoding:NSUTF8StringEncoding];
+        dict[text ?: key] = value;
     }
     if (![self expect:'e']) return nil;
     return dict;

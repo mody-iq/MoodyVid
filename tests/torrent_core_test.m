@@ -21,7 +21,7 @@ int main(void) {
         NSString *longer = @"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         CHECK([[MVSHA1 hexString:[MVSHA1 digest:B(longer)]] isEqualToString:@"84983e441c3bd26ebaae4aa1f95129e5e54670f1"], "sha1 56-byte");
         NSMutableData *million = [NSMutableData data];
-        NSData *chunk = B(@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        NSData *chunk = B(@"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         for (int i = 0; i < 1000; i++) [million appendData:chunk];
         CHECK([million length] == 1000000, "million bytes built");
         CHECK([[MVSHA1 hexString:[MVSHA1 digest:million]] isEqualToString:@"34aa973cd4c4daa4f61eeb2bdbad27316534016f"], "sha1 million a");
@@ -56,9 +56,9 @@ int main(void) {
 
         // A multi-file torrent with a padding file; offsets must run in order.
         NSString *minfo = @"d5:filesl"
-            "d6:lengthi100e4:pathl1:ae"
-            "d6:lengthi50e4:pathl1:be"
-            "d6:lengthi0e4:pathl1:ce7:attr1:pe"
+            "d6:lengthi100e4:pathl1:aee"
+            "d6:lengthi50e4:pathl1:bee"
+            "d6:lengthi0e4:pathl1:ce4:attr1:pe"
             "e4:name4:root12:piece lengthi64e6:pieces60:012345678901234567890123456789012345678901234567890123456789e";
         NSString *mtorrent = [NSString stringWithFormat:@"d4:info%@e", minfo];
         MVTorrentMetadata *mmeta = [MVTorrentMetadata metadataWithTorrentData:B(mtorrent) error:&err];
@@ -76,7 +76,7 @@ int main(void) {
         // Malformed torrents must be refused, not crash.
         CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"not bencode") error:&err] == nil, "garbage refused");
         CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"d4:infod6:lengthi1eee") error:&err] == nil, "no piece length refused");
-        CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"d4:infod6:lengthi1e4:name1:a12:piece lengthi4e6:pieces20:aaaaaaaaaaaaaaaaaaaae4:lengthi5eeee") error:&err] == nil, "piece count mismatch refused");
+        CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"d4:infod6:lengthi5e4:name1:a12:piece lengthi4e6:pieces20:aaaaaaaaaaaaaaaaaaaaee") error:&err] == nil, "piece count mismatch refused");
 
         // --- bencode round-trip and edge cases ---
         CHECK([[MVBencode decode:B(@"i42e") error:&err] longLongValue] == 42, "integer decode");
@@ -107,14 +107,15 @@ int main(void) {
         NSMutableData *compact = [NSMutableData data];
         uint8_t ipv4[6] = {93, 184, 216, 34, 0x1A, 0xE1};   // 93.184.216.34:6881
         [compact appendBytes:ipv4 length:6];
-        NSData *resp = [MVBencode encode:@{@"interval": @1800, @"peers": compact}];
+        NSData *resp = [MVBencode encode:@{@"interval": @900, @"peers": compact}];
         NSString *trackerError = nil;
         NSArray<MVTorrentPeerAddress *> *peers = [MVTorrentTracker peersFromAnnounceResponse:resp error:&trackerError];
         CHECK(peers.count == 1, "compact peers parsed");
         MVTorrentPeerAddress *peer0 = peers.firstObject;
         CHECK([peer0.host isEqualToString:@"93.184.216.34"], "compact peer host");
         CHECK(peer0.port == 6881, "compact peer port");
-        CHECK([MVTorrentTracker intervalFromAnnounceResponse:resp] == 1800, "announce interval");
+        // 900 differs from the 1800 fallback, so a broken key lookup cannot pass.
+        CHECK([MVTorrentTracker intervalFromAnnounceResponse:resp] == 900, "announce interval");
 
         // A tracker "failure reason" must surface, not be read as zero peers.
         NSData *failure = [MVBencode encode:@{@"failure reason": B(@"torrent not registered")}];
