@@ -1,6 +1,7 @@
 """MoodyVid downloader module using yt-dlp."""
 import json
 import os
+import re
 import time
 
 # iOS ships no ffmpeg, so yt-dlp cannot merge a separate video stream with a
@@ -36,9 +37,10 @@ def _selector(quality):
 # hand out DASH-only streams (video and sound apart) for most videos. Try the
 # styles that still expose a combined file, in order, and remember the one that
 # worked so the next video starts there instead of repeating the failures.
-# "android" cracks the combined mp4 in one fast round on real traffic; the
-# other sets are kept only as fallbacks. The slow default probe is last.
-PLAYER_CLIENTS = [["android"], ["tv_simply", "web_safari"], ["visionos", "web_embedded", "mweb"], None]
+# "android" cracks the combined mp4 in one fast round on real traffic. The web
+# clients (tv_simply, web_safari, mweb) are gone: YouTube answers them with
+# "Sign in to confirm you're not a bot", so they only cost a round trip.
+PLAYER_CLIENTS = [["android"], ["ios"], ["visionos"], None]
 _good_client = [None, 0.0]
 _GOOD_CLIENT_TTL = 3600
 
@@ -117,8 +119,45 @@ def _output_dir():
     return os.path.join(base, "MoodyVid")
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+# yt-dlp's messages are long and coloured; the row shows one short line, so the
+# frequent ones get a plain wording. Anything else is passed through, stripped.
+_FRIENDLY = (
+    ("not a bot", "YouTube blocked this request; please try again in a moment"),
+    ("Requested format is not available",
+     "this video has no single playable format; try a lower quality"),
+    ("HTTP Error 403", "the server refused the download (403)"),
+    ("Video unavailable", "this video is not available"),
+    ("Private video", "this video is private"),
+)
+
+
 def _error(message):
-    return json.dumps({"error": str(message)}, ensure_ascii=False)
+    text = _ANSI.sub("", str(message))
+    for needle, friendly in _FRIENDLY:
+        if needle in text:
+            text = friendly
+            break
+    return json.dumps({"error": text}, ensure_ascii=False)
+
+
+def _describe_failure(url, info):
+    """A plain reason a finished run produced no file.
+
+    The generic "the file could not be found" hid the real causes: a page that
+    is not a video (a feed, a search page) extracts to a playlist with no items,
+    and a DASH-only video has no single combined format to fetch. Both are worth
+    naming so the row can say what actually happened.
+    """
+    if isinstance(info, dict):
+        if info.get("_type") == "playlist" or info.get("entries") is not None:
+            count = len(info.get("entries") or [])
+            if count == 0:
+                return "this link is not a video — it is a page with no media on it"
+        if info.get("formats") and not info.get("url") and not info.get("requested_downloads"):
+            return "this video has no single playable format; try a lower quality"
+    return "the download finished but no file was produced"
 
 
 def _native():
@@ -205,7 +244,10 @@ def download(url, quality="best", _task=""):
                 "height": info.get("height") or 0,
                 "audio": quality == "audio" and not _has_video(info),
             }, ensure_ascii=False)
-        last_error = last_error or "the download finished but the file could not be found"
+        # No file: this URL is not a video, or it offers no combined format. Both
+        # are permanent, so stop rather than asking the next client the same
+        # question. Only a real exception (a blocked client) is worth retrying.
+        return _error(_describe_failure(url, info))
 
     return _error(last_error or "download failed")
 

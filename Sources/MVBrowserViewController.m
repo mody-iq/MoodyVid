@@ -893,6 +893,22 @@ static id gParkedObserver = nil;
     NSString *pageURL = [body[@"page"] isKindOfClass:NSString.class] ? body[@"page"] : tab.url;
     NSString *title = [body[@"title"] isKindOfClass:NSString.class] ? body[@"title"] : tab.title;
 
+    // A single-page app changes the address without a page load, so the script
+    // reports it. Keeping tab.url current is what makes the yt-dlp action target
+    // the video the user is watching instead of the page they arrived from.
+    if ([type isEqualToString:@"location"]) {
+        if (pageURL.length) {
+            tab.url = pageURL;
+            if (title.length) tab.title = title;
+            if (tab == self.activeTab) {
+                // Never clobber the field while the user is typing in it.
+                if (![self.addressField isFirstResponder]) [self syncToolbar];
+                [self refreshSniffBadge];
+            }
+        }
+        return;
+    }
+
     if ([type isEqualToString:@"blob"]) {
         // The page plays a blob: stream the app cannot fetch. The sheet's
         // "download this page with yt-dlp" action covers this case.
@@ -920,7 +936,12 @@ static id gParkedObserver = nil;
 }
 
 - (void)refreshSniffBadge {
-    NSUInteger count = [MVSnifferStore.shared countForTab:self.activeTab.identifier];
+    MVBrowserTab *tab = self.activeTab;
+    NSUInteger count = [MVSnifferStore.shared countForTab:tab.identifier];
+    // A video page is offered as a row even when nothing was sniffed, so count it.
+    NSString *live = tab.webView.URL.absoluteString;
+    if (!live.length) live = tab.url;
+    if ([MVSnifferItem isVideoPageURL:live]) count += 1;
     self.sniffBadge.hidden = (count == 0);
     self.sniffBadge.text = count > 99 ? @"99+" : [NSString stringWithFormat:@"%lu", (unsigned long)count];
     self.sniffButton.accessibilityValue = [NSString stringWithFormat:@"%lu", (unsigned long)count];
@@ -928,9 +949,13 @@ static id gParkedObserver = nil;
 
 - (void)showSnifferSheet {
     MVBrowserTab *tab = self.activeTab;
+    // Prefer the web view's live URL: on a single-page app tab.url can lag by a
+    // navigation, and this URL is what a page download is handed.
+    NSString *live = tab.webView.URL.absoluteString.length ? tab.webView.URL.absoluteString : tab.url;
+    if (live.length) tab.url = live;
     MVSnifferSheetViewController *sheet =
         [[MVSnifferSheetViewController alloc] initWithTabIdentifier:tab.identifier
-                                                          pageURL:tab.url
+                                                          pageURL:live
                                                         pageTitle:tab.title];
     sheet.modalPresentationStyle = UIModalPresentationPageSheet;
     UISheetPresentationController *presentation = sheet.sheetPresentationController;
@@ -952,7 +977,13 @@ static id gParkedObserver = nil;
 - (void)downloadItems:(NSArray<MVSnifferItem *> *)items {
     if (!items.count) return;
     for (MVSnifferItem *item in items) {
-        [[MVDownloadManager shared] enqueueItem:item];
+        // A page row is not a file the direct engine can fetch; it goes through
+        // yt-dlp, exactly like the "download page" button.
+        if (item.isPage) {
+            [[MVDownloadEngine shared] downloadURL:item.url quality:@"best" completion:nil];
+        } else {
+            [[MVDownloadManager shared] enqueueItem:item];
+        }
     }
     [self notifyQueued];
 }
@@ -960,8 +991,13 @@ static id gParkedObserver = nil;
 /// Hands the page URL to the Python engine, which knows how to extract a video
 /// the sniffer cannot reach (a blob player, a token-protected stream).
 - (void)downloadPageWithYTDlp:(NSString *)pageURL title:(NSString *)title {
-    if (!pageURL.length) return;
-    [[MVDownloadEngine shared] downloadURL:pageURL quality:@"best" completion:nil];
+    // Re-read the web view's URL here: the sheet's copy was taken when it opened,
+    // and a single-page app may have moved on since.
+    MVBrowserTab *tab = self.activeTab;
+    NSString *live = tab.webView.URL.absoluteString.length ? tab.webView.URL.absoluteString : pageURL;
+    if (!live.length) live = tab.url;
+    if (!live.length) return;
+    [[MVDownloadEngine shared] downloadURL:live quality:@"best" completion:nil];
     [self notifyQueued];
 }
 

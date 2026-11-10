@@ -15,6 +15,7 @@ typedef NS_ENUM(NSInteger, MVSniffKind) {
     MVSniffKindHLS,       ///< .m3u8 — handled by the HLS engine (later phase)
     MVSniffKindDASH,      ///< .mpd  — not supported, offered to yt-dlp
     MVSniffKindTorrent,   ///< magnet: or .torrent — handled by the torrent engine (later phase)
+    MVSniffKindPage,      ///< a watch/shorts page, not a file — fetched by yt-dlp
 };
 
 /// One media or file link the page touched.
@@ -47,6 +48,9 @@ typedef NS_ENUM(NSInteger, MVSniffKind) {
 @property (nonatomic, readonly) BOOL isDirectFile;
 /// YES for magnet links and .torrent files.
 @property (nonatomic, readonly) BOOL isTorrent;
+/// YES for a video page (a watch/shorts page) rather than a media file. The page
+/// is downloaded by yt-dlp, not by the direct engine.
+@property (nonatomic, readonly) BOOL isPage;
 
 + (instancetype)itemWithURL:(NSString *)url
                     pageURL:(nullable NSString *)pageURL
@@ -60,6 +64,12 @@ typedef NS_ENUM(NSInteger, MVSniffKind) {
 /// The kind implied by a URL and/or MIME type. Exposed so the download manager
 /// can classify a URL that did not come from the sniffer.
 + (MVSniffKind)kindForURL:(NSString *)url mime:(nullable NSString *)mime;
+
+/// YES when the URL is a page a single-video extractor can open, even though the
+/// page itself is not a media file. YouTube (and similar sites) play through a
+/// blob, so the sniffer finds no downloadable link and the sheet looks empty;
+/// the page URL is still what yt-dlp needs, so the sheet offers it as a row.
++ (BOOL)isVideoPageURL:(nullable NSString *)url;
 
 /// The SF Symbol that stands for a kind.
 + (NSString *)symbolForKind:(MVSniffKind)kind;

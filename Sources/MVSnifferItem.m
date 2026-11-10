@@ -100,6 +100,23 @@ static NSDictionary<NSString *, NSNumber *> *MVKindByExtension(void) {
     return MVSniffKindUnknown;
 }
 
++ (BOOL)isVideoPageURL:(NSString *)url {
+    if (!url.length) return NO;
+    NSURLComponents *c = [NSURLComponents componentsWithString:url];
+    NSString *host = c.host.lowercaseString;
+    if (!host.length) return NO;
+    NSString *path = c.path.lowercaseString ?: @"";
+    // yt-dlp's single-video extractors are keyed on the path, not the host, so
+    // this is deliberately narrow: a feed or a search page must NOT match, or the
+    // "download this page" row would offer something with no video on it.
+    if ([host hasSuffix:@"youtube.com"]) {
+        return [path isEqualToString:@"/watch"] || [path hasPrefix:@"/shorts/"] ||
+               [path hasPrefix:@"/live/"] || [path hasPrefix:@"/embed/"];
+    }
+    if ([host isEqualToString:@"youtu.be"]) return path.length > 1;
+    return NO;
+}
+
 + (NSString *)symbolForKind:(MVSniffKind)kind {
     switch (kind) {
         case MVSniffKindVideo:    return @"film";
@@ -111,6 +128,7 @@ static NSDictionary<NSString *, NSNumber *> *MVKindByExtension(void) {
         case MVSniffKindHLS:      return @"dot.radiowaves.left.and.right";
         case MVSniffKindDASH:     return @"dot.radiowaves.left.and.right";
         case MVSniffKindTorrent:  return @"arrow.up.arrow.down.circle";
+        case MVSniffKindPage:     return @"play.rectangle";
         default:                  return @"doc";
     }
 }
@@ -126,6 +144,7 @@ static NSDictionary<NSString *, NSNumber *> *MVKindByExtension(void) {
         case MVSniffKindHLS:      return @"Stream (HLS)";
         case MVSniffKindDASH:     return @"Stream (DASH)";
         case MVSniffKindTorrent:  return @"Torrent";
+        case MVSniffKindPage:     return @"Video page";
         default:                  return @"File";
     }
 }
@@ -145,6 +164,8 @@ static NSDictionary<NSString *, NSNumber *> *MVKindByExtension(void) {
 }
 
 - (BOOL)isTorrent { return self.kind == MVSniffKindTorrent; }
+
+- (BOOL)isPage { return self.kind == MVSniffKindPage; }
 
 - (BOOL)isDownloadable {
     // HLS/DASH/Torrent are downloadable in principle but their engines arrive in

@@ -227,6 +227,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Torrent": @"تورنت",
             @"Stream (HLS)": @"بث (HLS)",
             @"Stream (DASH)": @"بث (DASH)",
+            @"Video page": @"صفحة فيديو",
             @"Later update": @"تحديث لاحق",
             @"Stream downloads arrive in a later update": @"تنزيل البث يصل في تحديث لاحق",
             @"DASH streams arrive in a later update": @"بث DASH يصل في تحديث لاحق",

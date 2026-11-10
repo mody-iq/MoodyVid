@@ -144,5 +144,68 @@ class DownloadPanelTests(unittest.TestCase):
                 self.assertNotIn("+", self.downloader._selector(quality))
 
 
+class FailureDescriptionTests(unittest.TestCase):
+    """The row must name the real reason, not 'file could not be found'.
+
+    A feed/search page extracts to a playlist with no entries, and a DASH-only
+    video has no combined format. Both used to surface as the same misleading
+    message, which hid the actual cause from the log.
+    """
+
+    def setUp(self):
+        import downloader
+        self.downloader = downloader
+
+    def test_an_empty_playlist_is_named_as_a_non_video_page(self):
+        info = {"_type": "playlist", "id": "recommended", "entries": []}
+        reason = self.downloader._describe_failure("https://m.youtube.com/?ra=m", info)
+        self.assertIn("not a video", reason)
+
+    def test_a_dash_only_video_is_named(self):
+        info = {"formats": [{"format_id": "137"}, {"format_id": "140"}]}
+        reason = self.downloader._describe_failure("https://m.youtube.com/watch?v=x", info)
+        self.assertIn("single playable format", reason)
+
+    def test_an_unexplained_result_still_has_a_plain_fallback(self):
+        reason = self.downloader._describe_failure("https://example.com/x", {})
+        self.assertTrue(reason)
+
+    def test_a_missing_info_never_raises(self):
+        self.assertTrue(self.downloader._describe_failure("https://example.com/x", None))
+
+    def test_player_clients_skip_the_bot_blocked_web_styles(self):
+        flat = [c for group in self.downloader.PLAYER_CLIENTS for c in (group or [])]
+        for blocked in ["tv_simply", "web_safari", "mweb", "web_embedded"]:
+            self.assertNotIn(blocked, flat)
+
+
+class ErrorMessageTests(unittest.TestCase):
+    """The row shows one line, so yt-dlp's coloured paragraphs are tamed."""
+
+    def setUp(self):
+        import downloader
+        self.downloader = downloader
+
+    def _payload(self, message):
+        return json.loads(self.downloader._error(message))
+
+    def test_strips_colour_codes(self):
+        text = self._payload("\x1b[0;31mERROR:\x1b[0m something broke")["error"]
+        self.assertNotIn("\x1b", text)
+        self.assertIn("something broke", text)
+
+    def test_names_the_bot_block_in_plain_words(self):
+        text = self._payload("ERROR: Sign in to confirm you're not a bot.")["error"]
+        self.assertIn("blocked", text)
+
+    def test_names_a_missing_format(self):
+        text = self._payload("Requested format is not available")["error"]
+        self.assertIn("single playable format", text)
+
+    def test_passes_an_unknown_error_through(self):
+        text = self._payload("some brand new failure")["error"]
+        self.assertEqual(text, "some brand new failure")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

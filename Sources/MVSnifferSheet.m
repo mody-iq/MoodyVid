@@ -273,7 +273,23 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
 - (void)dismissSheet { [self dismissViewControllerAnimated:YES completion:nil]; }
 
 - (void)reload {
-    self.items = [MVSnifferStore.shared itemsForTab:self.tabID].mutableCopy ?: [NSMutableArray array];
+    NSMutableArray<MVSnifferItem *> *items =
+        ([MVSnifferStore.shared itemsForTab:self.tabID].mutableCopy ?: [NSMutableArray array]);
+    // A page that plays through a blob (YouTube and friends) yields no sniffable
+    // link, which left the sheet empty even though the page is downloadable. Offer
+    // the page itself, at the top, so the row is right there.
+    if ([MVSnifferItem isVideoPageURL:self.pageURL]) {
+        MVSnifferItem *page = [MVSnifferItem itemWithURL:self.pageURL
+                                                pageURL:self.pageURL
+                                              pageTitle:self.pageTitle
+                                                   mime:nil];
+        page.kind = MVSniffKindPage;
+        page.suggestedFilename = self.pageTitle.length ? self.pageTitle : page.displayName;
+        page.probed = YES;   // nothing to probe; a page has no size
+        page.totalBytes = 0;
+        [items insertObject:page atIndex:0];
+    }
+    self.items = items;
     self.emptyLabel.hidden = self.items.count > 0;
     [self.tableView reloadData];
 }
