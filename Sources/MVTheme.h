@@ -84,6 +84,27 @@ extern NSString *const MVThemeDidChangeNotification;
 /// A pill-shaped filled button in the accent colour.
 + (void)applyPrimaryButtonStyle:(UIButton *)button;
 
+#pragma mark - Layout tokens
+//
+/// Shared metrics so the screens line up without each one inventing its own
+/// numbers. Cards use one corner radius, one gap between them and one padding to
+/// the screen edge.
+
++ (CGFloat)cardCornerRadius;   ///< 16
++ (CGFloat)cardSpacing;        ///< 12 — gap between stacked cards
++ (CGFloat)screenPadding;      ///< 16 — leading/trailing inset of content
++ (CGFloat)minTouchTarget;     ///< 44 — the minimum tappable size
+
+#pragma mark - Fonts
+
++ (UIFont *)cardTitleFont;     ///< semibold 15, for a card's title
++ (UIFont *)cardDetailFont;    ///< regular 12, for a card's detail line
++ (UIFont *)sectionHeaderFont; ///< semibold 13, for a section header
++ (UIFont *)chipFont;          ///< semibold 13, for a status chip
+
+/// A soft tinted square behind a type icon, so a card reads at a glance.
++ (void)applyIconTileStyle:(UIView *)view tint:(UIColor *)tint;
+
 @end
 
 typedef NS_ENUM(NSInteger, MVThemeMode) {

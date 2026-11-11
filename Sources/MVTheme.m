@@ -397,4 +397,25 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
     button.layer.cornerCurve = kCACornerCurveContinuous;
 }
 
+#pragma mark - Layout tokens
+
++ (CGFloat)cardCornerRadius { return 16.0; }
++ (CGFloat)cardSpacing { return 12.0; }
++ (CGFloat)screenPadding { return 16.0; }
++ (CGFloat)minTouchTarget { return 44.0; }
+
+#pragma mark - Fonts
+
++ (UIFont *)cardTitleFont { return [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]; }
++ (UIFont *)cardDetailFont { return [UIFont systemFontOfSize:12 weight:UIFontWeightRegular]; }
++ (UIFont *)sectionHeaderFont { return [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]; }
++ (UIFont *)chipFont { return [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]; }
+
++ (void)applyIconTileStyle:(UIView *)view tint:(UIColor *)tint {
+    if (!view) return;
+    view.backgroundColor = [tint colorWithAlphaComponent:0.16];
+    view.layer.cornerRadius = 10.0;
+    view.layer.cornerCurve = kCACornerCurveContinuous;
+}
+
 @end
