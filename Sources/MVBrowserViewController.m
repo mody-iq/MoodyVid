@@ -866,8 +866,8 @@ static id gParkedObserver = nil;
     }
 
     if ([type isEqualToString:@"blob"]) {
-        // The page plays a blob: stream the app cannot fetch. The sheet's
-        // "download this page with yt-dlp" action covers this case.
+        // The page plays a blob: stream the app cannot fetch. The sheet's quality
+        // list covers this case by handing the page itself to yt-dlp.
         MVLogInfo(@"sniffer: blob player on %@", pageURL);
         return;
     }
@@ -918,14 +918,19 @@ static id gParkedObserver = nil;
     if (presentation) {
         presentation.detents = @[[UISheetPresentationControllerDetent mediumDetent],
                                  [UISheetPresentationControllerDetent largeDetent]];
+        // Open tall: the quality list is the reason the sheet was opened, and a
+        // half-height sheet would hide its last rows behind a scroll.
+        presentation.selectedDetentIdentifier = UISheetPresentationControllerDetentIdentifierLarge;
         presentation.prefersGrabberVisible = YES;
     }
     __weak typeof(self) weakSelf = self;
     sheet.onDownload = ^(NSArray<MVSnifferItem *> *items) {
         [weakSelf downloadItems:items];
     };
-    sheet.onDownloadPageWithYTDlp = ^(NSString *pageURL, NSString *pageTitle) {
-        [weakSelf downloadPageWithYTDlp:pageURL title:pageTitle];
+    // The sheet asks for the quality itself, so there is no second sheet: the
+    // job starts straight from the tap.
+    sheet.onDownloadPage = ^(NSString *pageURL, NSString *pageTitle, NSString *quality) {
+        [weakSelf enqueuePageDownload:pageURL quality:quality];
     };
     [self presentViewController:sheet animated:YES completion:nil];
 }
@@ -935,16 +940,9 @@ static id gParkedObserver = nil;
     BOOL anyAdded = NO;
     BOOL anyDuplicate = NO;
     for (MVSnifferItem *item in items) {
-        // A page row is not a file the direct engine can fetch; it goes through
-        // yt-dlp, exactly like the "download page" button.
-        if (item.isPage) {
-            [[MVDownloadEngine shared] downloadURL:item.url quality:@"best" completion:nil];
-            anyAdded = YES;
-        } else {
-            BOOL added = NO;
-            [[MVDownloadManager shared] enqueueItem:item added:&added];
-            if (added) anyAdded = YES; else anyDuplicate = YES;
-        }
+        BOOL added = NO;
+        [[MVDownloadManager shared] enqueueItem:item added:&added];
+        if (added) anyAdded = YES; else anyDuplicate = YES;
     }
     // Every row was already in the list: say so instead of a silent no-op.
     if (!anyAdded && anyDuplicate) {
@@ -954,49 +952,11 @@ static id gParkedObserver = nil;
     [self notifyQueued];
 }
 
-/// Hands the page URL to the Python engine, which knows how to extract a video
-/// the sniffer cannot reach (a blob player, a token-protected stream). The user
-/// picks the quality, because a high one is fetched as two streams and muxed.
-- (void)downloadPageWithYTDlp:(NSString *)pageURL title:(NSString *)title {
-    // Re-read the web view's URL here: the sheet's copy was taken when it opened,
-    // and a single-page app may have moved on since.
-    MVBrowserTab *tab = self.activeTab;
-    NSString *live = tab.webView.URL.absoluteString.length ? tab.webView.URL.absoluteString : pageURL;
-    if (!live.length) live = tab.url;
-    if (!live.length) return;
-    [self presentQualitySheetForURL:live title:title];
-}
-
-/// The same quality choices the Home screen offers. A quality of 1080 or higher
-/// is downloaded as a separate video + audio stream and muxed on device.
-- (void)presentQualitySheetForURL:(NSString *)url title:(NSString *)title {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title.length ? title : [MVLang t:@"Choose quality"]
-                                                                  message:nil
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray<NSArray<NSString *> *> *options = @[
-        @[@"Best available", @"best"],
-        @[@"1080p HD", @"1080"],
-        @[@"Up to 720p", @"720p"],
-        @[@"Up to 480p", @"480p"],
-        @[@"Audio only (M4A)", @"audio"],
-        @[@"MP3 (audio)", @"mp3"],
-    ];
-    __weak typeof(self) weakSelf = self;
-    for (NSArray<NSString *> *option in options) {
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:option[0]]
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) {
-            [weakSelf enqueuePageDownload:url quality:option[1]];
-        }]];
-    }
-    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-    alert.popoverPresentationController.sourceView = self.sniffButton;
-    alert.popoverPresentationController.sourceRect = self.sniffButton.bounds;
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
+/// Starts the page download at the chosen quality. The quality list lives in the
+/// sheet that is already on screen, so nothing is presented from here.
 - (void)enqueuePageDownload:(NSString *)url quality:(NSString *)quality {
-    [[MVDownloadEngine shared] downloadURL:url quality:quality completion:nil];
+    if (!url.length) return;
+    [[MVDownloadEngine shared] downloadURL:url quality:quality ?: @"best" completion:nil];
     [self notifyQueued];
 }
 

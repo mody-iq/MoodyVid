@@ -1,132 +1,127 @@
 #import "MVSnifferSheet.h"
 #import "MVSnifferStore.h"
-#import "MVMediaProbe.h"
 #import "MVLang.h"
 #import "MVTheme.h"
 #import "MVPaths.h"
-#import "MVLog.h"
 
 static NSString *const kItemCell = @"MVSnifferItemCell";
+static NSString *const kQualityCell = @"MVSnifferQualityCell";
 
-#pragma mark - Row
+/// The qualities the page itself can be fetched at, best first. "best" lets
+/// yt-dlp choose; 1080 and above is fetched as two streams and muxed on device.
+static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
+    static NSArray *options;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        options = @[
+            @[@"Best available", @"best"],
+            @[@"1080p HD", @"1080"],
+            @[@"Up to 720p", @"720p"],
+            @[@"Up to 480p", @"480p"],
+            @[@"Audio only (M4A)", @"audio"],
+            @[@"MP3 (audio)", @"mp3"],
+        ];
+    });
+    return options;
+}
 
-/// One detected link. A fixed 68pt row: icon, name, a subtitle that carries the
-/// kind and the size, and a trailing Download button.
-@interface MVSnifferRowCell : UITableViewCell
-@property (nonatomic, strong) UIView *card;
-@property (nonatomic, strong) UIView *iconBack;
-@property (nonatomic, strong) UIImageView *icon;
-@property (nonatomic, strong) UILabel *nameLabel;
-@property (nonatomic, strong) UILabel *detailLabel;
-@property (nonatomic, strong) UIButton *downloadButton;
-@property (nonatomic, copy, nullable) void (^onDownload)(void);
-- (void)configureWithItem:(MVSnifferItem *)item;
+#pragma mark - Quality row
+
+/// One quality choice. A plain row: the list itself is the answer to the
+/// question the sheet asked, so it needs no card around each line.
+@interface MVSnifferQualityCell : UITableViewCell
+- (void)configureWithTitle:(NSString *)title symbol:(NSString *)symbol;
 @end
 
-@implementation MVSnifferRowCell
+@implementation MVSnifferQualityCell
 
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
-        self.backgroundColor = UIColor.clearColor;
-        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        self.backgroundColor = [MVTheme card];
+        self.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+        self.textLabel.textColor = [MVTheme text];
+        self.imageView.tintColor = [MVTheme accent];
+    }
+    return self;
+}
 
-        _card = [UIView new];
-        _card.translatesAutoresizingMaskIntoConstraints = NO;
-        _card.backgroundColor = [MVTheme glassCard];
-        _card.layer.cornerRadius = 14;
-        _card.layer.cornerCurve = kCACornerCurveContinuous;
-        _card.layer.borderWidth = 0.5;
-        _card.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.3].CGColor;
-        [self.contentView addSubview:_card];
+- (void)configureWithTitle:(NSString *)title symbol:(NSString *)symbol {
+    self.textLabel.text = title;
+    self.imageView.image = [UIImage systemImageNamed:symbol];
+    self.imageView.preferredSymbolConfiguration =
+        [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIFontWeightRegular];
+}
 
-        _iconBack = [UIView new];
-        _iconBack.translatesAutoresizingMaskIntoConstraints = NO;
-        _iconBack.layer.cornerRadius = 10;
-        _iconBack.layer.masksToBounds = YES;
-        [_card addSubview:_iconBack];
+@end
+
+#pragma mark - Item row
+
+/// One link the sniffer found: glyph, name, and the kind with its size. Tapping
+/// downloads it; swiping copies the link.
+@interface MVSnifferItemCell : UITableViewCell
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UILabel *detailLabel;
+@property (nonatomic, strong) UIImageView *icon;
+- (void)configureWithItem:(MVSnifferItem *)item;
+@end
+
+@implementation MVSnifferItemCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
+        self.backgroundColor = [MVTheme card];
+        self.selectionStyle = UITableViewCellSelectionStyleDefault;
 
         _icon = [UIImageView new];
         _icon.translatesAutoresizingMaskIntoConstraints = NO;
         _icon.contentMode = UIViewContentModeScaleAspectFit;
-        _icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIFontWeightSemibold];
-        [_card addSubview:_icon];
+        _icon.preferredSymbolConfiguration =
+            [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIFontWeightRegular];
+        [self.contentView addSubview:_icon];
 
         _nameLabel = [UILabel new];
         _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        _nameLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        _nameLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
         _nameLabel.textColor = [MVTheme text];
         _nameLabel.numberOfLines = 1;
         _nameLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        [_card addSubview:_nameLabel];
+        [self.contentView addSubview:_nameLabel];
 
         _detailLabel = [UILabel new];
         _detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        _detailLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        _detailLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
         _detailLabel.textColor = [MVTheme secondaryText];
         _detailLabel.numberOfLines = 1;
-        [_card addSubview:_detailLabel];
-
-        _downloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        _downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
-        [_downloadButton setImage:[UIImage systemImageNamed:@"arrow.down.circle.fill"] forState:UIControlStateNormal];
-        _downloadButton.tintColor = [MVTheme accent];
-        [_downloadButton addTarget:self action:@selector(downloadTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_card addSubview:_downloadButton];
+        [self.contentView addSubview:_detailLabel];
 
         [NSLayoutConstraint activateConstraints:@[
-            [_card.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
-            [_card.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16],
-            [_card.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
-            [_card.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4],
+            [_icon.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:20],
+            [_icon.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+            [_icon.widthAnchor constraintEqualToConstant:24],
+            [_icon.heightAnchor constraintEqualToConstant:24],
 
-            [_iconBack.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:12],
-            [_iconBack.centerYAnchor constraintEqualToAnchor:_card.centerYAnchor],
-            [_iconBack.widthAnchor constraintEqualToConstant:36],
-            [_iconBack.heightAnchor constraintEqualToConstant:36],
-
-            [_icon.centerXAnchor constraintEqualToAnchor:_iconBack.centerXAnchor],
-            [_icon.centerYAnchor constraintEqualToAnchor:_iconBack.centerYAnchor],
-
-            [_nameLabel.leadingAnchor constraintEqualToAnchor:_iconBack.trailingAnchor constant:12],
-            [_nameLabel.trailingAnchor constraintEqualToAnchor:_downloadButton.leadingAnchor constant:-8],
-            [_nameLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:12],
+            [_nameLabel.leadingAnchor constraintEqualToAnchor:_icon.trailingAnchor constant:14],
+            [_nameLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-20],
+            [_nameLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10],
 
             [_detailLabel.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
             [_detailLabel.trailingAnchor constraintEqualToAnchor:_nameLabel.trailingAnchor],
             [_detailLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:2],
-
-            [_downloadButton.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-12],
-            [_downloadButton.centerYAnchor constraintEqualToAnchor:_card.centerYAnchor],
-            [_downloadButton.widthAnchor constraintEqualToConstant:36],
-            [_downloadButton.heightAnchor constraintEqualToConstant:36],
         ]];
     }
     return self;
 }
 
-- (void)downloadTapped { if (self.onDownload) self.onDownload(); }
-
 - (void)configureWithItem:(MVSnifferItem *)item {
     self.nameLabel.text = item.displayName;
     self.icon.image = [UIImage systemImageNamed:[MVSnifferItem symbolForKind:item.kind]];
-    self.icon.tintColor = [MVTheme accent];
-    self.iconBack.backgroundColor = [[MVTheme accent] colorWithAlphaComponent:0.14];
+    self.icon.tintColor = [MVTheme iconTint];
 
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     [parts addObject:[MVLang t:[MVSnifferItem titleKeyForKind:item.kind]]];
     if (item.totalBytes > 0) [parts addObject:[MVPaths formatBytes:item.totalBytes]];
     else if (!item.probed) [parts addObject:[MVLang t:@"Checking…"]];
-    // Torrent files download now; a magnet link still needs the BEP 9 metadata
-    // exchange, so only that is marked as pending.
-    if (item.isTorrent && [item.url.lowercaseString hasPrefix:@"magnet:"]) {
-        [parts addObject:[MVLang t:@"Later update"]];
-    }
-    self.detailLabel.text = [parts componentsJoinedByString:@" • "];
-}
-
-- (void)prepareForReuse {
-    [super prepareForReuse];
-    self.onDownload = nil;
+    self.detailLabel.text = [parts componentsJoinedByString:@" · "];
 }
 
 @end
@@ -140,6 +135,7 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *emptyLabel;
 @property (nonatomic, strong) NSMutableArray<MVSnifferItem *> *items;
+@property (nonatomic) BOOL offersPage;
 @property (nonatomic, strong, nullable) id storeObserver;
 @end
 
@@ -152,19 +148,22 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
         _tabID = [tabID copy];
         _pageURL = [pageURL copy];
         _pageTitle = [pageTitle copy];
+        _items = [NSMutableArray array];
     }
     return self;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.clearColor;
+    self.view.backgroundColor = [MVTheme background];
 
     UILabel *title = [UILabel new];
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.text = [MVLang t:@"Found media"];
-    title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+    title.text = self.pageTitle.length ? self.pageTitle : [MVLang t:@"Download"];
+    title.font = [UIFont systemFontOfSize:19 weight:UIFontWeightBold];
     title.textColor = [MVTheme text];
+    title.numberOfLines = 1;
+    title.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.view addSubview:title];
 
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -174,59 +173,28 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
     [close addTarget:self action:@selector(dismissSheet) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:close];
 
-    UILabel *subtitle = [UILabel new];
-    subtitle.translatesAutoresizingMaskIntoConstraints = NO;
-    subtitle.text = [MVLang t:@"Tap to download, long press for more"];
-    subtitle.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    subtitle.textColor = [MVTheme secondaryText];
-    [self.view addSubview:subtitle];
-
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.backgroundColor = UIColor.clearColor;
-    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
-    self.tableView.rowHeight = 76;
-    [self.tableView registerClass:MVSnifferRowCell.class forCellReuseIdentifier:kItemCell];
+    self.tableView.rowHeight = 58;
+    [self.tableView registerClass:MVSnifferQualityCell.class forCellReuseIdentifier:kQualityCell];
+    [self.tableView registerClass:MVSnifferItemCell.class forCellReuseIdentifier:kItemCell];
     [self.view addSubview:self.tableView];
 
     self.emptyLabel = [UILabel new];
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.emptyLabel.text = [MVLang t:@"Nothing found yet"];
-    self.emptyLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.emptyLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
     self.emptyLabel.textColor = [MVTheme secondaryText];
     self.emptyLabel.textAlignment = NSTextAlignmentCenter;
     self.emptyLabel.numberOfLines = 0;
+    self.emptyLabel.hidden = YES;
     [self.view addSubview:self.emptyLabel];
 
-    // Page actions: the yt-dlp path is what makes an un-sniffable page (a site
-    // whose stream is behind a blob or a token) still downloadable.
-    UIStackView *actions = [UIStackView new];
-    actions.translatesAutoresizingMaskIntoConstraints = NO;
-    actions.axis = UILayoutConstraintAxisHorizontal;
-    actions.spacing = 10;
-    actions.distribution = UIStackViewDistributionFillEqually;
-
-    UIButton *all = [UIButton buttonWithType:UIButtonTypeSystem];
-    [all setTitle:[MVLang t:@"Download all"] forState:UIControlStateNormal];
-    [MVTheme applyPrimaryButtonStyle:all];
-    [all addTarget:self action:@selector(downloadAll) forControlEvents:UIControlEventTouchUpInside];
-
-    UIButton *page = [UIButton buttonWithType:UIButtonTypeSystem];
-    [page setTitle:[MVLang t:@"Download page with yt-dlp"] forState:UIControlStateNormal];
-    page.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    page.titleLabel.numberOfLines = 2;
-    [MVTheme applyCardStyle:page cornerRadius:18];
-    [page setTitleColor:[MVTheme accent] forState:UIControlStateNormal];
-    [page addTarget:self action:@selector(downloadPage) forControlEvents:UIControlEventTouchUpInside];
-
-    [actions addArrangedSubview:all];
-    [actions addArrangedSubview:page];
-    [self.view addSubview:actions];
-
     [NSLayoutConstraint activateConstraints:@[
-        [title.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:18],
+        [title.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:20],
         [title.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
         [title.trailingAnchor constraintLessThanOrEqualToAnchor:close.leadingAnchor constant:-8],
 
@@ -235,24 +203,15 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
         [close.widthAnchor constraintEqualToConstant:32],
         [close.heightAnchor constraintEqualToConstant:32],
 
-        [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:2],
-        [subtitle.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-        [subtitle.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
-
-        [self.tableView.topAnchor constraintEqualToAnchor:subtitle.bottomAnchor constant:12],
+        [self.tableView.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:10],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.tableView.bottomAnchor constraintEqualToAnchor:actions.topAnchor constant:-8],
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
         [self.emptyLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.emptyLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
         [self.emptyLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:32],
         [self.emptyLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-32],
-
-        [actions.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [actions.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
-        [actions.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-14],
-        [actions.heightAnchor constraintEqualToConstant:46],
     ]];
 
     self.view.semanticContentAttribute = MVLang.shared.isRTL
@@ -276,46 +235,59 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
 - (void)reload {
     NSMutableArray<MVSnifferItem *> *items =
         ([MVSnifferStore.shared itemsForTab:self.tabID].mutableCopy ?: [NSMutableArray array]);
-    // A page that plays through a blob (YouTube and friends) yields no sniffable
-    // link, which left the sheet empty even though the page is downloadable. Offer
-    // the page itself, at the top, so the row is right there.
-    if ([MVSnifferItem isVideoPageURL:self.pageURL]) {
-        MVSnifferItem *page = [MVSnifferItem itemWithURL:self.pageURL
-                                                pageURL:self.pageURL
-                                              pageTitle:self.pageTitle
-                                                   mime:nil];
-        page.kind = MVSniffKindPage;
-        page.suggestedFilename = self.pageTitle.length ? self.pageTitle : page.displayName;
-        page.probed = YES;   // nothing to probe; a page has no size
-        page.totalBytes = 0;
-        [items insertObject:page atIndex:0];
-    }
     self.items = items;
-    self.emptyLabel.hidden = self.items.count > 0;
+    // Offer the page itself when it is a known video page, or when the sniffer
+    // found nothing to download — otherwise a page whose stream it cannot see
+    // would be a dead end. Latch it on, because a link the sniffer finds a moment
+    // later must not pull the quality list out from under the user's finger.
+    BOOL videoPage = self.pageURL.length > 0 && [MVSnifferItem isVideoPageURL:self.pageURL];
+    if (videoPage || items.count == 0) self.offersPage = self.pageURL.length > 0;
+    self.emptyLabel.hidden = (self.offersPage || self.items.count > 0);
     [self.tableView reloadData];
 }
 
 #pragma mark - Table
 
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return (self.offersPage ? 1 : 0) + (self.items.count ? 1 : 0);
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return self.items.count;
+    if (self.offersPage && section == 0) return (NSInteger)MVQualityOptions().count;
+    return (NSInteger)self.items.count;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (self.offersPage && section == 0) return [MVLang t:@"Video quality"];
+    return [MVLang t:@"Files on this page"];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    MVSnifferRowCell *cell = [tableView dequeueReusableCellWithIdentifier:kItemCell forIndexPath:indexPath];
-    MVSnifferItem *item = self.items[indexPath.row];
-    [cell configureWithItem:item];
-    __weak typeof(self) weakSelf = self;
-    cell.onDownload = ^{ [weakSelf downloadItem:item]; };
+    if (self.offersPage && indexPath.section == 0) {
+        MVSnifferQualityCell *cell = [tableView dequeueReusableCellWithIdentifier:kQualityCell forIndexPath:indexPath];
+        NSArray<NSString *> *option = MVQualityOptions()[indexPath.row];
+        NSString *symbol = indexPath.row == 0 ? @"wand.and.stars"
+                         : (indexPath.row >= 4 ? @"music.note" : @"film");
+        [cell configureWithTitle:[MVLang t:option[0]] symbol:symbol];
+        return cell;
+    }
+    MVSnifferItemCell *cell = [tableView dequeueReusableCellWithIdentifier:kItemCell forIndexPath:indexPath];
+    [cell configureWithItem:self.items[indexPath.row]];
     return cell;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [self downloadItem:self.items[indexPath.row]];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.offersPage && indexPath.section == 0) {
+        [self chooseQuality:MVQualityOptions()[indexPath.row][1]];
+    } else {
+        [self downloadItem:self.items[indexPath.row]];
+    }
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (self.offersPage && indexPath.section == 0) return nil;
     MVSnifferItem *item = self.items[indexPath.row];
     UIContextualAction *copy = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                        title:[MVLang t:@"Copy link"]
@@ -329,28 +301,22 @@ static NSString *const kItemCell = @"MVSnifferItemCell";
 
 #pragma mark - Actions
 
+- (void)chooseQuality:(NSString *)quality {
+    if (!self.pageURL.length || !self.onDownloadPage) return;
+    // Dismiss first: the browser starts the job from its own completion, and two
+    // presentations at once are dropped silently.
+    NSString *url = self.pageURL;
+    NSString *title = self.pageTitle ?: @"";
+    void (^handler)(NSString *, NSString *, NSString *) = self.onDownloadPage;
+    [self dismissViewControllerAnimated:YES completion:^{
+        handler(url, title, quality);
+    }];
+}
+
 - (void)downloadItem:(MVSnifferItem *)item {
     if (!item || !self.onDownload) return;
     self.onDownload(@[item]);
     [self dismissSheet];
-}
-
-- (void)downloadAll {
-    if (!self.items.count || !self.onDownload) return;
-    self.onDownload(self.items.copy);
-    [self dismissSheet];
-}
-
-- (void)downloadPage {
-    if (!self.pageURL.length || !self.onDownloadPageWithYTDlp) return;
-    // Dismiss first: the browser then presents its quality sheet, and two
-    // presentations at once are dropped silently.
-    NSString *url = self.pageURL;
-    NSString *title = self.pageTitle ?: @"";
-    void (^handler)(NSString *, NSString *) = self.onDownloadPageWithYTDlp;
-    [self dismissViewControllerAnimated:YES completion:^{
-        handler(url, title);
-    }];
 }
 
 @end

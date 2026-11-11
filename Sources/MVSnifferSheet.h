@@ -3,22 +3,22 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// The sheet that lists everything the sniffer found in a tab.
+/// The one sheet a download button opens: what to fetch, and at what quality.
 ///
-/// Rows are grouped by kind (videos first, then audio, files, streams), each with
-/// its own icon, name and size. Every row can be downloaded or its link copied,
-/// and the sheet offers "Download all" plus a "download this page with yt-dlp"
-/// action for pages whose stream the sniffer cannot reach directly.
+/// A video page shows the quality list first, because that is the choice the
+/// user came to make; the links the sniffer found are listed under it as plain
+/// files. There is no second sheet — picking a quality starts the download and
+/// closes this one, which is what made the old two-step flow feel heavy.
 @interface MVSnifferSheetViewController : UIViewController
 
 - (instancetype)initWithTabIdentifier:(NSString *)tabID
                              pageURL:(nullable NSString *)pageURL
                            pageTitle:(nullable NSString *)pageTitle;
 
-/// Called with the items the user asked to download (one row, or all).
+/// Called with the file rows the user tapped.
 @property (nonatomic, copy, nullable) void (^onDownload)(NSArray<MVSnifferItem *> *items);
-/// Called when the user asks to hand the page to yt-dlp.
-@property (nonatomic, copy, nullable) void (^onDownloadPageWithYTDlp)(NSString *pageURL, NSString *pageTitle);
+/// Called when the user picks a quality for the page itself (yt-dlp's job).
+@property (nonatomic, copy, nullable) void (^onDownloadPage)(NSString *pageURL, NSString *pageTitle, NSString *quality);
 
 @end
 

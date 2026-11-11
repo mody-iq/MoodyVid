@@ -224,9 +224,8 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             // Browser & sniffer (Phase 1)
             @"Found media": @"الوسائط المكتشفة",
             @"Nothing found yet": @"لم يتم العثور على شيء بعد",
-            @"Tap to download, long press for more": @"اضغط للتنزيل، واضغط مطولاً للمزيد",
-            @"Download all": @"تنزيل الكل",
-            @"Download page with yt-dlp": @"تنزيل الصفحة عبر yt-dlp",
+            @"Video quality": @"جودة الفيديو",
+            @"Files on this page": @"ملفات في هذه الصفحة",
             @"Download this file?": @"تنزيل هذا الملف؟",
             @"Copy link": @"نسخ الرابط",
             @"Show in Files": @"إظهار في الملفات",
