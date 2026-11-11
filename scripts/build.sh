@@ -135,6 +135,7 @@ xcrun --sdk iphoneos clang \
   -framework AVKit -framework AVFoundation -framework CoreMedia -framework AudioToolbox \
   -framework CoreGraphics -framework QuartzCore -framework WebKit \
   -framework UserNotifications -framework StoreKit -framework MediaPlayer \
+  -framework UniformTypeIdentifiers \
   -Wl,-rpath,@executable_path/Frameworks \
   Sources/*.m \
   "$LAME_DIR/libmp3lame/.libs/libmp3lame.a" \
