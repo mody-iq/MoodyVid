@@ -130,7 +130,7 @@ xcrun --sdk iphoneos clang \
   -O2 \
   -Wall -Wno-deprecated-declarations \
   -F "$SLICE" \
-  -I "$LAME_DIR" \
+  -I "$LAME_DIR/include" \
   -framework UIKit -framework Foundation -framework JavaScriptCore -framework Python -framework Photos \
   -framework AVKit -framework AVFoundation -framework CoreMedia -framework AudioToolbox \
   -framework CoreGraphics -framework QuartzCore -framework WebKit \
