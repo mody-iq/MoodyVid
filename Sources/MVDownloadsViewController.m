@@ -754,6 +754,14 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
                                            identifier:nil handler:^(UIAction *a) {
             UIPasteboard.generalPasteboard.string = row.url;
         }]];
+        if (row.isFinished) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Remove from history"] image:[UIImage systemImageNamed:@"clock.arrow.circlepath"]
+                                               identifier:nil handler:^(UIAction *a) {
+                // The row goes, the file stays: the only way to clear a finished
+                // item without losing the download.
+                [MVDownloadActions removeRow:row deleteFile:NO];
+            }]];
+        }
         UIAction *delete = [UIAction actionWithTitle:[MVLang t:@"Delete with file"]
                                                image:[UIImage systemImageNamed:@"trash"]
                                           identifier:nil handler:^(UIAction *a) { [weakSelf confirmDeleteRow:row]; }];
