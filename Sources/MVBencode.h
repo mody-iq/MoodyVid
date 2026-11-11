@@ -37,6 +37,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// is the torrent the magnet link actually named.
 + (nullable NSData *)infoHashFromTorrentData:(NSData *)data;
 
+/// Wraps raw info-dictionary bytes into a minimal one-key `.torrent`. This is
+/// how a magnet's metadata, once fetched from a peer (BEP 9), is handed to the
+/// torrent parser. The dict is appended raw, not re-encoded as a string, so its
+/// info-hash is preserved.
++ (nullable NSData *)torrentDataWithInfoDict:(NSData *)infoBytes;
+
 /// How many bytes the first bencoded value in `data` occupies, or -1 when it is
 /// malformed. A BEP 9 `ut_metadata` data message is a bencoded header followed
 /// by the raw metadata bytes, so the boundary has to be measured rather than

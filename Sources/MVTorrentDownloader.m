@@ -428,7 +428,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         return;
     }
 
-    NSData *torrentBytes = [MVBencode encode:@{@"info": infoBytes}];
+    NSData *torrentBytes = [MVBencode torrentDataWithInfoDict:infoBytes];
     NSString *decodeError = nil;
     MVTorrentMetadata *metadata = [MVTorrentMetadata metadataWithTorrentData:torrentBytes
                                                                        error:&decodeError];

@@ -138,8 +138,9 @@ int main(void) {
         CHECK([[MVSHA1 hexString:magnetHash] isEqualToString:[MVSHA1 hexString:[MVSHA1 digest:B(magnetInfo)]]], "magnet info hash stable");
 
         // The engine wraps the peer's info bytes in a one-key torrent and reuses
-        // the normal parser; that must recover the same metadata.
-        NSData *wrapped = [MVBencode encode:@{@"info": magnetInfoBytes}];
+        // the normal parser; that must recover the same metadata. The dict is
+        // appended raw, so the info-hash survives the wrap.
+        NSData *wrapped = [MVBencode torrentDataWithInfoDict:magnetInfoBytes];
         MVTorrentMetadata *fromPeer = [MVTorrentMetadata metadataWithTorrentData:wrapped error:&err];
         CHECK(fromPeer != nil, "peer info dict parses");
         CHECK([fromPeer.name isEqualToString:@"test.bin"], "peer metadata name");

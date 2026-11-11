@@ -199,6 +199,17 @@
     return (NSInteger)reader.pos;
 }
 
++ (NSData *)torrentDataWithInfoDict:(NSData *)infoBytes {
+    if (!infoBytes.length) return nil;
+    // A .torrent is `d4:info` + the info dict's bytes + `e`. The dict must be
+    // appended raw: encoding it as a bencoded string would put a length prefix
+    // inside the value, which changes the bytes the info-hash is taken over.
+    NSMutableData *out = [NSMutableData dataWithBytes:"d4:info" length:7];
+    [out appendData:infoBytes];
+    [out appendBytes:"e" length:1];
+    return out;
+}
+
 + (NSData *)infoHashFromTorrentData:(NSData *)data {
     NSData *infoBytes = [self rawValueForTopLevelKey:@"info" inData:data];
     if (!infoBytes.length) return nil;
