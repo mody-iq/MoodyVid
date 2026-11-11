@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
+#import <stdlib.h>
 
 // The MP3 encoder (see build.sh). Falls back to AAC/m4a when not present.
 #if __has_include(<lame.h>)
@@ -10,6 +11,22 @@
 #define MV_HAS_LAME 1
 #else
 #define MV_HAS_LAME 0
+#endif
+
+#if MV_HAS_LAME
+/// LAME is handed at most this many frames per call, which is what the MP3
+/// output buffer in -convertToMP3:to:completion: is sized for.
+static const int kMaxFrames = 8192;
+
+@interface MVMediaConverter ()
+/// Encodes the whole frames in `pending`, keeping a trailing partial frame.
++ (void)drainPending:(NSMutableData *)pending
+              toLame:(lame_global_flags *)gfp
+              output:(unsigned char *)mp3buf
+         outCapacity:(size_t)outCapacity
+                file:(FILE *)fp
+            channels:(int)channels;
+@end
 #endif
 
 @implementation MVMediaConverter
@@ -163,109 +180,155 @@
 + (void)convertToMP3:(NSString *)audioPath
                   to:(NSString *)outPath
           completion:(void (^)(BOOL, NSString *_Nullable))completion {
+#if !MV_HAS_LAME
+    // No encoder linked into this build; the caller keeps the original audio and
+    // names the file after its real container, so nothing is mislabelled.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (completion) completion(NO, @"MP3 encoding is not available on this build");
+    });
+#else
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         BOOL ok = NO;
         NSString *error = @"Unknown error";
-#if MV_HAS_LAME
-        // Read the audio file as raw interleaved 16-bit PCM ...
-        NSURL *url = [NSURL fileURLWithPath:audioPath];
-        AVAsset *asset = [AVAsset assetWithURL:url];
-        AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
-        AVAssetTrack *at = [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-        if (!reader || !at) {
-            error = @"Could not read the audio track";
-            goto finish;
-        }
-        NSDictionary *settings = @{
-            AVFormatIDKey: @(kAudioFormatLinearPCM),
-            AVLinearPCMBitDepthKey: @16,
-            AVLinearPCMIsFloatKey: @NO,
-            AVLinearPCMIsBigEndianKey: @NO,
-            AVLinearPCMIsNonInterleaved: @NO,
-        };
-        AVAssetReaderTrackOutput *out = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:at
-                                                                                   outputSettings:settings];
-        if (![reader canAddOutput:out]) {
-            error = @"Cannot configure audio reading";
-            goto finish;
-        }
-        [reader addOutput:out];
-        if (![reader startReading]) {
-            error = reader.error.localizedDescription ?: @"Cannot start reading";
-            goto finish;
-        }
-        // Pull the sample rate from the track: every LAME run needs it.
-        AudioStreamBasicDescription asbd;
-        CMFormatDescriptionRef fd = (__bridge CMFormatDescriptionRef)at.formatDescriptions.firstObject;
-        CMFormatDescriptionGetAudioStreamBasicDescription(fd, &asbd);
-        long sampleRate = (long)asbd.mSampleRate;
-        if (sampleRate <= 0) sampleRate = 44100;
+        FILE *fp = NULL;
+        lame_global_flags *gfp = NULL;
+        AVAssetReader *reader = nil;
+        AVAssetReaderTrackOutput *out = nil;
+        int channels = 2;
 
-        // The encoder state.
-        lame_global_flags *gfp = lame_init();
-        lame_set_num_channels(gfp, (int)asbd.mChannelsPerFrame ?: 2);
-        lame_set_in_samplerate(gfp, (int)sampleRate);
-        lame_set_brate(gfp, 192);
-        lame_set_quality(gfp, 2);
-        lame_set_mode(gfp, asbd.mChannelsPerFrame > 1 ? JOINT_STEREO : MONO);
-        if (lame_init_params(gfp) < 0) {
-            lame_close(gfp);
-            error = @"MP3 encoder failed to initialise";
-            goto finish;
-        }
-
-        FILE *fp = fopen(outPath.UTF8String, "wb");
-        static const int kPCMChunk = 44100 * 4;
-        unsigned char pcm[kPCMChunk];
-        unsigned char mp3buf[kPCMChunk + kPCMChunk / 4 + 7200];
-        if (!fp) {
-            lame_close(gfp);
-            error = @"Cannot create MP3 file";
-            goto finish;
-        }
-        while (reader.status == AVAssetReaderStatusReading) {
-            CMSampleBufferRef buf = [out copyNextSampleBuffer];
-            if (!buf) break;
-            CMBlockBufferRef block = CMSampleBufferGetDataBuffer(buf);
-            if (block) {
-                size_t len = 0;
-                char *bytes = NULL;
-                CMBlockBufferGetDataPointer(block, 0, NULL, &len, &bytes);
-                size_t used = 0;
-                while (used < len) {
-                    size_t take = MIN((size_t)kPCMChunk, len - used);
-                    int wrote = 0;
-                    if (asbd.mChannelsPerFrame > 1) {
-                        wrote = lame_encode_buffer_interleaved(gfp,
-                            (short *)(bytes + used), (int)(take / 4),
-                            mp3buf, (int)sizeof(mp3buf));
+        @autoreleasepool {
+            AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:audioPath]];
+            AVAssetTrack *track = [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+            if (!track) {
+                error = [MVLang t:@"Could not convert this file"];
+            } else {
+                reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
+                NSDictionary *settings = @{
+                    AVFormatIDKey: @(kAudioFormatLinearPCM),
+                    AVLinearPCMBitDepthKey: @16,
+                    AVLinearPCMIsFloatKey: @NO,
+                    AVLinearPCMIsBigEndianKey: @NO,
+                    AVLinearPCMIsNonInterleaved: @NO,
+                };
+                out = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track
+                                                                outputSettings:settings];
+                out.alwaysCopiesSampleData = NO;
+                if (![reader canAddOutput:out]) {
+                    error = [MVLang t:@"Could not convert this file"];
+                } else {
+                    [reader addOutput:out];
+                    if (![reader startReading]) {
+                        error = reader.error.localizedDescription ?: [MVLang t:@"Could not convert this file"];
                     } else {
-                        wrote = lame_encode_buffer(gfp,
-                            (short *)(bytes + used), (short *)(bytes + used),
-                            (int)(take / 2), mp3buf, (int)sizeof(mp3buf));
+                        CMAudioFormatDescriptionRef fmt =
+                            (__bridge CMAudioFormatDescriptionRef)track.formatDescriptions.firstObject;
+                        const AudioStreamBasicDescription *asbd =
+                            fmt ? CMAudioFormatDescriptionGetStreamBasicDescription(fmt) : NULL;
+                        long sampleRate = asbd ? (long)asbd->mSampleRate : 0;
+                        if (sampleRate <= 0) sampleRate = 44100;
+                        channels = (asbd && asbd->mChannelsPerFrame > 1) ? 2 : 1;
+
+                        gfp = lame_init();
+                        if (!gfp) {
+                            error = [MVLang t:@"Could not convert this file"];
+                        } else {
+                            lame_set_num_channels(gfp, channels);
+                            lame_set_in_samplerate(gfp, (int)sampleRate);
+                            lame_set_brate(gfp, 192);
+                            lame_set_quality(gfp, 2);
+                            lame_set_mode(gfp, channels > 1 ? JOINT_STEREO : MONO);
+                            if (lame_init_params(gfp) < 0) {
+                                error = [MVLang t:@"Could not convert this file"];
+                            } else {
+                                fp = fopen(outPath.UTF8String, "wb");
+                                if (!fp) {
+                                    error = [MVLang t:@"Could not convert this file"];
+                                } else {
+                                    // LAME wants whole frames, so a buffer that is
+                                    // not a multiple of the frame size is carried
+                                    // over rather than dropped.
+                                    const size_t frameBytes = (size_t)channels * 2;
+                                    const size_t mp3Capacity = (size_t)kMaxFrames * frameBytes * 3 / 2 + 7200;
+                                    NSMutableData *pending = [NSMutableData data];
+                                    unsigned char *mp3buf = malloc(mp3Capacity);
+                                    while (reader.status == AVAssetReaderStatusReading) {
+                                        CMSampleBufferRef buf = [out copyNextSampleBuffer];
+                                        if (!buf) break;
+                                        CMBlockBufferRef block = CMSampleBufferGetDataBuffer(buf);
+                                        if (block) {
+                                            size_t len = 0;
+                                            char *bytes = NULL;
+                                            if (CMBlockBufferGetDataPointer(block, 0, NULL, &len, &bytes) == kCMBlockBufferNoErr) {
+                                                [pending appendBytes:bytes length:len];
+                                            }
+                                        }
+                                        CFRelease(buf);
+                                        [self drainPending:pending
+                                                     toLame:gfp
+                                                     output:mp3buf
+                                                outCapacity:mp3Capacity
+                                                       file:fp
+                                                   channels:channels];
+                                    }
+                                    // Only a fully read track is a complete file; a
+                                    // half-encoded MP3 would look like a success.
+                                    if (reader.status == AVAssetReaderStatusCompleted) {
+                                        [self drainPending:pending
+                                                     toLame:gfp
+                                                     output:mp3buf
+                                                outCapacity:mp3Capacity
+                                                       file:fp
+                                                   channels:channels];
+                                        int tail = lame_encode_flush(gfp, mp3buf, (int)mp3Capacity);
+                                        if (tail > 0) fwrite(mp3buf, 1, (size_t)tail, fp);
+                                        ok = YES;
+                                        error = nil;
+                                    } else {
+                                        error = reader.error.localizedDescription ?: [MVLang t:@"Could not convert this file"];
+                                    }
+                                    free(mp3buf);
+                                }
+                            }
+                        }
                     }
-                    if (wrote > 0) fwrite(mp3buf, 1, (size_t)wrote, fp);
-                    used += take;
                 }
             }
-            CFRelease(buf);
         }
-        int tail = lame_encode_flush(gfp, mp3buf, (int)sizeof(mp3buf));
-        if (tail > 0) fwrite(mp3buf, 1, (size_t)tail, fp);
-        lame_close(gfp);
-        fclose(fp);
-        ok = YES;
-        error = nil;
-    finish: ;
-#else
-        // No encoder linked: keep the file as-is. The caller then decides what
-        // to show, but the original audio is still usable, so this is honest.
-        error = @"MP3 encoding is not available on this build";
-#endif
+
+        if (gfp) lame_close(gfp);
+        if (fp) fclose(fp);
+        if (!ok && fp) remove(outPath.UTF8String);
+
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(ok, error);
         });
     });
+#endif
 }
 
++ (void)drainPending:(NSMutableData *)pending
+              toLame:(lame_global_flags *)gfp
+              output:(unsigned char *)mp3buf
+         outCapacity:(size_t)outCapacity
+                file:(FILE *)fp
+            channels:(int)channels {
+    const size_t frameBytes = (size_t)channels * 2;
+    while (pending.length >= frameBytes) {
+        int frames = (int)(pending.length / frameBytes);
+        if (frames > kMaxFrames) frames = kMaxFrames;
+        size_t consumed = (size_t)frames * frameBytes;
+        const short *samples = (const short *)pending.bytes;
+
+        int wrote;
+        if (channels > 1) {
+            wrote = lame_encode_buffer_interleaved(gfp, (short *)samples, frames,
+                                                   mp3buf, (int)outCapacity);
+        } else {
+            wrote = lame_encode_buffer(gfp, samples, samples, frames,
+                                       mp3buf, (int)outCapacity);
+        }
+        if (wrote > 0) fwrite(mp3buf, 1, (size_t)wrote, fp);
+        [pending replaceBytesInRange:NSMakeRange(0, consumed) withBytes:NULL length:0];
+    }
+}
 @end
