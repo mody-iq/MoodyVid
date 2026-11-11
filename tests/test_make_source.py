@@ -71,6 +71,14 @@ class MakeSourceTest(unittest.TestCase):
             raw = fh.read()
         self.assertIn("تنزيل", raw)
 
+    def test_compatibility_is_stated_explicitly(self):
+        # The user's question was "can I tell if it runs on my device?". minOSVersion
+        # makes AltStore refuse the install on an older iOS, and deviceFamilies
+        # hides it on an iPad, since the app is iPhone-only.
+        source = self.build()
+        self.assertEqual(source["apps"][0]["versions"][0]["minOSVersion"], "15.0")
+        self.assertEqual(source["apps"][0]["deviceFamilies"], ["iPhone"])
+
     def test_missing_ipa_fails_instead_of_writing_a_dead_link(self):
         rc = make_source.main([
             "--ipa", os.path.join(self.tmp, "nope.ipa"),

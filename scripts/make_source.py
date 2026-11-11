@@ -37,6 +37,11 @@ def parse_args(argv):
     ap.add_argument('--notes', default='')
     ap.add_argument('--out', required=True)
     ap.add_argument('--min-os', default='15.0')
+    ap.add_argument('--max-os', default=None,
+                    help='newest iOS the app is known to run on, if any')
+    ap.add_argument('--device', default='iPhone',
+                    help='devices the app runs on; iPhone only, so AltStore hides '
+                         'it on an iPad instead of installing something unusable')
     return ap.parse_args(argv)
 
 
@@ -63,6 +68,8 @@ def main(argv):
         'minOSVersion': args.min_os,
         'localizedDescription': args.notes or f'{args.name} {args.version}',
     }
+    if args.max_os:
+        version['maxOSVersion'] = args.max_os
 
     app = {
         'name': args.name,
@@ -75,6 +82,9 @@ def main(argv):
         'category': 'utilities',
         'screenshots': [],
         'versions': [version],
+        # AltStore reads this and hides the app on a device it cannot run on,
+        # which beats a failed install with no explanation.
+        'deviceFamilies': [args.device],
         'appPermissions': {
             'entitlements': [],
             'privacy': {

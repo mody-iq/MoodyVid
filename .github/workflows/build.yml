@@ -101,12 +101,16 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/Payload/MoodyVid.app/Info.plist)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           NOTES=$(cat <<EOF
-          MoodyVid $VERSION (build ${{ github.run_number }})
+          **MoodyVid $VERSION** (build ${{ github.run_number }})
 
-          التثبيت عبر AltStore أو SideStore: أضف هذا الرابط في Sources
+          **يتطلّب:** آيفون بنظام iOS 15 أو أحدث (لا يعمل على آيباد)
+          **Requires:** iPhone running iOS 15 or newer (iPad is not supported)
+
+          **التثبيت / Install** — أضف هذا الرابط في AltStore أو SideStore ← Sources:
           https://raw.githubusercontent.com/${{ github.repository }}/main/source.json
 
           أو حمّل ملف IPA من الأسفل ووقّعه بنفسك.
+          Or download the IPA below and sign it yourself.
           EOF
           )
           # One rolling release on the tag "latest". --clobber replaces its assets,
@@ -138,14 +142,18 @@ jobs:
         run: |
           set -e
           SIZE=$(stat -f%z build/MoodyVid.ipa)
+          # Read the requirement from the app itself, so the published source can
+          # never disagree with what the binary actually supports.
+          MINOS=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" build/Payload/MoodyVid.app/Info.plist)
           python3 scripts/make_source.py \
             --ipa build/MoodyVid.ipa \
             --version "$VERSION" \
             --build "${{ github.run_number }}" \
+            --min-os "$MINOS" \
             --download-url "https://github.com/${{ github.repository }}/releases/download/latest/MoodyVid.ipa" \
             --icon-url "https://raw.githubusercontent.com/${{ github.repository }}/main/Resources/icon-source.png" \
             --size "$SIZE" \
-            --notes "MoodyVid $VERSION (build ${{ github.run_number }})" \
+            --notes "MoodyVid $VERSION (build ${{ github.run_number }}) — iOS $MINOS+, iPhone only" \
             --out source.json
 
       - name: Commit source.json
