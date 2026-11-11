@@ -5,6 +5,9 @@ on:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+      # The release step commits this file back. Without the ignore, that commit
+      # would start another build, which would commit again — a loop.
+      - 'source.json'
   workflow_dispatch:
     inputs:
       variant:
@@ -13,7 +16,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   # Fast gate: the downloader's Python contract is testable off-device, and these
@@ -85,3 +88,75 @@ jobs:
           name: ${{ inputs.variant && 'MoodyVidTest-ipa' || 'MoodyVid-ipa' }}
           path: ${{ inputs.variant && 'build/MoodyVidTest.ipa' || 'build/MoodyVid.ipa' }}
           if-no-files-found: error
+
+      # The artifact above is private and disappears after 90 days. The release
+      # asset below is public and permanent, and is what the AltStore source
+      # points at — so a user who installs once keeps getting updates.
+      - name: Publish release
+        if: ${{ !inputs.variant }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/Payload/MoodyVid.app/Info.plist)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          NOTES=$(cat <<EOF
+          MoodyVid $VERSION (build ${{ github.run_number }})
+
+          التثبيت عبر AltStore أو SideStore: أضف هذا الرابط في Sources
+          https://raw.githubusercontent.com/${{ github.repository }}/main/source.json
+
+          أو حمّل ملف IPA من الأسفل ووقّعه بنفسك.
+          EOF
+          )
+          # One rolling release on the tag "latest". --clobber replaces its assets,
+          # so the download URL in source.json is fixed for the life of the repo.
+          gh release view latest --repo "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create latest --repo "${{ github.repository }}" \
+                 --title "MoodyVid — أحدث إصدار" --notes "$NOTES"
+          gh release edit latest --repo "${{ github.repository }}" --notes "$NOTES"
+          gh release upload latest build/MoodyVid.ipa Resources/icon-source.png \
+            --repo "${{ github.repository }}" --clobber
+
+      # A source.json that points at a dead URL installs nothing, and the user
+      # sees only a generic failure. Prove the link works before publishing it.
+      - name: Verify download link
+        if: ${{ !inputs.variant }}
+        run: |
+          set -e
+          URL="https://github.com/${{ github.repository }}/releases/download/latest/MoodyVid.ipa"
+          for attempt in 1 2 3 4 5; do
+            CODE=$(curl -sIL -o /dev/null -w '%{http_code}' "$URL" || true)
+            if [ "$CODE" = "200" ]; then echo "download link OK: $URL"; exit 0; fi
+            echo "attempt $attempt: HTTP $CODE, retrying…"
+            sleep 5
+          done
+          echo "ERROR: $URL did not resolve to 200"; exit 1
+
+      - name: Write AltStore source
+        if: ${{ !inputs.variant }}
+        run: |
+          set -e
+          SIZE=$(stat -f%z build/MoodyVid.ipa)
+          python3 scripts/make_source.py \
+            --ipa build/MoodyVid.ipa \
+            --version "$VERSION" \
+            --build "${{ github.run_number }}" \
+            --download-url "https://github.com/${{ github.repository }}/releases/download/latest/MoodyVid.ipa" \
+            --icon-url "https://raw.githubusercontent.com/${{ github.repository }}/main/Resources/icon-source.png" \
+            --size "$SIZE" \
+            --notes "MoodyVid $VERSION (build ${{ github.run_number }})" \
+            --out source.json
+
+      - name: Commit source.json
+        if: ${{ !inputs.variant }}
+        run: |
+          set -e
+          git config user.name "moodyvid-bot"
+          git config user.email "moodyvid-bot@users.noreply.github.com"
+          git add source.json
+          git diff --cached --quiet && { echo "source.json unchanged"; exit 0; }
+          git commit -m "release: MoodyVid $VERSION (build ${{ github.run_number }})"
+          # Explicit ref: a checkout of a tag or a detached HEAD has no upstream
+          # to push to, and this must always land on the branch the raw URL reads.
+          git push origin HEAD:${GITHUB_REF_NAME}
