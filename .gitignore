@@ -5,3 +5,6 @@ __pycache__/
 
 # Clang dependency files from local type-checks
 *.d
+
+# Local scratch (mockups, screenshots, throwaway artifacts)
+.agent_tmp/
