@@ -140,7 +140,8 @@
     [self buildLayout];
     [self refreshText];
 
-    for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification, MVDownloadStoreDidChangeNotification]) {
+    for (NSString *name in @[MVLangDidChangeNotification, MVThemeDidChangeNotification,
+                             MVDownloadStoreDidChangeNotification, MVTaskStoreDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refreshText) name:name object:nil];
     }
 }
@@ -291,9 +292,9 @@
 
     // The screen ends here on purpose: recent downloads belong to the Downloads
     // tab, and a topics strip is noise on a screen whose one job is a link. One
-    // compact card above the link still tells the user work is already running.
+    // compact card under the link still tells the user work is already running.
     self.activeCard = [self makeActiveCard];
-    [stack insertArrangedSubview:self.activeCard atIndex:0];
+    [stack insertArrangedSubview:self.activeCard atIndex:1];
 }
 
 /// A one-line summary of whatever is downloading right now, so the user can see
