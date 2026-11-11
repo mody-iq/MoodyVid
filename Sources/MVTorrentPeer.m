@@ -110,10 +110,6 @@ static const char kProtocol[] = "BitTorrent protocol";
     @synchronized (self) { return _extendedHandshakeReceived; }
 }
 
-- (NSInteger)announcedPieceCount {
-    @synchronized (self) { return (NSInteger)_pieces.count; }
-}
-
 - (BOOL)connected {
     @synchronized (self) { return _handshakeReceived && _socket >= 0; }
 }

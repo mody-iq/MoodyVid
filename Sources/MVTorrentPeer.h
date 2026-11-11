@@ -66,9 +66,6 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, nullable) NSDictionary *extendedHandshake;
 /// YES once the peer's extended handshake has been parsed.
 @property (nonatomic, readonly) BOOL extendedHandshakeReceived;
-/// How many pieces the peer said it holds, or 0 when it sent no bitfield. A
-/// peer with no pieces is skipped as a metadata source (it has nothing to send).
-@property (nonatomic, readonly) NSInteger announcedPieceCount;
 
 - (instancetype)initWithHost:(NSString *)host
                         port:(NSInteger)port
