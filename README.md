@@ -10,10 +10,10 @@
 ويعمل مع يوتيوب وتيك توك وإنستغرام وأكثر من ١٨٠٠ موقع.
 
 ![iOS](https://img.shields.io/badge/iOS-15.0%2B-12ACBA)
+![Device](https://img.shields.io/badge/device-iPhone-12ACBA)
 ![License](https://img.shields.io/badge/license-MIT-12ACBA)
-![Build](https://github.com/mody-iq/MoodyVid/actions/workflows/build.yml/badge.svg)
 
-[التثبيت](#-التثبيت) · [المزايا](#-المزايا) · [البناء](#-البناء-من-المصدر) · [الأسئلة](#-أسئلة-شائعة)
+[التثبيت](#-التثبيت) · [هل يعمل على جهازك؟](#-هل-يعمل-على-جهازك) · [المزايا](#-المزايا) · [الأسئلة الشائعة](#-أسئلة-شائعة)
 
 </div>
 
@@ -60,8 +60,6 @@ https://raw.githubusercontent.com/mody-iq/MoodyVid/main/source.json
 | **المعالج** | **arm64** | أي آيفون من iPhone 6s (2015) وأحدث |
 | **الأجهزة المدعومة** | iPhone 6s · SE (1st & 2nd & 3rd) · 7 · 8 · X · XR · XS · 11 · 12 · 13 · 14 · 15 · 16 · SE 4 | كلها ✅ |
 
-> 🔎 **كيف تعرف إصدارك؟** الإعدادات ← عام ← حول ← «إصدار النظام» أو «iOS Version».
->
 > ✅ إذا كان **iOS 15 أو أحدث** وعلى **آيفون** → التطبيق يعمل.
 > ❌ إذا كان **iOS 14 أو أقدم**، أو على **آيباد** → لن يعمل.
 
@@ -85,47 +83,6 @@ https://raw.githubusercontent.com/mody-iq/MoodyVid/main/source.json
 
 ---
 
-## 🔧 البناء من المصدر
-
-البناء يجري على GitHub Actions تلقائيًا عند كل رفع إلى `main`.
-الملف الناتج يظهر في تبويب **Actions**، ويُنشر تلقائيًا في **Releases**.
-
-للتنفيذ محليًا على macOS:
-
-```bash
-bash scripts/build.sh
-```
-
-**المتطلبات:** macOS + Xcode Command Line Tools + Python 3.14.
-
-ما يفعله السكربت:
-
-1. ينزّل CPython و yt-dlp الرسميين.
-2. يبني مكتبة LAME (لتحويل MP3) للآيفون.
-3. يترجم كود Objective-C بـ `clang`.
-4. يجمّع الحزمة ويوقّعها بـ `ldid`.
-5. ينتج `build/MoodyVid.ipa` جاهزًا.
-
-### الإصدار
-
-لتغيير رقم الإصدار، عدّل `CFBundleShortVersionString` في `Resources/Info.plist`.
-رقم البناء (`CFBundleVersion`) يتغيّر تلقائيًا مع كل بناء.
-
----
-
-## 📁 بنية المشروع
-
-```
-Sources/          كود Objective-C (الواجهات + المحرّكات)
-Resources/        Info.plist والأيقونات
-scripts/          البناء والتجميع والأدوات
-tests/            اختبارات بايثون (تعمل بدون آيفون)
-app/              كود بايثون الذي يعمل داخل التطبيق
-source.json       ملف مصدر AltStore (يُحدَّث تلقائيًا)
-```
-
----
-
 ## ❓ أسئلة شائعة
 
 **التطبيق اختفى بعد فترة؟**
@@ -139,6 +96,9 @@ source.json       ملف مصدر AltStore (يُحدَّث تلقائيًا)
 
 **هل يعمل على أندرويد؟**
 لا، هذا التطبيق للآيفون فقط.
+
+**أين أجد ملفاتي بعد التنزيل؟**
+في تبويب **الملفات** داخل التطبيق، وتظهر أيضًا في تطبيق «الملفات» على الجهاز.
 
 ---
 
@@ -236,43 +196,6 @@ If you already know how to sign apps:
 | 📂 **Files** | Saves to the Files app; open directly from there |
 | 🌙 **Interface** | Arabic/English, dark mode, multiple themes |
 
-## 🔧 Building from source
-
-CI builds on every push to `main`. The result appears under **Actions** and is
-published to **Releases** automatically.
-
-To build locally on macOS:
-
-```bash
-bash scripts/build.sh
-```
-
-**Requirements:** macOS + Xcode Command Line Tools + Python 3.14.
-
-What the script does:
-
-1. Downloads official CPython and yt-dlp.
-2. Builds LAME (for MP3) for iOS.
-3. Compiles the Objective-C code with `clang`.
-4. Assembles the bundle and signs it with `ldid`.
-5. Produces `build/MoodyVid.ipa`.
-
-### Versioning
-
-Change `CFBundleShortVersionString` in `Resources/Info.plist` to set the version.
-The build number (`CFBundleVersion`) increases on its own with every build.
-
-## 📁 Project layout
-
-```
-Sources/          Objective-C (UI + engines)
-Resources/        Info.plist and icons
-scripts/          Build, assembly and tooling
-tests/            Python tests (run without a device)
-app/              Python that runs inside the app
-source.json       AltStore source file (updated by CI)
-```
-
 ## ❓ FAQ
 
 **The app disappeared after a while?**
@@ -289,6 +212,9 @@ Because Apple bans torrent apps and bans running general-purpose download engine
 **Does it work on Android?**
 No, this app is for iPhone only.
 
+**Where do my files go after downloading?**
+Into the app's **Files** tab, and they also appear in the iOS Files app.
+
 ## ⚖️ Legal notice
 
 This app is a technical tool for personal use. You are responsible for respecting
@@ -299,3 +225,11 @@ for misuse.
 ## 📄 License
 
 [MIT](LICENSE) — free to use, modify and redistribute with attribution.
+
+---
+
+<div align="center">
+
+**Building from source, project layout, tests and release tooling → [DEVELOPING.md](DEVELOPING.md)**
+
+</div>
