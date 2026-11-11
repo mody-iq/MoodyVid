@@ -23,13 +23,16 @@
       "versions": [
         {
           "version": "0.2.0",
-          "buildVersion": "155",
-          "date": "2026-11-11T18:25:31Z",
+          "buildVersion": "156",
+          "date": "2026-11-11T18:37:11Z",
           "downloadURL": "https://github.com/mody-iq/MoodyVid/releases/download/latest/MoodyVid.ipa",
-          "size": 25358179,
+          "size": 25358178,
           "minOSVersion": "15.0",
-          "localizedDescription": "MoodyVid 0.2.0 (build 155)"
+          "localizedDescription": "MoodyVid 0.2.0 (build 156) — iOS 15.0+, iPhone only"
         }
+      ],
+      "deviceFamilies": [
+        "iPhone"
       ],
       "appPermissions": {
         "entitlements": [],
