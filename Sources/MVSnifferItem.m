@@ -168,10 +168,8 @@ static NSDictionary<NSString *, NSNumber *> *MVKindByExtension(void) {
 - (BOOL)isPage { return self.kind == MVSniffKindPage; }
 
 - (BOOL)isDownloadable {
-    // HLS/DASH/Torrent are downloadable in principle but their engines arrive in
-    // later checkpoints; the UI still lists them and routes them then. Reporting
-    // them as downloadable here keeps the row honest ("downloadable, pending
-    // engine") instead of hiding a real link from the user.
+    // Every kind the sniffer reports has an engine behind it (HLS, DASH and
+    // torrent each have their own downloader), so a real link is never hidden.
     return self.url.length > 0;
 }
 
