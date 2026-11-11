@@ -1,0 +1,44 @@
+{
+  "name": "MoodyVid",
+  "identifier": "com.mody.moodyvid.source",
+  "subtitle": "تنزيل الفيديو من أي موقع",
+  "description": "تنزيل الفيديو من أي موقع",
+  "iconURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/icon-source.png",
+  "headerURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/icon-source.png",
+  "tintColor": "12ACBA",
+  "featuredApps": [
+    "com.mody.moodyvid"
+  ],
+  "apps": [
+    {
+      "name": "MoodyVid",
+      "bundleIdentifier": "com.mody.moodyvid",
+      "developerName": "MoodyVid",
+      "subtitle": "تنزيل الفيديو من أي موقع",
+      "localizedDescription": "تنزيل الفيديو من أي موقع",
+      "iconURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/icon-source.png",
+      "tintColor": "12ACBA",
+      "category": "utilities",
+      "screenshots": [],
+      "versions": [
+        {
+          "version": "0.2.0",
+          "buildVersion": "155",
+          "date": "2026-11-11T18:25:31Z",
+          "downloadURL": "https://github.com/mody-iq/MoodyVid/releases/download/latest/MoodyVid.ipa",
+          "size": 25358179,
+          "minOSVersion": "15.0",
+          "localizedDescription": "MoodyVid 0.2.0 (build 155)"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSPhotoLibraryAddUsageDescription": "يحتاج التطبيق إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها.",
+          "NSPhotoLibraryUsageDescription": "يحتاج التطبيق إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها."
+        }
+      }
+    }
+  ],
+  "news": []
+}
