@@ -6,6 +6,8 @@
 #import "MVDownloadStore.h"
 #import "MVPaths.h"
 #import "MVDownloadEngine.h"
+#import "MVDownloadRow.h"
+#import "MVTaskStore.h"
 
 // A platform shortcut: the name, the SF Symbol standing in for its logo (we ship
 // no third-party brand assets) and the tint used for the tile.
@@ -105,6 +107,10 @@
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UIActivityIndicatorView *busyView;
 @property (nonatomic, strong) UILabel *platformsTitle;
+@property (nonatomic, strong) UIView *activeCard;
+@property (nonatomic, strong) UILabel *activeTitleLabel;
+@property (nonatomic, strong) UILabel *activeDetailLabel;
+@property (nonatomic, strong) UIProgressView *activeBar;
 @property (nonatomic, copy) NSString *selectedQuality;
 @property (nonatomic, strong) NSArray<MVPlatform *> *platforms;
 @property (nonatomic, copy, nullable) NSString *watchedIdentifier;
@@ -284,7 +290,85 @@
     [stack addArrangedSubview:[self makePlatformGrid]];
 
     // The screen ends here on purpose: recent downloads belong to the Downloads
-    // tab, and a topics strip is noise on a screen whose one job is a link.
+    // tab, and a topics strip is noise on a screen whose one job is a link. One
+    // compact card above the link still tells the user work is already running.
+    self.activeCard = [self makeActiveCard];
+    [stack insertArrangedSubview:self.activeCard atIndex:0];
+}
+
+/// A one-line summary of whatever is downloading right now, so the user can see
+/// progress without leaving Home. Hidden when nothing is active.
+- (UIView *)makeActiveCard {
+    UIView *card = [UIView new];
+    [MVTheme applyCardStyle:card cornerRadius:[MVTheme cardCornerRadius]];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.hidden = YES;
+
+    self.activeTitleLabel = [UILabel new];
+    self.activeTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.activeTitleLabel.font = [MVTheme cardTitleFont];
+    self.activeTitleLabel.textColor = [MVTheme text];
+    self.activeTitleLabel.numberOfLines = 1;
+    self.activeTitleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [card addSubview:self.activeTitleLabel];
+
+    self.activeDetailLabel = [UILabel new];
+    self.activeDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.activeDetailLabel.font = [MVTheme cardDetailFont];
+    self.activeDetailLabel.textColor = [MVTheme secondaryText];
+    [card addSubview:self.activeDetailLabel];
+
+    self.activeBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.activeBar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.activeBar.progressTintColor = [MVTheme accent];
+    self.activeBar.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.22];
+    [card addSubview:self.activeBar];
+
+    CGFloat pad = 14.0;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.activeTitleLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:pad],
+        [self.activeTitleLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:pad],
+        [self.activeTitleLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-pad],
+
+        [self.activeDetailLabel.topAnchor constraintEqualToAnchor:self.activeTitleLabel.bottomAnchor constant:2],
+        [self.activeDetailLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:pad],
+        [self.activeDetailLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-pad],
+
+        [self.activeBar.topAnchor constraintEqualToAnchor:self.activeDetailLabel.bottomAnchor constant:8],
+        [self.activeBar.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:pad],
+        [self.activeBar.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-pad],
+        [self.activeBar.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-pad],
+    ]];
+    return card;
+}
+
+/// Reads the first running row (a yt-dlp record or a manager task) and shows it.
+- (void)updateActiveCard {
+    MVDownloadRow *active = nil;
+    for (MVDownloadRecord *record in MVDownloadStore.shared.records) {
+        if (record.isActive) { active = [MVDownloadRow rowWithRecord:record]; break; }
+    }
+    if (!active) {
+        for (MVDownloadTask *task in MVTaskStore.shared.tasks) {
+            if (task.isActive) { active = [MVDownloadRow rowWithTask:task]; break; }
+        }
+    }
+    self.activeCard.hidden = (active == nil);
+    if (!active) return;
+
+    self.activeTitleLabel.text = active.title;
+    self.activeBar.progress = (float)MAX(0.0, MIN(1.0, active.progress));
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (active.totalBytes > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ %@ %@", [MVPaths formatBytes:active.doneBytes],
+                          [MVLang t:@"of"], [MVPaths formatBytes:active.totalBytes]]];
+    } else if (active.doneBytes > 0) {
+        [parts addObject:[MVPaths formatBytes:active.doneBytes]];
+    }
+    if (active.speed > 0) [parts addObject:[MVPaths formatSpeed:active.speed]];
+    if (active.eta > 0) [parts addObject:[MVPaths formatDuration:active.eta]];
+    self.activeDetailLabel.text = parts.count ? [parts componentsJoinedByString:@" · "] : [MVLang t:@"Downloading"];
 }
 
 - (UILabel *)makeSectionTitle {
@@ -441,6 +525,7 @@
     self.view.semanticContentAttribute = MVLang.shared.isRTL
         ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
     [self updatePasteButton];
+    [self updateActiveCard];
     [self applyThemeRecursively];
 }
 
