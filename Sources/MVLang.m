@@ -338,6 +338,9 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Saved path": @"مسار الحفظ",
             @"Speed": @"السرعة",
             @"Time left": @"الوقت المتبقي",
+            @"Downloads land here, and you can add your own folders.": @"تصل التنزيلات هنا، ويمكنك إضافة مجلداتك الخاصة.",
+            @"used": @"مستخدم",
+            @"total": @"الإجمالي",
         };
     });
     return table;

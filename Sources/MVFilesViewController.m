@@ -8,6 +8,8 @@
 #import "MVDownloadStore.h"
 #import "MVDownloadEngine.h"
 #import "MVMediaConverter.h"
+#import "MVFileCardCell.h"
+#import "MVEmptyStateView.h"
 
 typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeName = 0,
@@ -32,8 +34,11 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 @interface MVFilesViewController () <UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating>
 @property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) UILabel *emptyLabel;
+@property (nonatomic, strong) MVEmptyStateView *emptyState;
+@property (nonatomic, strong) UIView *storageCard;
 @property (nonatomic, strong) UILabel *storageLabel;
+@property (nonatomic, strong) UILabel *storageDetailLabel;
+@property (nonatomic, strong) UIProgressView *storageBar;
 @property (nonatomic, strong) UIView *headerView;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
@@ -75,11 +80,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
                                                            target:self action:@selector(showSortMenu)];
     self.navigationItem.rightBarButtonItems = @[newFolder, sort];
 
-    self.storageLabel = [UILabel new];
-    self.storageLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    self.storageLabel.textColor = [MVTheme secondaryText];
-    self.storageLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.storageLabel];
+    [self buildStorageCard];
 
     // A plain list, full-bleed under the translucent chrome, so it scrolls and
     // feels like the rest of the system rather than a floating inset panel.
@@ -88,12 +89,11 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     self.tableView.backgroundColor = UIColor.clearColor;
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
-    self.tableView.rowHeight = 60;
-    self.tableView.estimatedRowHeight = 60;
-    self.tableView.separatorInset = UIEdgeInsetsMake(0, 74, 0, 0);
-    self.tableView.separatorColor = [[MVTheme separator] colorWithAlphaComponent:0.28];
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 78;
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.tableView.tableFooterView = [UIView new];
-    [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"MVFileCell"];
+    [self.tableView registerClass:MVFileCardCell.class forCellReuseIdentifier:@"MVFileCardCell"];
     [self.view addSubview:self.tableView];
 
     // Must be added after the table exists, or the gesture is attached to nil.
@@ -101,12 +101,13 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressRow:)];
     [self.tableView addGestureRecognizer:longPress];
 
-    self.emptyLabel = [UILabel new];
-    self.emptyLabel.textColor = [MVTheme secondaryText];
-    self.emptyLabel.font = [UIFont systemFontOfSize:15];
-    self.emptyLabel.textAlignment = NSTextAlignmentCenter;
-    self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.emptyLabel];
+    self.emptyState = [[MVEmptyStateView alloc] initWithFrame:CGRectZero];
+    self.emptyState.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emptyState.hidden = YES;
+    self.emptyState.symbolName = @"folder";
+    self.emptyState.title = [MVLang t:@"No files"];
+    self.emptyState.message = [MVLang t:@"Downloads land here, and you can add your own folders."];
+    [self.view addSubview:self.emptyState];
 
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
@@ -117,20 +118,20 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     [self buildPlayerCard];
 
-    // The player and the storage line live in the table's header, so the video
+    // The player and the storage card live in the table's header, so the video
     // is part of the page and scrolls with it, rather than floating over it.
     self.cardHeight = [self.playerCard.heightAnchor constraintEqualToConstant:0];
     self.headerView = [UIView new];
-    [self.headerView addSubview:self.storageLabel];
+    [self.headerView addSubview:self.storageCard];
     [self.headerView addSubview:self.playerCard];
     self.tableView.tableHeaderView = self.headerView;
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.storageLabel.topAnchor constraintEqualToAnchor:self.headerView.topAnchor constant:4],
-        [self.storageLabel.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:20],
-        [self.storageLabel.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-20],
+        [self.storageCard.topAnchor constraintEqualToAnchor:self.headerView.topAnchor constant:4],
+        [self.storageCard.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:[MVTheme screenPadding]],
+        [self.storageCard.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-[MVTheme screenPadding]],
 
-        [self.playerCard.topAnchor constraintEqualToAnchor:self.storageLabel.bottomAnchor constant:10],
+        [self.playerCard.topAnchor constraintEqualToAnchor:self.storageCard.bottomAnchor constant:10],
         [self.playerCard.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:16],
         [self.playerCard.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-16],
         [self.playerCard.bottomAnchor constraintEqualToAnchor:self.headerView.bottomAnchor constant:-8],
@@ -141,8 +142,10 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
-        [self.emptyLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.emptyLabel.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        [self.emptyState.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.emptyState.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor constant:-30],
+        [self.emptyState.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
+        [self.emptyState.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
     ]];
     self.cardHeight.constant = 0;
     self.playerCard.hidden = YES;
@@ -206,14 +209,72 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     }];
 }
 
+/// A small card under the chrome that reports free space, so the Files screen
+/// answers "how much room is left" without a trip to Settings.
+- (void)buildStorageCard {
+    self.storageCard = [UIView new];
+    self.storageCard.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyCardStyle:self.storageCard cornerRadius:[MVTheme cardCornerRadius]];
+
+    self.storageLabel = [UILabel new];
+    self.storageLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.storageLabel.font = [MVTheme cardTitleFont];
+    self.storageLabel.textColor = [MVTheme text];
+    self.storageLabel.adjustsFontForContentSizeCategory = YES;
+    [self.storageCard addSubview:self.storageLabel];
+
+    self.storageDetailLabel = [UILabel new];
+    self.storageDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.storageDetailLabel.font = [MVTheme cardDetailFont];
+    self.storageDetailLabel.textColor = [MVTheme secondaryText];
+    self.storageDetailLabel.adjustsFontForContentSizeCategory = YES;
+    [self.storageCard addSubview:self.storageDetailLabel];
+
+    self.storageBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.storageBar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.storageBar.progressTintColor = [MVTheme accent];
+    self.storageBar.trackTintColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.22];
+    [self.storageCard addSubview:self.storageBar];
+
+    CGFloat pad = 14.0;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.storageLabel.topAnchor constraintEqualToAnchor:self.storageCard.topAnchor constant:pad],
+        [self.storageLabel.leadingAnchor constraintEqualToAnchor:self.storageCard.leadingAnchor constant:pad],
+        [self.storageLabel.trailingAnchor constraintEqualToAnchor:self.storageCard.trailingAnchor constant:-pad],
+
+        [self.storageDetailLabel.topAnchor constraintEqualToAnchor:self.storageLabel.bottomAnchor constant:2],
+        [self.storageDetailLabel.leadingAnchor constraintEqualToAnchor:self.storageCard.leadingAnchor constant:pad],
+        [self.storageDetailLabel.trailingAnchor constraintEqualToAnchor:self.storageCard.trailingAnchor constant:-pad],
+
+        [self.storageBar.topAnchor constraintEqualToAnchor:self.storageDetailLabel.bottomAnchor constant:8],
+        [self.storageBar.leadingAnchor constraintEqualToAnchor:self.storageCard.leadingAnchor constant:pad],
+        [self.storageBar.trailingAnchor constraintEqualToAnchor:self.storageCard.trailingAnchor constant:-pad],
+        [self.storageBar.bottomAnchor constraintEqualToAnchor:self.storageCard.bottomAnchor constant:-pad],
+    ]];
+}
+
 - (void)refresh {
     self.title = [MVLang t:@"Files"];
-    self.emptyLabel.text = [MVLang t:@"No files"];
     self.search.searchBar.placeholder = [MVLang t:@"Search files"];
-    self.storageLabel.text = [NSString stringWithFormat:@"%@ %@",
-                              [MVPaths formatBytes:[MVPaths freeSpace]], [MVLang t:@"available"]];
+    self.emptyState.title = [MVLang t:@"No files"];
+    self.emptyState.message = [MVLang t:@"Downloads land here, and you can add your own folders."];
+    [self updateStorageCard];
+    self.emptyState.hidden = [self entries].count > 0;
     [MVTheme applyWallpaperTo:self.view];
     [self.tableView reloadData];
+}
+
+- (void)updateStorageCard {
+    long long free = [MVPaths freeSpace];
+    long long total = [MVPaths totalSpace];
+    long long used = MAX(0, total - free);
+    self.storageLabel.text = [NSString stringWithFormat:@"%@ %@",
+                              [MVPaths formatBytes:free], [MVLang t:@"available"]];
+    self.storageDetailLabel.text = [NSString stringWithFormat:@"%@ %@ · %@ %@",
+                                    [MVPaths formatBytes:used], [MVLang t:@"used"],
+                                    [MVPaths formatBytes:total], [MVLang t:@"total"]];
+    self.storageBar.progress = total > 0 ? (float)((double)used / (double)total) : 0.0f;
+    [self.emptyState refresh];
 }
 
 #pragma mark - Inline player card
@@ -554,51 +615,50 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSArray *entries = [self entries];
-    self.emptyLabel.hidden = entries.count > 0;
+    self.emptyState.hidden = entries.count > 0;
     return entries.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MVFileCell" forIndexPath:indexPath];
-    NSString *name = [self entries][indexPath.row];
+    MVFileCardCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MVFileCardCell" forIndexPath:indexPath];
+    NSArray<NSString *> *entries = [self entries];
+    NSString *name = entries[indexPath.row];
     NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
     BOOL isDir = NO;
     [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
 
-    UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
-    content.text = name;
-    content.textProperties.color = [MVTheme text];
-    content.textProperties.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    content.secondaryTextProperties.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    content.imageProperties.reservedLayoutSize = CGSizeMake(50, 36);
-    content.imageProperties.maximumSize = CGSizeMake(50, 36);
-
+    NSString *detail;
+    NSString *symbol;
+    UIImage *thumbnail = nil;
     if (isDir) {
-        content.image = [UIImage systemImageNamed:@"folder.fill"];
-        content.secondaryText = [self summaryForFolderAtPath:path];
+        detail = [self summaryForFolderAtPath:path];
+        symbol = @"folder.fill";
     } else {
         NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
         long long size = [attrs[NSFileSize] longLongValue];
         NSDate *date = attrs[NSFileModificationDate];
         NSString *ext = path.pathExtension.lowercaseString;
         NSString *thumbPath = [self thumbnailForPath:path];
-        if (thumbPath) {
-            content.image = [UIImage imageWithContentsOfFile:thumbPath];
-            content.imageProperties.maximumSize = CGSizeMake(88, 50);
-            content.imageProperties.cornerRadius = 8;
-        } else {
-            content.image = [UIImage systemImageNamed:[self symbolForExtension:ext]];
-        }
-        content.secondaryText = [NSString stringWithFormat:@"%@  ·  %@",
-                                 [MVPaths formatBytes:size],
-                                 [NSDateFormatter localizedStringFromDate:date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]];
+        if (thumbPath) thumbnail = [UIImage imageWithContentsOfFile:thumbPath];
+        symbol = [MVFileCardCell symbolForExtension:ext];
+        detail = [NSString stringWithFormat:@"%@  \u00b7  %@",
+                  [MVPaths formatBytes:size],
+                  [NSDateFormatter localizedStringFromDate:date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]];
     }
-    content.secondaryTextProperties.color = [MVTheme secondaryText];
-    content.imageProperties.tintColor = [MVTheme accent];
-    cell.contentConfiguration = content;
-    cell.backgroundColor = UIColor.clearColor;
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+
+    [cell configureWithName:name detail:detail symbolName:symbol thumbnail:thumbnail isFolder:isDir];
+    __weak typeof(self) weakSelf = self;
+    cell.onAction = ^{
+        if (isDir) [weakSelf openFolderAtPath:path];
+        else [weakSelf showFileMenuForPath:path];
+    };
     return cell;
+}
+
+- (void)openFolderAtPath:(NSString *)path {
+    MVFilesViewController *sub = [MVFilesViewController new];
+    sub.rootOverride = path;
+    [self.navigationController pushViewController:sub animated:YES];
 }
 
 /// A one-line summary of what a folder holds, so a folder row never claims to
@@ -630,14 +690,6 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     return [NSString stringWithFormat:@"%@  ·  %@", count, [MVPaths formatBytes:bytes]];
 }
 
-- (NSString *)symbolForExtension:(NSString *)ext {
-    if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] || [ext isEqualToString:@"m4v"] || [ext isEqualToString:@"mkv"] || [ext isEqualToString:@"webm"]) return @"play.rectangle.fill";
-    if ([ext isEqualToString:@"m4a"] || [ext isEqualToString:@"mp3"] || [ext isEqualToString:@"aac"] || [ext isEqualToString:@"opus"]) return @"waveform";
-    if ([ext isEqualToString:@"pdf"]) return @"doc.richtext";
-    if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"rar"]) return @"doc.zipper";
-    return @"doc";
-}
-
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     NSString *name = [self entries][indexPath.row];
@@ -646,9 +698,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
 
     if (isDir) {
-        MVFilesViewController *sub = [MVFilesViewController new];
-        sub.rootOverride = path;
-        [self.navigationController pushViewController:sub animated:YES];
+        [self openFolderAtPath:path];
         return;
     }
 
@@ -764,6 +814,64 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     NSString *name = [self entries][indexPath.row];
     NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
     [self showFileMenuForPath:path];
+}
+
+/// The modern long-press menu, matching the Downloads list. The table's own
+/// recogniser drives this; the extra gesture above is only a fallback for a
+/// press that lands between rows.
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
+    NSString *name = [self entries][indexPath.row];
+    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    BOOL isDir = NO;
+    [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
+    __weak typeof(self) weakSelf = self;
+
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil
+                                                   previewProvider:nil
+                                                    actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
+        NSMutableArray<UIMenuElement *> *actions = [NSMutableArray array];
+        NSString *ext = path.pathExtension.lowercaseString;
+        BOOL playable = [@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"] containsObject:ext];
+        BOOL needsConvert = [@[@"webm", @"mkv"] containsObject:ext];
+        if (isDir) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Open"] image:[UIImage systemImageNamed:@"folder"]
+                                               identifier:nil handler:^(UIAction *a) { [weakSelf openFolderAtPath:path]; }]];
+        } else if (playable) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Play"] image:[UIImage systemImageNamed:@"play.fill"]
+                                               identifier:nil handler:^(UIAction *a) { [weakSelf playPathInQueue:path]; }]];
+        } else if (needsConvert) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Convert"] image:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"]
+                                               identifier:nil handler:^(UIAction *a) { [weakSelf offerConversionForPath:path]; }]];
+        }
+        if (!isDir) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Save to Photos"] image:[UIImage systemImageNamed:@"photo.on.rectangle"]
+                                               identifier:nil handler:^(UIAction *a) {
+                [[MVDownloadEngine shared] saveToPhotos:path completion:^(NSString *fp, NSString *err) {
+                    if (fp && !err) [weakSelf alert:@"MoodyVid" message:[MVLang t:@"Saved to Photos"]];
+                    else if (err) [weakSelf alert:[MVLang t:@"Failed"] message:err];
+                }];
+            }]];
+        }
+        [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Share"] image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                           identifier:nil handler:^(UIAction *a) {
+            UIActivityViewController *share = [[UIActivityViewController alloc]
+                initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+            share.popoverPresentationController.sourceView = weakSelf.view;
+            share.popoverPresentationController.sourceRect = CGRectMake(weakSelf.view.bounds.size.width / 2,
+                                                                        weakSelf.view.bounds.size.height / 2, 1, 1);
+            [weakSelf presentViewController:share animated:YES completion:nil];
+        }]];
+        if (!isDir) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Rename"] image:[UIImage systemImageNamed:@"pencil"]
+                                               identifier:nil handler:^(UIAction *a) { [weakSelf promptRenamePath:path]; }]];
+        }
+        UIAction *del = [UIAction actionWithTitle:[MVLang t:@"Delete"] image:[UIImage systemImageNamed:@"trash"]
+                                        identifier:nil handler:^(UIAction *a) { [weakSelf confirmDeletePath:path]; }];
+        del.attributes = UIMenuElementAttributesDestructive;
+        [actions addObject:del];
+        return [UIMenu menuWithChildren:actions];
+    }];
 }
 
 - (void)showFileMenuForPath:(NSString *)path {
