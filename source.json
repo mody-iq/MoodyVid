@@ -19,16 +19,47 @@
       "iconURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/icon-source.png",
       "tintColor": "12ACBA",
       "category": "utilities",
-      "screenshots": [],
+      "screenshots": [
+        {
+          "imageURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/screenshots/01-home.png",
+          "width": 1290,
+          "height": 2796,
+          "caption": "الشاشة الرئيسية — الصق الرابط وحمّل"
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/screenshots/02-quality.png",
+          "width": 1290,
+          "height": 2796,
+          "caption": "اختر الجودة من 480p حتى 1080p"
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/screenshots/03-downloads.png",
+          "width": 1290,
+          "height": 2796,
+          "caption": "تابع التنزيلات والتقدم"
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/screenshots/04-files.png",
+          "width": 1290,
+          "height": 2796,
+          "caption": "كل الملفات في مكان واحد"
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/mody-iq/MoodyVid/main/Resources/screenshots/05-settings.png",
+          "width": 1290,
+          "height": 2796,
+          "caption": "عربي وإنجليزي، وضع ليلي"
+        }
+      ],
       "versions": [
         {
           "version": "0.2.0",
-          "buildVersion": "156",
-          "date": "2026-11-11T18:37:11Z",
+          "buildVersion": "157",
+          "date": "2026-11-11T19:49:07Z",
           "downloadURL": "https://github.com/mody-iq/MoodyVid/releases/download/latest/MoodyVid.ipa",
-          "size": 25358178,
+          "size": 25358179,
           "minOSVersion": "15.0",
-          "localizedDescription": "MoodyVid 0.2.0 (build 156) — iOS 15.0+, iPhone only"
+          "localizedDescription": "MoodyVid 0.2.0 (build 157) — iOS 15.0+, iPhone only"
         }
       ],
       "deviceFamilies": [
