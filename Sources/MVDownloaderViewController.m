@@ -454,15 +454,18 @@
     grid.axis = UILayoutConstraintAxisVertical;
     grid.spacing = 10;
 
-    // Two rows of four tiles; UICollectionView would be overkill here.
-    for (NSInteger row = 0; row < 2; row++) {
+    // Four tiles per row; UICollectionView would be overkill here. The row count
+    // is derived from the list rather than hard-coded to two, so a shorter
+    // shortcut list can never index past the end.
+    NSInteger const perRow = 4;
+    for (NSInteger start = 0; start < (NSInteger)self.platforms.count; start += perRow) {
         UIStackView *line = [UIStackView new];
         line.axis = UILayoutConstraintAxisHorizontal;
         line.distribution = UIStackViewDistributionFillEqually;
         line.spacing = 10;
-        for (NSInteger col = 0; col < 4; col++) {
-            MVPlatform *p = self.platforms[row * 4 + col];
-            [line addArrangedSubview:[self makePlatformTile:p]];
+        NSInteger end = MIN(start + perRow, (NSInteger)self.platforms.count);
+        for (NSInteger i = start; i < end; i++) {
+            [line addArrangedSubview:[self makePlatformTile:self.platforms[i]]];
         }
         [grid addArrangedSubview:line];
     }
