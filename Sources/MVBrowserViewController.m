@@ -976,14 +976,24 @@ static id gParkedObserver = nil;
 
 - (void)downloadItems:(NSArray<MVSnifferItem *> *)items {
     if (!items.count) return;
+    BOOL anyAdded = NO;
+    BOOL anyDuplicate = NO;
     for (MVSnifferItem *item in items) {
         // A page row is not a file the direct engine can fetch; it goes through
         // yt-dlp, exactly like the "download page" button.
         if (item.isPage) {
             [[MVDownloadEngine shared] downloadURL:item.url quality:@"best" completion:nil];
+            anyAdded = YES;
         } else {
-            [[MVDownloadManager shared] enqueueItem:item];
+            BOOL added = NO;
+            [[MVDownloadManager shared] enqueueItem:item added:&added];
+            if (added) anyAdded = YES; else anyDuplicate = YES;
         }
+    }
+    // Every row was already in the list: say so instead of a silent no-op.
+    if (!anyAdded && anyDuplicate) {
+        [self toast:[MVLang t:@"Already in downloads"]];
+        return;
     }
     [self notifyQueued];
 }
@@ -1055,8 +1065,13 @@ static id gParkedObserver = nil;
                                                                   message:[MVLang t:@"Download this file?"]
                                                            preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Download"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [[MVDownloadManager shared] enqueueItem:item];
-        [self notifyQueued];
+        BOOL added = NO;
+        [[MVDownloadManager shared] enqueueItem:item added:&added];
+        if (added) {
+            [self notifyQueued];
+        } else {
+            [self toast:[MVLang t:@"Already in downloads"]];
+        }
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -1068,8 +1083,13 @@ static id gParkedObserver = nil;
     // The magnet is queued like any other torrent. It fails asynchronously with a
     // localised reason (the BEP 9 metadata exchange is not built yet), so the
     // downloads row carries the explanation; no alert is needed here.
-    [[MVDownloadManager shared] enqueueItem:item];
-    [self notifyQueued];
+    BOOL added = NO;
+    [[MVDownloadManager shared] enqueueItem:item added:&added];
+    if (added) {
+        [self notifyQueued];
+    } else {
+        [self toast:[MVLang t:@"Already in downloads"]];
+    }
 }
 
 #pragma mark - Menu

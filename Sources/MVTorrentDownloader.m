@@ -1,4 +1,5 @@
 #import "MVTorrentDownloader.h"
+#import "MVTaskStore.h"
 #import "MVTorrentMetadata.h"
 #import "MVTorrentStorage.h"
 #import "MVTorrentPeer.h"
@@ -282,6 +283,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     job.task.path = job.storage.outputPath;
     job.task.totalBytes = metadata.totalLength;
 
+    // The row title comes from the page title (the .torrent link's page), so
+    // every torrent from one page shares it. The torrent's own name is what
+    // identifies it, so use that instead.
+    if (metadata.name.length) job.task.title = metadata.name;
+    dispatch_async(dispatch_get_main_queue(), ^{ [MVTaskStore.shared update:job.task]; });
+
     // The piece table. The last piece is shorter than the piece length.
     long long total = metadata.totalLength;
     for (NSInteger i = 0; i < metadata.pieceCount; i++) {
@@ -319,6 +326,15 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 #pragma mark - Trackers
 
+/// A short, human-readable reason naming the tracker host and what went wrong,
+/// so a failed row says why (unreachable vs. returned no peers) instead of the
+/// generic "no peers" for every case.
+- (NSString *)trackerFailureFor:(NSString *)tracker reason:(NSString *)reason {
+    NSString *host = [NSURL URLWithString:tracker].host;
+    if (!host.length) host = tracker;
+    return [NSString stringWithFormat:@"%@: %@", host, reason];
+}
+
 - (void)announceForJob:(MVTorrentJob *)job event:(NSString *)event {
     NSArray<NSString *> *trackers = job.metadata.trackers;
     if (!trackers.count) {
@@ -329,6 +345,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     dispatch_async(_networkQueue, ^{
         BOOL gotAny = NO;
         NSTimeInterval interval = 0;
+        NSString *lastFailure = nil;
         for (NSString *tracker in trackers) {
             if (currentJob.cancelled || currentJob.paused) return;
             NSURL *announce = [MVTorrentTracker announceURLForTracker:tracker
@@ -343,12 +360,17 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
             NSError *error = nil;
             NSData *response = [self syncGet:announce.absoluteString headers:nil error:&error];
             if (!response.length) {
+                lastFailure = [self trackerFailureFor:tracker reason:[MVLang t:@"Could not be reached"]];
                 MVLogWarn(@"torrent: tracker %@ failed: %@", tracker, error.localizedDescription ?: @"no response");
                 continue;
             }
             NSString *trackerError = nil;
             NSArray<MVTorrentPeerAddress *> *peers = [MVTorrentTracker peersFromAnnounceResponse:response error:&trackerError];
             if (!peers.count) {
+                // A tracker that answered but returned no peers is a different
+                // situation from one that could not be reached; report which.
+                lastFailure = [self trackerFailureFor:tracker
+                                               reason:trackerError.length ? trackerError : [MVLang t:@"Returned no peers"]];
                 MVLogWarn(@"torrent: tracker %@ returned no peers (%@)", tracker, trackerError ?: @"none");
                 continue;
             }
@@ -358,9 +380,10 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
             dispatch_async(self->_queue, ^{ [self addPeers:peers toJob:currentJob]; });
         }
         if (!gotAny && !currentJob.hadPeers) {
+            NSString *reason = lastFailure ?: [MVLang t:@"No peers were found for this torrent"];
             dispatch_async(self->_queue, ^{
                 if (currentJob.peers.count == 0 && !currentJob.finishing && !currentJob.cancelled) {
-                    [self failJob:currentJob message:[MVLang t:@"No peers were found for this torrent"]];
+                    [self failJob:currentJob message:reason];
                 }
             });
         } else {

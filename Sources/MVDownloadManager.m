@@ -90,7 +90,9 @@ static const NSUInteger kDefaultConcurrent = 3;
                                title:(NSString *)title
                        suggestedName:(NSString *)suggestedFilename
                             category:(NSString *)category
-                            expected:(long long)totalBytes {
+                            expected:(long long)totalBytes
+                             created:(BOOL *)created {
+    if (created) *created = NO;
     if (!url.length) return nil;
 
     // Skip duplicates: re-adding the same URL moves the existing row to the top.
@@ -100,6 +102,7 @@ static const NSUInteger kDefaultConcurrent = 3;
         if (existing.state == MVTaskStateFailed) [self resumeTask:existing];
         return existing;
     }
+    if (created) *created = YES;
 
     MVDownloadTask *task = [MVDownloadTask new];
     task.identifier = NSUUID.UUID.UUIDString;
@@ -130,6 +133,11 @@ static const NSUInteger kDefaultConcurrent = 3;
 }
 
 - (MVDownloadTask *)enqueueItem:(MVSnifferItem *)item {
+    return [self enqueueItem:item added:NULL];
+}
+
+- (MVDownloadTask *)enqueueItem:(MVSnifferItem *)item added:(BOOL *)added {
+    if (added) *added = NO;
     if (!item.url.length) return nil;
 
     // An engine that does not exist yet must fail loudly and clearly, not sit at
@@ -137,22 +145,26 @@ static const NSUInteger kDefaultConcurrent = 3;
     // and the retry path can pick it up once the engine ships.
     switch (item.kind) {
         case MVSniffKindHLS:
-            return [self enqueueHLSItem:item];
+            return [self enqueueHLSItem:item added:added];
         case MVSniffKindDASH:
-            return [self enqueueDASHItem:item];
+            return [self enqueueDASHItem:item added:added];
         case MVSniffKindTorrent:
-            return [self enqueueTorrentItem:item];
+            return [self enqueueTorrentItem:item added:added];
         default:
             break;
     }
 
-    return [self enqueueDirectURL:item.url
-                          headers:nil
-                          referer:item.referer ?: item.pageURL
-                            title:item.pageTitle.length ? item.pageTitle : item.displayName
-                    suggestedName:item.suggestedFilename.length ? item.suggestedFilename : item.displayName
-                         category:nil
-                         expected:item.totalBytes];
+    BOOL created = NO;
+    MVDownloadTask *task = [self enqueueDirectURL:item.url
+                                          headers:nil
+                                          referer:item.referer ?: item.pageURL
+                                            title:item.pageTitle.length ? item.pageTitle : item.displayName
+                                    suggestedName:item.suggestedFilename.length ? item.suggestedFilename : item.displayName
+                                         category:nil
+                                         expected:item.totalBytes
+                                          created:&created];
+    if (added) *added = created;
+    return task;
 }
 
 /// The shared path for every engine that downloads from a sniffed item: they
@@ -162,13 +174,15 @@ static const NSUInteger kDefaultConcurrent = 3;
                          source:(MVTaskSource)source
                        category:(NSString *)category
                        filename:(NSString *)filename
-                          label:(NSString *)label {
+                          label:(NSString *)label
+                          added:(BOOL *)added {
     MVDownloadTask *existing = [MVTaskStore.shared taskWithURL:item.url];
     if (existing) {
         [MVTaskStore.shared moveToTop:existing];
         if (existing.state == MVTaskStateFailed) [self resumeTask:existing];
         return existing;
     }
+    if (added) *added = YES;
     MVDownloadTask *task = [MVDownloadTask new];
     task.identifier = NSUUID.UUID.UUIDString;
     task.source = source;
@@ -188,24 +202,35 @@ static const NSUInteger kDefaultConcurrent = 3;
 }
 
 /// Queues an HLS stream (`.m3u8`).
-- (MVDownloadTask *)enqueueHLSItem:(MVSnifferItem *)item {
+- (MVDownloadTask *)enqueueHLSItem:(MVSnifferItem *)item added:(BOOL *)added {
     return [self enqueueItem:item source:MVTaskSourceHLS category:@"Videos"
-                    filename:[self mp4NameForItem:item] label:@"HLS"];
+                    filename:[self mp4NameForItem:item] label:@"HLS" added:added];
 }
 
 /// Queues a DASH stream (`.mpd`). The engine reads the manifest and joins the
 /// segments.
-- (MVDownloadTask *)enqueueDASHItem:(MVSnifferItem *)item {
+- (MVDownloadTask *)enqueueDASHItem:(MVSnifferItem *)item added:(BOOL *)added {
     return [self enqueueItem:item source:MVTaskSourceDASH category:@"Videos"
-                    filename:[self mp4NameForItem:item] label:@"DASH"];
+                    filename:[self mp4NameForItem:item] label:@"DASH" added:added];
 }
 
 /// Queues a `.torrent` file. A magnet link is queued too — the engine reports
 /// the honest reason it cannot be fetched yet, rather than the row being stuck
 /// at 0%.
-- (MVDownloadTask *)enqueueTorrentItem:(MVSnifferItem *)item {
-    return [self enqueueItem:item source:MVTaskSourceTorrent category:@"Torrents"
-                    filename:item.suggestedFilename label:@"torrent"];
+- (MVDownloadTask *)enqueueTorrentItem:(MVSnifferItem *)item added:(BOOL *)added {
+    BOOL created = NO;
+    MVDownloadTask *task = [self enqueueItem:item source:MVTaskSourceTorrent category:@"Torrents"
+                                    filename:item.suggestedFilename label:@"torrent" added:&created];
+    // Several .torrent links on one page share the page's title, so the rows
+    // would be indistinguishable — including a failed one, whose metadata never
+    // loads. The .torrent's own filename is distinct; the metadata name replaces
+    // it once the file is read.
+    if (created && task && item.suggestedFilename.length) {
+        task.title = item.suggestedFilename;
+        [MVTaskStore.shared update:task];
+    }
+    if (added) *added = created;
+    return task;
 }
 
 /// A stream has no filename of its own, so the title becomes one with an .mp4

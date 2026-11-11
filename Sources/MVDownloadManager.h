@@ -24,13 +24,19 @@ NS_ASSUME_NONNULL_BEGIN
                                title:(nullable NSString *)title
                      suggestedName:(nullable NSString *)suggestedFilename
                             category:(nullable NSString *)category
-                            expected:(long long)totalBytes;
+                            expected:(long long)totalBytes
+                             created:(BOOL *_Nullable)created;
 
 /// Queues a sniffed item, choosing the engine from its kind: HLS, DASH,
 /// torrent, or a plain HTTP file. A magnet link is queued like any other
 /// torrent; its engine reports the honest reason it cannot fetch the metadata
 /// yet rather than leaving the row stuck at 0%.
 - (MVDownloadTask *)enqueueItem:(MVSnifferItem *)item;
+
+/// Same, but reports whether a new task was created. `added` is set to NO when
+/// the URL was already in the list (the existing row is moved to the top), so
+/// the caller can say "Already in downloads" instead of pretending it queued.
+- (MVDownloadTask *)enqueueItem:(MVSnifferItem *)item added:(BOOL *_Nullable)added;
 
 /// Resumes a paused or failed task.
 - (void)resumeTask:(MVDownloadTask *)task;
