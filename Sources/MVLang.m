@@ -158,6 +158,8 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Size": @"الحجم",
             @"available": @"متاح",
             @"Empty folder": @"مجلد فارغ",
+            @"1 file": @"ملف واحد",
+            @"files": @"ملف",
             @"No files": @"لا توجد ملفات",
             @"Move to folder": @"نقل إلى مجلد",
             @"Nothing to move to": @"لا توجد مجلدات",
@@ -196,6 +198,13 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Made with love": @"صُنع بـحب 🧡",
             @"Can't play this file": @"لا يمكن تشغيل هذا الملف",
             @"WebM and MKV aren't supported. You can still share or export it.": @"صيغتا WebM وMKV غير مدعومتين. يمكنك مع ذلك مشاركته أو تصديره.",
+            @"Convert to playable": @"تحويل إلى صيغة قابلة للتشغيل",
+            @"This file's format isn't supported. Convert it to MP4 to play it here.": @"صيغة هذا الملف غير مدعومة. حوّله إلى MP4 لتشغيله هنا.",
+            @"Convert": @"تحويل",
+            @"Could not convert this file": @"تعذّر تحويل هذا الملف",
+            @"Could not read this file": @"تعذّر قراءة هذا الملف",
+            @"No video track": @"لا يوجد مسار فيديو",
+            @"OK": @"حسناً",
 
             // Wallpapers
             @"Wallpaper": @"الخلفية",

@@ -33,6 +33,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// skip the second download entirely instead of fetching the same bytes twice.
 + (BOOL)hasAudioTrack:(NSString *)path;
 
+/// Remuxes a container iOS will not play directly (an MKV or a WebM whose
+/// tracks are H.264/AAC) into an MP4 by copying the tracks without re-encoding.
+/// Returns NO when the codecs inside are ones AVFoundation cannot decode
+/// (VP9/AV1/Opus), because the remux would then have nothing to copy.
++ (void)remuxToMP4:(NSString *)path
+                to:(NSString *)outPath
+        completion:(void (^)(BOOL ok, NSString *_Nullable error))completion;
+
 @end
 
 NS_ASSUME_NONNULL_END

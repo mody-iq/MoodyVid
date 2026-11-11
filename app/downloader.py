@@ -227,10 +227,14 @@ def download(url, quality="best", _task=""):
     for client in _client_order():
         if _is_cancelled(native, _task):
             return _error("cancelled")
+        if _is_paused(native, _task):
+            return _error("paused")
         try:
             info, filename = _download_once(yt_dlp, url, fmt, client, out_dir, native, _task)
         except _Cancelled:
             return _error("cancelled")
+        except _Paused:
+            return _error("paused")
         except Exception as e:
             last_error = e
             continue
@@ -256,11 +260,31 @@ class _Cancelled(Exception):
     """Raised from the progress hook when the UI asked the task to stop."""
 
 
+class _Paused(Exception):
+    """Raised from the progress hook when the UI asked the task to pause.
+
+    yt-dlp cannot be suspended in place, so pausing unwinds the download the
+    same way a cancel does — but the caller keeps the .part file and reports
+    "paused" instead of "cancelled", so a resume continues where it stopped.
+    """
+
+
 def _is_cancelled(native, task):
     if not native or not task:
         return False
     try:
         return bool(native.cancelled(task))
+    except BaseException:
+        return False
+
+
+def _is_paused(native, task):
+    """True while the UI wants this task held. Pausing is distinct from
+    cancelling: the .part file stays on disk so the download can continue."""
+    if not native or not task:
+        return False
+    try:
+        return bool(native.paused(task))
     except BaseException:
         return False
 
@@ -275,6 +299,11 @@ def _progress_hook(native, task):
     def hook(status):
         if _is_cancelled(native, task):
             raise _Cancelled()
+        # A pause also unwinds the yt-dlp call (there is no way to suspend it in
+        # place); the caller treats it as "keep the .part file" instead of a
+        # failure, and the download continues from that file on resume.
+        if _is_paused(native, task):
+            raise _Paused()
         if not native or not task:
             return
         try:
@@ -379,6 +408,8 @@ def download_fragment(url, kind, quality="best", _task=""):
     for client in _client_order():
         if _is_cancelled(native, _task):
             return _error("cancelled")
+        if _is_paused(native, _task):
+            return _error("paused")
         try:
             opts = {
                 "format": fmt,
@@ -412,6 +443,8 @@ def download_fragment(url, kind, quality="best", _task=""):
                 }, ensure_ascii=False)
         except _Cancelled:
             return _error("cancelled")
+        except _Paused:
+            return _error("paused")
         except Exception as e:
             continue
     return _error("the stream could not be downloaded")

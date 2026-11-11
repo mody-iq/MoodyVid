@@ -1,6 +1,8 @@
 #import "MVMediaConverter.h"
+#import "MVLang.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <CoreMedia/CoreMedia.h>
 
 // The MP3 encoder (see build.sh). Falls back to AAC/m4a when not present.
 #if __has_include(<lame.h>)
@@ -94,6 +96,68 @@
     if (!path.length) return NO;
     AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
     return [asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
+}
+
++ (void)remuxToMP4:(NSString *)path
+                to:(NSString *)outPath
+        completion:(void (^)(BOOL, NSString *_Nullable))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL ok = NO;
+        NSString *error = nil;
+        @autoreleasepool {
+            AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+            AVAssetTrack *vTrack = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+            if (!vTrack) {
+                error = [MVLang t:@"No video track"];
+            } else {
+                AVMutableComposition *mix = [AVMutableComposition composition];
+                NSError *verr = nil;
+                AVMutableCompositionTrack *vt = [mix addMutableTrackWithMediaType:AVMediaTypeVideo
+                                                                preferredTrackID:kCMPersistentTrackID_Invalid];
+                CMTime videoSpan = vTrack.timeRange.duration;
+                [vt insertTimeRange:CMTimeRangeMake(kCMTimeZero, videoSpan)
+                            ofTrack:vTrack atTime:kCMTimeZero error:&verr];
+                AVAssetTrack *aTrack = [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+                if (aTrack && !verr) {
+                    AVMutableCompositionTrack *at = [mix addMutableTrackWithMediaType:AVMediaTypeAudio
+                                                                    preferredTrackID:kCMPersistentTrackID_Invalid];
+                    CMTime audioSpan = aTrack.timeRange.duration;
+                    CMTime span = CMTIME_COMPARE_INLINE(audioSpan, <, videoSpan) ? audioSpan : videoSpan;
+                    [at insertTimeRange:CMTimeRangeMake(kCMTimeZero, span)
+                                ofTrack:aTrack atTime:kCMTimeZero error:nil];
+                }
+                if (verr) {
+                    error = verr.localizedDescription ?: [MVLang t:@"Could not read this file"];
+                } else if ([NSFileManager.defaultManager fileExistsAtPath:outPath]) {
+                    [NSFileManager.defaultManager removeItemAtPath:outPath error:nil];
+                }
+                AVAssetExportSession *export = [AVAssetExportSession
+                    exportSessionWithAsset:mix presetName:AVAssetExportPresetPassthrough];
+                if (!verr && !export) {
+                    error = [MVLang t:@"Could not convert this file"];
+                } else if (!verr) {
+                    export.outputURL = [NSURL fileURLWithPath:outPath];
+                    export.outputFileType = AVFileTypeMPEG4;
+                    export.shouldOptimizeForNetworkUse = NO;
+                    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                    __block BOOL succeeded = NO;
+                    [export exportAsynchronouslyWithCompletionHandler:^{
+                        succeeded = (export.status == AVAssetExportSessionStatusCompleted);
+                        dispatch_semaphore_signal(sem);
+                    }];
+                    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600LL * NSEC_PER_SEC)));
+                    if (succeeded) {
+                        ok = YES;
+                    } else {
+                        error = [MVLang t:@"Could not convert this file"];
+                    }
+                }
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(ok, error);
+        });
+    });
 }
 
 + (void)convertToMP3:(NSString *)audioPath

@@ -24,6 +24,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Stops a queued or running download; its record is marked cancelled.
 - (void)cancelDownload:(NSString *)identifier;
 
+/// Stops a running download but keeps its .part file, marking the record Paused
+/// so it can be resumed later instead of restarting from zero.
+- (void)pauseDownload:(NSString *)identifier;
+
+/// Re-queues a paused record; yt-dlp continues the .part file it left behind.
+- (void)resumeDownload:(NSString *)identifier;
+
 /// Fetches the video's thumbnail and caches it as JPEG under the thumbs
 /// folder; the store record is updated on success. Fails silently: a missing
 /// thumbnail must never break a download.

@@ -281,7 +281,18 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
 + (UIImage *)wallpaperImageForName:(NSString *)name size:(CGSize)size {
     if (size.width <= 1 || size.height <= 1 || ![self wallpaperUsesImage:name]) return nil;
     BOOL dark = [self resolveDarkForTraits:UITraitCollection.currentTraitCollection];
-    return MVWallpaperImage(name, size, dark);
+    // Rendering the pattern is a full CoreGraphics pass, and every tab hands the
+    // wallpaper back on -viewWillAppear. Cache by name/size/appearance so a tab
+    // switch reuses the bitmap instead of re-drawing it on the main thread.
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    NSString *key = [NSString stringWithFormat:@"%@-%.0fx%.0f-%d", name, size.width, size.height, dark];
+    UIImage *cached = [cache objectForKey:key];
+    if (cached) return cached;
+    UIImage *image = MVWallpaperImage(name, size, dark);
+    if (image) [cache setObject:image forKey:key];
+    return image;
 }
 
 + (void)refreshWallpaperIfPattern:(UIView *)view {

@@ -66,6 +66,13 @@ static PyObject *mv_cancelled(PyObject *self, PyObject *args) {
     Py_RETURN_FALSE;
 }
 
+static PyObject *mv_paused(PyObject *self, PyObject *args) {
+    const char *task = NULL;
+    if (!PyArg_ParseTuple(args, "s", &task)) return NULL;
+    if ([[MVPython shared] isTaskPaused:[NSString stringWithUTF8String:task ?: ""]]) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
 static PyObject *mv_set_progress(PyObject *self, PyObject *args) {
     const char *task = NULL;
     const char *json = NULL;
@@ -83,6 +90,7 @@ static PyMethodDef MVMethods[] = {
     {"set_progress", mv_set_progress, METH_VARARGS, "Stores live progress for a task, as a JSON string."},
     {"progress", mv_progress, METH_VARARGS, "Returns the last reported progress for a task, as JSON."},
     {"cancelled", mv_cancelled, METH_VARARGS, "Returns True when the task has been asked to stop."},
+    {"paused", mv_paused, METH_VARARGS, "Returns True while the task has been asked to pause."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -101,6 +109,7 @@ static PyObject *PyInit_mvnative(void) { return PyModule_Create(&MVNativeModule)
 // Progress and cancellation, keyed by task id, guarded by `stateLock`.
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *progressByTask;
 @property (nonatomic, strong) NSMutableSet<NSString *> *cancelledTasks;
+@property (nonatomic, strong) NSMutableSet<NSString *> *pausedTasks;
 @property (nonatomic, strong) NSLock *stateLock;
 @end
 
@@ -115,6 +124,7 @@ static PyObject *PyInit_mvnative(void) { return PyModule_Create(&MVNativeModule)
         instance.ready = dispatch_group_create();
         instance.progressByTask = [NSMutableDictionary dictionary];
         instance.cancelledTasks = [NSMutableSet set];
+        instance.pausedTasks = [NSMutableSet set];
         instance.stateLock = [NSLock new];
         instance->_engineInfo = @{};
     });
@@ -365,11 +375,34 @@ static NSString *pyErrorString(void) {
     return cancelled;
 }
 
+- (void)pauseTask:(NSString *)task {
+    if (!task.length) return;
+    [self.stateLock lock];
+    [self.pausedTasks addObject:task];
+    [self.stateLock unlock];
+}
+
+- (void)resumePausedTask:(NSString *)task {
+    if (!task.length) return;
+    [self.stateLock lock];
+    [self.pausedTasks removeObject:task];
+    [self.stateLock unlock];
+}
+
+- (BOOL)isTaskPaused:(NSString *)task {
+    if (!task.length) return NO;
+    [self.stateLock lock];
+    BOOL paused = [self.pausedTasks containsObject:task];
+    [self.stateLock unlock];
+    return paused;
+}
+
 - (void)forgetTask:(NSString *)task {
     if (!task.length) return;
     [self.stateLock lock];
     [self.progressByTask removeObjectForKey:task];
     [self.cancelledTasks removeObject:task];
+    [self.pausedTasks removeObject:task];
     [self.stateLock unlock];
 }
 

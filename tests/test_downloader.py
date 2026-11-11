@@ -24,9 +24,13 @@ class RecordingNative:
     def __init__(self):
         self.progress = []
         self.cancelled_tasks = set()
+        self.paused_tasks = set()
 
     def cancelled(self, task):
         return task in self.cancelled_tasks
+
+    def paused(self, task):
+        return task in self.paused_tasks
 
     def set_progress(self, task, payload):
         self.progress.append(json.loads(payload))
@@ -38,6 +42,9 @@ class BrokenNative:
     def cancelled(self, task):
         raise RuntimeError("no such method")
 
+    def paused(self, task):
+        raise RuntimeError("no such method")
+
     def set_progress(self, task, payload):
         raise RuntimeError("no such method")
 
@@ -45,6 +52,7 @@ class BrokenNative:
 def install_fake_native(native):
     module = types.ModuleType("mvnative")
     module.cancelled = native.cancelled
+    module.paused = native.paused
     module.set_progress = native.set_progress
     sys.modules["mvnative"] = module
     return module
@@ -96,6 +104,25 @@ class ProgressHookTests(unittest.TestCase):
 
     def test_cancelled_reports_false_without_a_native(self):
         self.assertFalse(self.downloader._is_cancelled(None, "task-1"))
+
+    def test_pausing_is_raised_out_of_the_hook(self):
+        self.native.paused_tasks.add("task-1")
+        with self.assertRaises(self.downloader._Paused):
+            self.hook({"status": "downloading"})
+
+    def test_pause_takes_priority_over_a_normal_report(self):
+        # A paused task must unwind before it writes more progress, or the row
+        # would keep moving after the user pressed pause.
+        self.native.paused_tasks.add("task-1")
+        with self.assertRaises(self.downloader._Paused):
+            self.hook({"status": "downloading", "downloaded_bytes": 1, "total_bytes": 2})
+        self.assertEqual(self.native.progress, [])
+
+    def test_paused_reports_false_without_a_native(self):
+        self.assertFalse(self.downloader._is_paused(None, "task-1"))
+
+    def test_a_failing_paused_check_never_breaks_the_download(self):
+        self.assertFalse(self.downloader._is_paused(BrokenNative(), "task-1"))
 
 
 class FormatSelectorTests(unittest.TestCase):

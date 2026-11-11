@@ -201,6 +201,11 @@ static NSString *const kTaskCell = @"MVTaskCell";
             self.detailTextLabel.textColor = [MVTheme danger];
             [self.actionButton showIcon:@"exclamationmark.circle"];
             break;
+        case MVDownloadStatePaused:
+            self.detailTextLabel.text = [MVLang t:@"Paused"];
+            self.detailTextLabel.textColor = [MVTheme secondaryText];
+            [self.actionButton showIcon:@"play.fill"];
+            break;
         case MVDownloadStateCancelled:
             self.detailTextLabel.text = [MVLang t:@"Cancel"];
             self.detailTextLabel.textColor = [MVTheme secondaryText];
@@ -545,12 +550,14 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
     MVDownloadRecord *record = row.record;
     [cell configureWithRecord:record];
 
-    // The round button cancels a running download; on a finished row it opens
-    // the same menu as tapping the row.
+    // The round button pauses a running download and resumes a paused one; on a
+    // finished row it opens the same menu as tapping the row.
     __weak MVDownloadCell *weakCell = cell;
     cell.onAction = ^{
-        if (record.isActive) {
-            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+        if (record.state == MVDownloadStatePaused) {
+            [[MVDownloadEngine shared] resumeDownload:record.identifier];
+        } else if (record.isActive) {
+            [[MVDownloadEngine shared] pauseDownload:record.identifier];
         } else {
             [weakSelf showMenuForRow:row sourceView:weakCell];
         }
@@ -585,6 +592,16 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     MVDownloadRow *row = [self rows][indexPath.row];
+    if (row.kind == MVRowKindRecord && row.record.state == MVDownloadStatePaused) {
+        UIContextualAction *resume = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                            title:[MVLang t:@"Resume"]
+                                                                          handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+            [[MVDownloadEngine shared] resumeDownload:row.record.identifier];
+            done(YES);
+        }];
+        resume.backgroundColor = [MVTheme accent];
+        return [UISwipeActionsConfiguration configurationWithActions:@[resume]];
+    }
     if (row.isActive) {
         UIContextualAction *cancel = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                             title:[MVLang t:@"Cancel"]
@@ -597,7 +614,20 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
             done(YES);
         }];
         cancel.backgroundColor = [MVTheme danger];
-        return [UISwipeActionsConfiguration configurationWithActions:@[cancel]];
+        // Pausing is offered first (rightmost, the "primary" swipe): it is the
+        // reversible action, while a cancel throws the partial file away.
+        UIContextualAction *pause = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                           title:[MVLang t:@"Pause"]
+                                                                         handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+            if (row.kind == MVRowKindTask) {
+                [[MVDownloadManager shared] pauseTask:row.task];
+            } else {
+                [[MVDownloadEngine shared] pauseDownload:row.record.identifier];
+            }
+            done(YES);
+        }];
+        pause.backgroundColor = [MVTheme warning];
+        return [UISwipeActionsConfiguration configurationWithActions:@[cancel, pause]];
     }
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                      title:[MVLang t:@"Delete"]
@@ -648,7 +678,17 @@ typedef NS_ENUM(NSInteger, MVRowKind) { MVRowKindRecord = 0, MVRowKindTask };
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Rename"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [self promptRename:record];
         }]];
+    } else if (record.state == MVDownloadStatePaused) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Resume"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] resumeDownload:record.identifier];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel download"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] cancelDownload:record.identifier];
+        }]];
     } else if (record.isActive) {
+        [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Pause"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [[MVDownloadEngine shared] pauseDownload:record.identifier];
+        }]];
         [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel download"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
             [[MVDownloadEngine shared] cancelDownload:record.identifier];
         }]];

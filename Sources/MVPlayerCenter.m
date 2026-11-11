@@ -990,6 +990,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     if (self.fullPlayerVisible) return;
     // The user closed the bar; only a new playback brings it back.
     if (self.dismissed) return;
+    // Nothing is loaded, so there is nothing to control. Without this a stray
+    // call (a tab hand-back, a late dismissal callback) put an empty "Now
+    // playing" bar on screen with no playback behind it.
+    if (!self.internalPlayer.currentItem) return;
     UIWindow *window = self.bar.window ?: [self keyWindow];
     if (!window) return;
     if (self.bar.superview != window) {

@@ -572,6 +572,9 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     MVTorrentJob *job = _jobs[peer.jobIdentifier];
     if (!job || job.cancelled || job.paused) return;
     MVLogInfo(@"torrent: peer %@:%ld connected", peer.host, (long)peer.port);
+    // Report now so a connected swarm clears the "Finding peers" phase at once
+    // instead of waiting for the first piece to finish.
+    [self reportProgressForJob:job];
     [self fillPipelinesForJob:job];
 }
 
@@ -677,6 +680,15 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 - (void)reportProgressForJob:(MVTorrentJob *)job {
     MVDownloadTask *task = job.task;
+    // "Finding peers" is only true until the swarm actually connects. Deriving
+    // the phase from the live peer count clears it the moment peers arrive, so
+    // the row stops showing a stale "Finding peers" over a download that is
+    // clearly moving bytes.
+    if (job.peers.count == 0) {
+        task.phase = [MVLang t:@"Finding peers"];
+    } else {
+        task.phase = nil;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (job.progressBlock) job.progressBlock(task);
     });

@@ -42,6 +42,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Asks a task to stop. The Python side polls this and aborts.
 - (void)cancelTask:(NSString *)task;
 - (BOOL)isTaskCancelled:(NSString *)task;
+
+/// Asks a task to pause. yt-dlp cannot be suspended, so the Python side aborts
+/// the download and keeps the .part file; a resume continues from it.
+- (void)pauseTask:(NSString *)task;
+/// Clears the pause flag so a resumed task can run again.
+- (void)resumePausedTask:(NSString *)task;
+- (BOOL)isTaskPaused:(NSString *)task;
 - (void)forgetTask:(NSString *)task;
 
 @end

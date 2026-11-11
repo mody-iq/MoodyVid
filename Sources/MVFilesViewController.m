@@ -7,6 +7,7 @@
 #import "MVTheme.h"
 #import "MVDownloadStore.h"
 #import "MVDownloadEngine.h"
+#import "MVMediaConverter.h"
 
 typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeName = 0,
@@ -574,7 +575,7 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
     if (isDir) {
         content.image = [UIImage systemImageNamed:@"folder.fill"];
-        content.secondaryText = [MVLang t:@"Empty folder"];
+        content.secondaryText = [self summaryForFolderAtPath:path];
     } else {
         NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
         long long size = [attrs[NSFileSize] longLongValue];
@@ -598,6 +599,35 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     cell.backgroundColor = UIColor.clearColor;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
+}
+
+/// A one-line summary of what a folder holds, so a folder row never claims to
+/// be empty when its files are simply nested. Counts the visible files
+/// (recursively) and sums their sizes.
+- (NSString *)summaryForFolderAtPath:(NSString *)path {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *names = [fm contentsOfDirectoryAtPath:path error:nil] ?: @[];
+    if (!names.count) return [MVLang t:@"Empty folder"];
+
+    NSUInteger files = 0;
+    long long bytes = 0;
+    NSURL *base = [NSURL fileURLWithPath:path];
+    NSDirectoryEnumerator *walk = [fm enumeratorAtURL:base
+                           includingPropertiesForKeys:@[NSURLFileSizeKey, NSURLIsDirectoryKey]
+                                              options:NSDirectoryEnumerationSkipsHiddenFiles
+                                         errorHandler:nil];
+    for (NSURL *url in walk) {
+        NSNumber *isDir = nil;
+        if (![url getResourceValue:&isDir forKey:NSURLIsDirectoryKey error:nil] || isDir.boolValue) continue;
+        files++;
+        NSNumber *size = nil;
+        if ([url getResourceValue:&size forKey:NSURLFileSizeKey error:nil]) bytes += size.longLongValue;
+    }
+    if (files == 0) return [MVLang t:@"Empty folder"];
+
+    NSString *count = files == 1 ? [MVLang t:@"1 file"]
+                                 : [NSString stringWithFormat:@"%lu %@", (unsigned long)files, [MVLang t:@"files"]];
+    return [NSString stringWithFormat:@"%@  ·  %@", count, [MVPaths formatBytes:bytes]];
 }
 
 - (NSString *)symbolForExtension:(NSString *)ext {
@@ -626,26 +656,56 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     if ([@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"] containsObject:ext]) {
         [self playPathInQueue:path];
     } else if ([@[@"webm", @"mkv"] containsObject:ext]) {
-        // iOS can't play these; offer sharing/export rather than freezing or
-        // silently doing nothing.
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:[MVLang t:@"Can't play this file"]
-                             message:[MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"]
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) {
-            UIActivityViewController *share = [[UIActivityViewController alloc]
-                initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
-            [self presentViewController:share animated:YES completion:nil];
-        }]];
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
+        [self offerConversionForPath:path];
     } else {
         UIActivityViewController *share = [[UIActivityViewController alloc]
             initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
         [self presentViewController:share animated:YES completion:nil];
     }
+}
+
+/// iOS cannot decode VP9/AV1/Opus, so a WebM or MKV is offered as a conversion
+/// instead of a dead end. The remux copies the tracks without re-encoding, so
+/// it is instant and lossless when the codecs are already compatible; when they
+/// are not, the file can still be shared or exported.
+- (void)offerConversionForPath:(NSString *)path {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:[MVLang t:@"Convert to playable"]
+                         message:[MVLang t:@"This file's format isn't supported. Convert it to MP4 to play it here."]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Convert"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self convertPathToPlayable:path];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIActivityViewController *share = [[UIActivityViewController alloc]
+            initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+        [self presentViewController:share animated:YES completion:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)convertPathToPlayable:(NSString *)path {
+    NSString *outPath = [[path stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp4"];
+    UIAlertController *busy = [UIAlertController alertControllerWithTitle:[MVLang t:@"Converting…"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:busy animated:YES completion:nil];
+    [MVMediaConverter remuxToMP4:path to:outPath completion:^(BOOL ok, NSString *error) {
+        [busy dismissViewControllerAnimated:YES completion:^{
+            if (ok) {
+                [self refresh];
+                [self playPathInQueue:outPath];
+            } else {
+                UIAlertController *failed = [UIAlertController
+                    alertControllerWithTitle:[MVLang t:@"Can't play this file"]
+                                     message:error ?: [MVLang t:@"WebM and MKV aren't supported. You can still share or export it."]
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [failed addAction:[UIAlertAction actionWithTitle:[MVLang t:@"OK"] style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:failed animated:YES completion:nil];
+            }
+        }];
+    }];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {

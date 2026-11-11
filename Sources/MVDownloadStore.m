@@ -35,7 +35,7 @@ NSString *const MVDownloadStoreDidChangeNotification = @"MVDownloadStoreDidChang
     return d;
 }
 
-- (BOOL)isActive { return self.state == MVDownloadStateActive || self.state == MVDownloadStateWaiting; }
+- (BOOL)isActive { return self.state == MVDownloadStateActive || self.state == MVDownloadStateWaiting || self.state == MVDownloadStatePaused; }
 - (BOOL)isFinished { return self.state == MVDownloadStateCompleted || self.state == MVDownloadStateFailed || self.state == MVDownloadStateCancelled; }
 
 @end
@@ -75,6 +75,8 @@ NSString *const MVDownloadStoreDidChangeNotification = @"MVDownloadStoreDidChang
         MVDownloadRecord *r = [MVDownloadRecord fromDictionary:d];
         // A record that was mid-download when the app died can never resume, so
         // show it as cancelled rather than leaving a permanently "active" row.
+        // A Paused record is left alone: the user stopped it on purpose and its
+        // .part file is still there to continue from.
         if (r.state == MVDownloadStateActive || r.state == MVDownloadStateWaiting) {
             r.state = MVDownloadStateCancelled;
             r.error = nil;

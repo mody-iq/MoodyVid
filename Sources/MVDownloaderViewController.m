@@ -643,7 +643,10 @@
         if (!watched) return;
 
         self_.progressView.progress = (float)watched.progress;
-        if (watched.state == MVDownloadStateWaiting) {
+        if (watched.state == MVDownloadStatePaused) {
+            [self_ showStatus:[MVLang t:@"Paused"] color:[MVTheme secondaryText]];
+            [self_.busyView stopAnimating];
+        } else if (watched.state == MVDownloadStateWaiting) {
             [self_ showStatus:[MVLang t:@"Queued"] color:[MVTheme secondaryText]];
             [self_.busyView startAnimating];
         } else if (watched.isActive) {

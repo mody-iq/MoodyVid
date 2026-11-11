@@ -107,6 +107,8 @@ static const NSUInteger kMaxConcurrent = 2;
     // Records in Waiting/Active with no process behind them came from an
     // interrupted session (a crash or the system killing us in the background).
     // Put them back in the queue; yt-dlp continues any .part files it finds.
+    // Paused records are deliberately left alone: the user stopped them and the
+    // .part file waits for an explicit Resume.
     for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
         if (r.state == MVDownloadStateWaiting || r.state == MVDownloadStateActive) {
             MVDownloadJob *job = [MVDownloadJob new];
@@ -220,13 +222,36 @@ static const NSUInteger kMaxConcurrent = 2;
     [_fragments removeObjectForKey:identifier];
 }
 
+/// A fragment already downloaded for this job that is still on disk, found by
+/// its `.video`/`.audio` marker. A pause keeps the fragments it has, so a resume
+/// must reuse them instead of fetching the same bytes again.
+- (NSString *)existingFragmentFor:(NSString *)identifier marker:(NSString *)marker {
+    for (NSString *path in _fragments[identifier]) {
+        if (![path.lastPathComponent containsString:marker]) continue;
+        if ([NSFileManager.defaultManager fileExistsAtPath:path]) return path;
+    }
+    return nil;
+}
+
+/// True when a job ended because the user paused it rather than because it
+/// failed. A pause keeps the partial files; a failure throws them away.
+- (BOOL)isPauseError:(NSString *)error {
+    return [error isEqualToString:@"paused"];
+}
+
 /// Two fragments then a native mux. Keeps a single record and a single progress
-/// ring across the whole run: video, then audio, then the remux.
+/// ring across the whole run: video, then audio, then the remux. A resume after
+/// a pause reuses whichever fragment is already on disk.
 - (void)startMergedJob:(MVDownloadJob *)job {
     MVDownloadRecord *record = [self recordFor:job.identifier];
     [self setTransient:record message:nil];
 
     __weak typeof(self) weakSelf = self;
+    NSString *video = [self existingFragmentFor:job.identifier marker:@".video"];
+    if (video.length) {
+        [self continueMergedJob:job videoPath:video videoResult:nil];
+        return;
+    }
     // 1) Video stream only.
     [[MVPython shared] call:@"downloader" function:@"download_fragment"
                        args:@[job.url, @"video", job.quality]
@@ -236,60 +261,89 @@ static const NSUInteger kMaxConcurrent = 2;
         if (!self_) return;
         NSString *videoPath = videoResult[@"path"];
         if (!videoPath.length) {
+            // A pause keeps whatever is on disk; a real failure cleans up.
+            if (![self_ isPauseError:vErr]) [self_ discardTrackedFragmentsFor:job.identifier];
             [self_ finishJob:job result:nil error:vErr ?: [MVLang t:@"Unknown error"]];
             return;
         }
         [self_ trackFragment:videoPath forJob:job.identifier];
-        // Some sites only offer one combined file. When the picture already
-        // carries its sound, the second download would fetch the same bytes
-        // again, so finish here — under a clean name, without the `.video` mark.
-        if ([MVMediaConverter hasAudioTrack:videoPath]) {
-            NSString *clean = [self_ derivedPathFor:videoPath suffix:@"" ext:@"mp4"];
-            if (![clean isEqualToString:videoPath]) {
-                [[NSFileManager defaultManager] removeItemAtPath:clean error:nil];
-                [[NSFileManager defaultManager] moveItemAtPath:videoPath toPath:clean error:nil];
-            }
-            [self_ discardTrackedFragmentsFor:job.identifier];
-            NSDictionary *done = @{@"path": clean, @"title": videoResult[@"title"] ?: @"",
-                                   @"thumbnail": videoResult[@"thumbnail"] ?: @"",
-                                   @"ext": @"mp4"};
-            [self_ finishJob:job result:done error:nil];
+        [self_ continueMergedJob:job videoPath:videoPath videoResult:videoResult];
+    }];
+}
+
+/// The audio half of a merged job, then the mux. Split out so a resume can enter
+/// here with a video fragment that is already on disk.
+- (void)continueMergedJob:(MVDownloadJob *)job
+                videoPath:(NSString *)videoPath
+              videoResult:(NSDictionary *)videoResult {
+    __weak typeof(self) weakSelf = self;
+    // Some sites only offer one combined file. When the picture already carries
+    // its sound, the second download would fetch the same bytes again, so finish
+    // here — under a clean name, without the `.video` mark.
+    if ([MVMediaConverter hasAudioTrack:videoPath]) {
+        NSString *clean = [self derivedPathFor:videoPath suffix:@"" ext:@"mp4"];
+        if (![clean isEqualToString:videoPath]) {
+            [[NSFileManager defaultManager] removeItemAtPath:clean error:nil];
+            [[NSFileManager defaultManager] moveItemAtPath:videoPath toPath:clean error:nil];
+        }
+        [self discardTrackedFragmentsFor:job.identifier];
+        NSDictionary *done = @{@"path": clean, @"title": videoResult[@"title"] ?: @"",
+                               @"thumbnail": videoResult[@"thumbnail"] ?: @"",
+                               @"ext": @"mp4"};
+        [self finishJob:job result:done error:nil];
+        return;
+    }
+
+    NSString *existingAudio = [self existingFragmentFor:job.identifier marker:@".audio"];
+    if (existingAudio.length) {
+        [self muxMergedJob:job videoPath:videoPath audioPath:existingAudio videoResult:videoResult];
+        return;
+    }
+
+    // 2) Audio stream only.
+    [[MVPython shared] call:@"downloader" function:@"download_fragment"
+                       args:@[job.url, @"audio", @"best"]
+                       task:job.identifier
+                 completion:^(NSDictionary *audioResult, NSString *aErr) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        NSString *audioPath = audioResult[@"path"];
+        if (!audioPath.length) {
+            // Keep the finished video fragment when the pause is what stopped
+            // us, so resuming only has to fetch the audio.
+            if (![self_ isPauseError:aErr]) [self_ discardTrackedFragmentsFor:job.identifier];
+            [self_ finishJob:job result:nil error:aErr ?: [MVLang t:@"Unknown error"]];
             return;
         }
-        // 2) Audio stream only.
-        [[MVPython shared] call:@"downloader" function:@"download_fragment"
-                           args:@[job.url, @"audio", @"best"]
-                           task:job.identifier
-                     completion:^(NSDictionary *audioResult, NSString *aErr) {
-            typeof(self) self_ = weakSelf;
-            if (!self_) return;
-            NSString *audioPath = audioResult[@"path"];
-            if (!audioPath.length) {
-                [self_ discardTrackedFragmentsFor:job.identifier];
-                [self_ finishJob:job result:nil error:aErr ?: [MVLang t:@"Unknown error"]];
-                return;
-            }
-            [self_ trackFragment:audioPath forJob:job.identifier];
-            [self_ setTransient:[self_ recordFor:job.identifier] message:[MVLang t:@"Merging…"]];
-            // 3) Native remux to its own name, never over the video fragment.
-            NSString *outPath = [self_ derivedPathFor:videoPath suffix:@"-merged" ext:@"mp4"];
-            [MVMediaConverter muxVideo:videoPath audio:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
-                typeof(self) self_ = weakSelf;
-                if (!self_) return;
-                if (ok) {
-                    [self_ discardTrackedFragmentsFor:job.identifier];
-                    NSDictionary *merged = @{@"path": outPath, @"title": videoResult[@"title"] ?: @"",
-                                             @"thumbnail": videoResult[@"thumbnail"] ?: @"",
-                                             @"ext": @"mp4"};
-                    [self_ finishJob:job result:merged error:nil];
-                } else {
-                    // A half-written merged file would show up as a broken entry.
-                    [self_ discardFragments:@[outPath]];
-                    [self_ discardTrackedFragmentsFor:job.identifier];
-                    [self_ finishJob:job result:nil error:err ?: [MVLang t:@"Merge failed"]];
-                }
-            }];
-        }];
+        [self_ trackFragment:audioPath forJob:job.identifier];
+        [self_ muxMergedJob:job videoPath:videoPath audioPath:audioPath videoResult:videoResult];
+    }];
+}
+
+/// The final remux of a merged job: joins the two fragments into their own name,
+/// never over the video fragment.
+- (void)muxMergedJob:(MVDownloadJob *)job
+           videoPath:(NSString *)videoPath
+           audioPath:(NSString *)audioPath
+         videoResult:(NSDictionary *)videoResult {
+    __weak typeof(self) weakSelf = self;
+    [self setTransient:[self recordFor:job.identifier] message:[MVLang t:@"Merging…"]];
+    NSString *outPath = [self derivedPathFor:videoPath suffix:@"-merged" ext:@"mp4"];
+    [MVMediaConverter muxVideo:videoPath audio:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        if (ok) {
+            [self_ discardTrackedFragmentsFor:job.identifier];
+            NSDictionary *merged = @{@"path": outPath, @"title": videoResult[@"title"] ?: @"",
+                                     @"thumbnail": videoResult[@"thumbnail"] ?: @"",
+                                     @"ext": @"mp4"};
+            [self_ finishJob:job result:merged error:nil];
+        } else {
+            // A half-written merged file would show up as a broken entry.
+            [self_ discardFragments:@[outPath]];
+            [self_ discardTrackedFragmentsFor:job.identifier];
+            [self_ finishJob:job result:nil error:err ?: [MVLang t:@"Merge failed"]];
+        }
     }];
 }
 
@@ -344,6 +398,13 @@ static const NSUInteger kMaxConcurrent = 2;
 }
 
 - (void)finishJob:(MVDownloadJob *)job result:(NSDictionary *)result error:(NSString *)error {
+    // A paused job unwinds asynchronously, so a resume can already have queued a
+    // replacement job under the same identifier. When it has, this late callback
+    // belongs to a job nobody is waiting on: touching the record or the running
+    // map here would clobber the live download.
+    MVDownloadJob *current = _running[job.identifier];
+    if (current && current != job) return;
+
     [self stopPolling:job.identifier];
     [_running removeObjectForKey:job.identifier];
 
@@ -363,6 +424,27 @@ static const NSUInteger kMaxConcurrent = 2;
         [MVDownloadStore.shared update:record];
         [[MVPython shared] forgetTask:job.identifier];
         if (completion) completion(nil, [MVLang t:@"Cancel"]);
+        [self pump];
+        return;
+    }
+
+    // A pause unwinds the yt-dlp call (there is no way to suspend it in place),
+    // so it arrives here as an error. Keep the .part file — and any fragment a
+    // merged job already finished — so a resume continues instead of restarting.
+    if ([error isEqualToString:@"paused"] || [[MVPython shared] isTaskPaused:job.identifier]) {
+        [self stopPolling:job.identifier];
+        [[MVPython shared] forgetTask:job.identifier];
+        // A resume can land while the aborted call is still unwinding. If the
+        // record is already back in the queue, that new job owns it — putting it
+        // to Paused here would show a stopped row over a running download.
+        if (record.state != MVDownloadStateWaiting) {
+            record.state = MVDownloadStatePaused;
+            record.speed = 0;
+            record.eta = 0;
+            record.error = nil;
+            [MVDownloadStore.shared update:record];
+        }
+        if (completion) completion(nil, [MVLang t:@"Paused"]);
         [self pump];
         return;
     }
@@ -437,6 +519,54 @@ static const NSUInteger kMaxConcurrent = 2;
         }
     }
     [self stopPolling:identifier];
+}
+
+/// Stops a running download and keeps its .part file, so a resume continues
+/// where it left off. A queued job is simply taken out of the queue.
+- (void)pauseDownload:(NSString *)identifier {
+    if (!identifier.length) return;
+    MVDownloadRecord *record = [self recordFor:identifier];
+
+    // Still queued: nothing is running, so drop it from the queue right away.
+    for (MVDownloadJob *job in [_queue copy]) {
+        if (![job.identifier isEqualToString:identifier]) continue;
+        [_queue removeObject:job];
+        record.state = MVDownloadStatePaused;
+        record.speed = 0;
+        record.eta = 0;
+        [MVDownloadStore.shared update:record];
+        [self updateBackgroundTask];
+        return;
+    }
+
+    // Running: flag it, then let the Python progress hook unwind the download.
+    if (_running[identifier]) {
+        [[MVPython shared] pauseTask:identifier];
+        record.state = MVDownloadStatePaused;
+        record.speed = 0;
+        record.eta = 0;
+        [MVDownloadStore.shared update:record];
+        [self updateBackgroundTask];
+    }
+}
+
+/// Puts a paused record back in the queue. yt-dlp continues the .part file.
+- (void)resumeDownload:(NSString *)identifier {
+    if (!identifier.length) return;
+    MVDownloadRecord *record = [self recordFor:identifier];
+    if (!record || record.state != MVDownloadStatePaused) return;
+
+    [[MVPython shared] resumePausedTask:identifier];
+    record.state = MVDownloadStateWaiting;
+    record.error = nil;
+    [MVDownloadStore.shared update:record];
+
+    MVDownloadJob *job = [MVDownloadJob new];
+    job.identifier = identifier;
+    job.url = record.url;
+    job.quality = record.quality ?: @"best";
+    [_queue addObject:job];
+    [self pump];
 }
 
 - (MVDownloadRecord *)recordFor:(NSString *)identifier {

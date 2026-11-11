@@ -11,6 +11,9 @@ typedef NS_ENUM(NSInteger, MVDownloadState) {
     MVDownloadStateCompleted = 2,
     MVDownloadStateFailed = 3,
     MVDownloadStateCancelled = 4,
+    /// Stopped by the user but kept resumable (the .part file is left on disk),
+    /// so it is deliberately distinct from Cancelled.
+    MVDownloadStatePaused = 5,
 };
 
 /// One download, as shown in the Downloads and Files screens.
