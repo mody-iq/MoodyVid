@@ -33,7 +33,10 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Run downloader tests
+      - name: Install test dependencies
+        run: pip install Pillow
+
+      - name: Run tests
         run: python3 -m unittest discover -s tests -v
 
   build:
@@ -154,6 +157,8 @@ jobs:
             --icon-url "https://raw.githubusercontent.com/${{ github.repository }}/main/Resources/icon-source.png" \
             --size "$SIZE" \
             --notes "MoodyVid $VERSION (build ${{ github.run_number }}) — iOS $MINOS+, iPhone only" \
+            --screenshots-index Resources/screenshots/index.json \
+            --screenshot-base-url "https://raw.githubusercontent.com/${{ github.repository }}/main/Resources/screenshots" \
             --out source.json
 
       - name: Commit source.json

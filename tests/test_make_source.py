@@ -90,6 +90,49 @@ class MakeSourceTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(self.out))
 
+    def _index(self, entries):
+        path = os.path.join(self.tmp, "index.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh, ensure_ascii=False)
+        return path
+
+    def test_screenshots_are_listed_with_their_size(self):
+        # AltStore lays the image out from width/height, so a shot without them
+        # renders as a blank box. The size must come from the actual file.
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+        shot = os.path.join(self.tmp, "01-home.png")
+        Image.new("RGB", (1290, 2796)).save(shot)
+        index = self._index([{"file": "01-home.png", "caption": "الشاشة الرئيسية"}])
+
+        source = self.build(screenshots_index=index,
+                            screenshot_base_url="https://cdn.example.com/shots")
+        shots = source["apps"][0]["screenshots"]
+        self.assertEqual(len(shots), 1)
+        self.assertEqual(shots[0]["imageURL"], "https://cdn.example.com/shots/01-home.png")
+        self.assertEqual(shots[0]["width"], 1290)
+        self.assertEqual(shots[0]["height"], 2796)
+        self.assertEqual(shots[0]["caption"], "الشاشة الرئيسية")
+
+    def test_screenshot_url_has_no_double_slash(self):
+        index = self._index([{"file": "a.png"}])
+        source = self.build(screenshots_index=index,
+                            screenshot_base_url="https://cdn.example.com/shots/")
+        self.assertEqual(source["apps"][0]["screenshots"][0]["imageURL"],
+                         "https://cdn.example.com/shots/a.png")
+
+    def test_missing_screenshot_index_does_not_fail_the_release(self):
+        # A cosmetic file must never block a build; the source just ships plain.
+        source = self.build(screenshots_index=os.path.join(self.tmp, "nope.json"),
+                            screenshot_base_url="https://cdn.example.com")
+        self.assertEqual(source["apps"][0]["screenshots"], [])
+
+    def test_no_screenshots_flag_means_no_screenshots(self):
+        source = self.build()
+        self.assertEqual(source["apps"][0]["screenshots"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

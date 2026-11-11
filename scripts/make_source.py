@@ -42,7 +42,51 @@ def parse_args(argv):
     ap.add_argument('--device', default='iPhone',
                     help='devices the app runs on; iPhone only, so AltStore hides '
                          'it on an iPad instead of installing something unusable')
+    ap.add_argument('--screenshots-index', default=None,
+                    help='screenshots/index.json written by make_screenshots.py')
+    ap.add_argument('--screenshot-base-url', default=None,
+                    help='public URL prefix the screenshot files live under')
     return ap.parse_args(argv)
+
+
+def load_screenshots(index_path, base_url):
+    """Builds the AltStore screenshot list from the generator's index.
+
+    AltStore shows these in the app's page before install. Missing files or a
+    missing base URL are not fatal: a source with no images still works, it just
+    looks plain, and failing the release over a cosmetic file would be worse.
+    """
+    if not index_path or not base_url:
+        return []
+    if not os.path.isfile(index_path):
+        print(f'WARNING: screenshot index not found: {index_path}', file=sys.stderr)
+        return []
+    try:
+        with open(index_path, encoding='utf-8') as fh:
+            entries = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f'WARNING: cannot read {index_path}: {exc}', file=sys.stderr)
+        return []
+
+    shots = []
+    for entry in entries:
+        name = entry.get('file')
+        if not name:
+            continue
+        url = f'{base_url.rstrip("/")}/{name}'
+        # AltStore needs the pixel size up front to lay the image out.
+        try:
+            from PIL import Image
+            path = os.path.join(os.path.dirname(index_path), name)
+            with Image.open(path) as im:
+                width, height = im.size
+        except Exception:
+            width, height = 1290, 2796
+        shot = {'imageURL': url, 'width': width, 'height': height}
+        if entry.get('caption'):
+            shot['caption'] = entry['caption']
+        shots.append(shot)
+    return shots
 
 
 def main(argv):
@@ -80,7 +124,8 @@ def main(argv):
         'iconURL': args.icon_url,
         'tintColor': '12ACBA',
         'category': 'utilities',
-        'screenshots': [],
+        'screenshots': load_screenshots(args.screenshots_index,
+                                        args.screenshot_base_url),
         'versions': [version],
         # AltStore reads this and hides the app on a device it cannot run on,
         # which beats a failed install with no explanation.
