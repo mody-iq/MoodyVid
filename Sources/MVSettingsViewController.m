@@ -7,6 +7,7 @@
 #import "MVLog.h"
 #import "MVDownloadManager.h"
 #import "MVSnifferStore.h"
+#import "MVSectionHeader.h"
 #import <WebKit/WebKit.h>
 
 static NSString *const kCell = @"MVCell";
@@ -602,16 +603,14 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     box.backgroundColor = UIColor.clearColor;
     if (!title.length) return box;
 
-    UILabel *label = [UILabel new];
-    label.text = title.uppercaseString;
-    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    label.textColor = [MVTheme secondaryText];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    [box addSubview:label];
+    MVSectionHeader *header = [MVSectionHeader new];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    header.title = title;
+    [box addSubview:header];
     [NSLayoutConstraint activateConstraints:@[
-        [label.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:30],
-        [label.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-30],
-        [label.centerYAnchor constraintEqualToAnchor:box.centerYAnchor],
+        [header.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:30],
+        [header.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-30],
+        [header.centerYAnchor constraintEqualToAnchor:box.centerYAnchor],
     ]];
     return box;
 }
@@ -704,10 +703,9 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         case MVMoreSectionStorage: {
             if (indexPath.row == 0) {
                 cell.titleLabel.text = [MVLang t:@"Storage"];
-                cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ • %@ %@",
-                                           [MVPaths formatBytes:[MVPaths totalSpace]],
-                                           [MVPaths formatBytes:[MVPaths freeSpace]],
-                                           [MVLang t:@"available"]];
+                cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ %@ · %@ %@",
+                                           [MVPaths formatBytes:[MVPaths freeSpace]], [MVLang t:@"available"],
+                                           [MVPaths formatBytes:[MVPaths totalSpace]], [MVLang t:@"total"]];
                 [cell configureIcon:@"internaldrive.fill" tint:[MVTheme accentSoft]];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Clear cache"];
