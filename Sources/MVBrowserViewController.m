@@ -59,24 +59,11 @@ static const NSUInteger kMaxTabs = 8;
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
+        // Flat surface: a solid fill, no blur and no shadow.
         self.backgroundColor = [MVTheme glassCard];
         self.layer.cornerRadius = 16;
         self.layer.cornerCurve = kCACornerCurveContinuous;
-        self.layer.borderWidth = 0.5;
-        self.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:0.18].CGColor;
-        self.layer.shadowColor = UIColor.blackColor.CGColor;
-        self.layer.shadowOpacity = 0.3;
-        self.layer.shadowRadius = 12;
-        self.layer.shadowOffset = CGSizeMake(0, 5);
-
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:
-                                     [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
-        glass.frame = self.bounds;
-        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        glass.layer.cornerRadius = 16;
-        glass.layer.cornerCurve = kCACornerCurveContinuous;
-        glass.layer.masksToBounds = YES;
-        [self insertSubview:glass atIndex:0];
+        self.clipsToBounds = YES;
 
         UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"globe"]];
         icon.tintColor = [MVTheme accent];
@@ -595,10 +582,6 @@ static id gParkedObserver = nil;
     self.sniffButton.tintColor = UIColor.whiteColor;
     self.sniffButton.backgroundColor = [MVTheme accent];
     self.sniffButton.layer.cornerRadius = 26;
-    self.sniffButton.layer.shadowColor = UIColor.blackColor.CGColor;
-    self.sniffButton.layer.shadowOpacity = 0.3;
-    self.sniffButton.layer.shadowRadius = 8;
-    self.sniffButton.layer.shadowOffset = CGSizeMake(0, 3);
     self.sniffButton.accessibilityLabel = [MVLang t:@"Found media"];
     [self.sniffButton addTarget:self action:@selector(showSnifferSheet) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.sniffButton];

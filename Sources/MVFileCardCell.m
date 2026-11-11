@@ -146,6 +146,15 @@
     _detailLabel.textColor = [MVTheme secondaryText];
 }
 
+/// Briefly tints the card, so a row reached from elsewhere (a finished
+/// download) is visibly singled out even though it was already on screen.
+- (void)flashHighlight {
+    UIColor *accent = [[MVTheme accent] colorWithAlphaComponent:0.28];
+    _card.backgroundColor = accent;
+    [UIView animateWithDuration:1.3 delay:0.35 options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{ _card.backgroundColor = [MVTheme glassCard]; } completion:nil];
+}
+
 + (NSString *)symbolForExtension:(NSString *)ext {
     static NSDictionary *table;
     static dispatch_once_t once;

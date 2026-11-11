@@ -66,7 +66,6 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"Downloads"];
-    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
 
     [self buildSearch];
     [self buildTable];
@@ -619,6 +618,15 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     sheet.onShare = ^(MVDownloadRow *r) { [weakSelf shareRow:r]; };
     sheet.onDelete = ^(MVDownloadRow *r) { [weakSelf confirmDeleteRow:r]; };
     sheet.onSaveToPhotos = ^(MVDownloadRow *r) { [weakSelf saveRowToPhotos:r]; };
+    sheet.onRevealInFiles = ^(MVDownloadRow *r) {
+        [weakSelf dismissViewControllerAnimated:YES completion:^{
+            if (r.path.length) {
+                [NSNotificationCenter.defaultCenter postNotificationName:@"MVRevealFileNotification"
+                                                                  object:nil
+                                                                userInfo:@{@"path": r.path}];
+            }
+        }];
+    };
     if (@available(iOS 15.0, *)) {
         UISheetPresentationController *presentation = sheet.sheetPresentationController;
         presentation.detents = @[[UISheetPresentationControllerDetent mediumDetent],

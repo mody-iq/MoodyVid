@@ -228,6 +228,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Download page with yt-dlp": @"تنزيل الصفحة عبر yt-dlp",
             @"Download this file?": @"تنزيل هذا الملف؟",
             @"Copy link": @"نسخ الرابط",
+            @"Show in Files": @"إظهار في الملفات",
             @"Checking…": @"جارٍ الفحص…",
             @"Video": @"فيديو",
             @"Audio": @"صوت",

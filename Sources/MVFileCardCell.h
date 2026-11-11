@@ -20,6 +20,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// The glyph for a file extension, matching the Files browser's own mapping.
 + (NSString *)symbolForExtension:(NSString *)ext;
 
+/// Briefly tints the card, so a row reached from elsewhere (a finished download)
+/// is visibly singled out even though it was already on screen.
+- (void)flashHighlight;
+
 @end
 
 NS_ASSUME_NONNULL_END

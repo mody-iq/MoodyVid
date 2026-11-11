@@ -185,6 +185,8 @@
                                       handler:^{ if (self.onShare) self.onShare(row); }]];
         [buttons addObject:[self actionButton:[MVLang t:@"Save to Photos"] symbol:@"photo.on.rectangle" primary:NO
                                       handler:^{ if (self.onSaveToPhotos) self.onSaveToPhotos(row); }]];
+        [buttons addObject:[self actionButton:[MVLang t:@"Show in Files"] symbol:@"folder" primary:NO
+                                      handler:^{ if (self.onRevealInFiles) self.onRevealInFiles(row); }]];
     } else if (row.isPaused || row.isFailed) {
         [buttons addObject:[self actionButton:[MVLang t:@"Resume"] symbol:@"play.fill" primary:YES
                                       handler:^{ [MVDownloadActions resumeRow:row]; [self dismissSelf]; }]];

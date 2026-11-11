@@ -342,7 +342,7 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
 
 @end
 
-/// The small pop-up shown by the Contact row: a frosted sheet listing the social
+/// The small pop-up shown by the Contact row: a flat sheet listing the social
 /// accounts, each row opening the profile in its app (or the browser).
 @interface MVContactSheetViewController : UIViewController
 @end
@@ -351,10 +351,11 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // A frosted, quiet sheet: a soft material behind a small stack of accounts,
-    // no loud colours — the tint is only on the icon chips.
+    // A flat, quiet sheet: a solid panel behind a small stack of accounts, no
+    // material to composite and no loud colours.
     self.view.backgroundColor = UIColor.clearColor;
-    UIVisualEffectView *backdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    UIView *backdrop = [UIView new];
+    backdrop.backgroundColor = [MVTheme card];
     backdrop.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:backdrop];
 
@@ -463,7 +464,6 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"More"];
-
     // Each section is a separate rounded card, so the plain list is just the
     // scrolling surface; the cells carry their own inset, rounded cards.
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];

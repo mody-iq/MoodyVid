@@ -21,6 +21,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, nullable) void (^onDelete)(MVDownloadRow *row);
 /// Called when the user asks to save a finished file to Photos.
 @property (nonatomic, copy, nullable) void (^onSaveToPhotos)(MVDownloadRow *row);
+/// Called when the user asks to see a finished file in the Files tab.
+@property (nonatomic, copy, nullable) void (^onRevealInFiles)(MVDownloadRow *row);
 
 @end
 

@@ -288,7 +288,7 @@
 
     self.platformsTitle = [self makeSectionTitle];
     [stack addArrangedSubview:self.platformsTitle];
-    [stack addArrangedSubview:[self makePlatformGrid]];
+    [stack addArrangedSubview:[self makePlatformRow]];
 
     // The screen ends here on purpose: recent downloads belong to the Downloads
     // tab, and a topics strip is noise on a screen whose one job is a link. One
@@ -449,32 +449,45 @@
     return header;
 }
 
-- (UIView *)makePlatformGrid {
-    UIStackView *grid = [UIStackView new];
-    grid.axis = UILayoutConstraintAxisVertical;
-    grid.spacing = 10;
+/// The quick-access sites as one horizontal, scrolling line of compact tiles —
+/// the way a shortcut shelf reads. It scrolls instead of wrapping, so the screen
+/// keeps one row no matter how many sites there are.
+- (UIView *)makePlatformRow {
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.showsHorizontalScrollIndicator = NO;
+    scroll.alwaysBounceHorizontal = YES;
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // Four tiles per row; UICollectionView would be overkill here. The row count
-    // is derived from the list rather than hard-coded to two, so a shorter
-    // shortcut list can never index past the end.
-    NSInteger const perRow = 4;
-    for (NSInteger start = 0; start < (NSInteger)self.platforms.count; start += perRow) {
-        UIStackView *line = [UIStackView new];
-        line.axis = UILayoutConstraintAxisHorizontal;
-        line.distribution = UIStackViewDistributionFillEqually;
-        line.spacing = 10;
-        NSInteger end = MIN(start + perRow, (NSInteger)self.platforms.count);
-        for (NSInteger i = start; i < end; i++) {
-            [line addArrangedSubview:[self makePlatformTile:self.platforms[i]]];
-        }
-        [grid addArrangedSubview:line];
+    UIStackView *line = [UIStackView new];
+    line.axis = UILayoutConstraintAxisHorizontal;
+    line.spacing = 10;
+    // Center, not Fill: each tile carries its own height, and Fill would stretch
+    // it to the 72pt row and fight that constraint.
+    line.alignment = UIStackViewAlignmentCenter;
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    for (MVPlatform *platform in self.platforms) {
+        [line addArrangedSubview:[self makePlatformTile:platform]];
     }
-    return grid;
+    [scroll addSubview:line];
+
+    // Pin the line to the scroll view's CONTENT guide, not its frame: pinning to
+    // the frame would tie the content width to the visible width, so the row
+    // could never scroll and the fixed-width tiles would fight the constraint.
+    UILayoutGuide *content = scroll.contentLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [line.topAnchor constraintEqualToAnchor:content.topAnchor],
+        [line.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
+        [line.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [line.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [line.heightAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.heightAnchor],
+        [scroll.heightAnchor constraintEqualToConstant:72],
+    ]];
+    return scroll;
 }
 
 - (UIView *)makePlatformTile:(MVPlatform *)platform {
     UIControl *tile = [UIControl new];
-    [MVTheme applyCardStyle:tile cornerRadius:16];
+    [MVTheme applyCardStyle:tile cornerRadius:14];
     tile.translatesAutoresizingMaskIntoConstraints = NO;
     // platformTapped: reads the tile back out of self.platforms by tag.
     tile.tag = [self.platforms indexOfObject:platform];
@@ -488,7 +501,7 @@
 
     UILabel *name = [UILabel new];
     name.text = platform.name;
-    name.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightMedium];
+    name.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
     name.textColor = [MVTheme secondaryText];
     name.textAlignment = NSTextAlignmentCenter;
     name.adjustsFontSizeToFitWidth = YES;
@@ -500,14 +513,15 @@
     [tile addTarget:self action:@selector(platformTapped:) forControlEvents:UIControlEventTouchUpInside];
 
     [NSLayoutConstraint activateConstraints:@[
+        [tile.widthAnchor constraintEqualToConstant:66],
         [tile.heightAnchor constraintEqualToConstant:66],
         [icon.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
         [icon.topAnchor constraintEqualToAnchor:tile.topAnchor constant:12],
         [icon.widthAnchor constraintEqualToConstant:22],
         [icon.heightAnchor constraintEqualToConstant:22],
         [name.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:5],
-        [name.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:4],
-        [name.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-4],
+        [name.leadingAnchor constraintEqualToAnchor:tile.leadingAnchor constant:3],
+        [name.trailingAnchor constraintEqualToAnchor:tile.trailingAnchor constant:-3],
     ]];
     return tile;
 }
@@ -515,8 +529,7 @@
 #pragma mark - Text and state
 
 - (void)refreshText {
-    self.title = [MVLang t:@"Home"];
-    self.urlField.placeholder = [MVLang t:@"Paste video link here..."];
+    self.title = [MVLang t:@"Home"];    self.urlField.placeholder = [MVLang t:@"Paste video link here..."];
     [self.pasteButton setTitle:[MVLang t:@"Paste"] forState:UIControlStateNormal];
     [self updateDownloadButton];
     self.platformsTitle.text = [MVLang t:@"Quick access"];

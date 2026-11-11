@@ -16,9 +16,6 @@ static NSString *const kWallpaperNeon     = @"neon";
 static NSString *const kWallpaperCosmic   = @"cosmic";
 static NSString *const kWallpaperWaves    = @"waves";
 
-/// Tag handed to every glass blur view so re-styling never stacks them.
-static NSInteger const kGlassBlurTag = 8081;
-
 @implementation MVTheme
 
 + (instancetype)shared {
@@ -60,17 +57,19 @@ static UIColor *MVColor(CGFloat dr, CGFloat dg, CGFloat db, CGFloat lr, CGFloat 
     }];
 }
 
-+ (UIColor *)background   { return MVColor(0.039, 0.039, 0.047,  0.96, 0.96, 0.98); }
-+ (UIColor *)card         { return MVColor(0.094, 0.094, 0.118,  1.00, 1.00, 1.00); }
+// The palette follows the iOS system colours, so the app sits naturally beside
+// Apple's own apps and adapts with the appearance for free.
++ (UIColor *)background   { return MVColor(0.00, 0.00, 0.00,  0.95, 0.95, 0.97); }
++ (UIColor *)card         { return MVColor(0.11, 0.11, 0.12,  1.00, 1.00, 1.00); }
 + (UIColor *)cardBorder   { return MVColor(1.00, 1.00, 1.00,  0.00, 0.00, 0.00); }
 + (UIColor *)separator    { return MVColor(1.00, 1.00, 1.00,  0.00, 0.00, 0.00); }
-+ (UIColor *)text         { return MVColor(0.96, 0.97, 0.98,  0.07, 0.07, 0.10); }
-+ (UIColor *)secondaryText{ return MVColor(0.58, 0.62, 0.66,  0.42, 0.42, 0.48); }
-+ (UIColor *)accent       { return MVColor(0.06, 0.63, 0.69,  0.02, 0.48, 0.55); }
-+ (UIColor *)accentSoft   { return MVColor(0.06, 0.63, 0.69,  0.02, 0.48, 0.55); }
-+ (UIColor *)success      { return MVColor(0.20, 0.83, 0.60,  0.10, 0.65, 0.45); }
-+ (UIColor *)warning      { return MVColor(1.00, 0.70, 0.20,  0.85, 0.55, 0.05); }
-+ (UIColor *)danger       { return MVColor(1.00, 0.35, 0.42,  0.85, 0.20, 0.28); }
++ (UIColor *)text         { return MVColor(1.00, 1.00, 1.00,  0.00, 0.00, 0.00); }
++ (UIColor *)secondaryText{ return MVColor(0.56, 0.56, 0.58,  0.42, 0.42, 0.44); }
++ (UIColor *)accent       { return MVColor(0.04, 0.52, 1.00,  0.00, 0.48, 1.00); }
++ (UIColor *)accentSoft   { return MVColor(0.39, 0.82, 1.00,  0.20, 0.68, 0.90); }
++ (UIColor *)success      { return MVColor(0.19, 0.82, 0.35,  0.20, 0.78, 0.35); }
++ (UIColor *)warning      { return MVColor(1.00, 0.62, 0.04,  1.00, 0.58, 0.00); }
++ (UIColor *)danger       { return MVColor(1.00, 0.27, 0.23,  1.00, 0.23, 0.19); }
 
 #pragma mark - Wallpapers
 
@@ -355,7 +354,7 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
 #pragma mark - Cards / controls
 
 + (UIColor *)glassCard {
-    return [[self card] colorWithAlphaComponent:0.34];
+    return [self card];
 }
 
 + (void)applyCardStyle:(UIView *)view {
@@ -366,26 +365,8 @@ static UIImage *MVWallpaperImage(NSString *name, CGSize size, BOOL dark) {
     view.backgroundColor = [self glassCard];
     view.layer.cornerRadius = radius;
     view.layer.cornerCurve = kCACornerCurveContinuous;
-    view.layer.borderWidth = 1.0;
-    view.layer.borderColor = [[self cardBorder] colorWithAlphaComponent:MVTheme.shared.isDark ? 0.16 : 0.10].CGColor;
-
-    // Frosted-glass backing: a system blur clipped to the same rounded corners.
-    BOOL hasGlass = NO;
-    for (UIView *sub in view.subviews) {
-        if (sub.tag == kGlassBlurTag) { hasGlass = YES; break; }
-    }
-    if (!hasGlass) {
-        UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
-        UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:effect];
-        blur.tag = kGlassBlurTag;
-        blur.frame = view.bounds;
-        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        blur.layer.cornerRadius = radius;
-        blur.layer.cornerCurve = kCACornerCurveContinuous;
-        blur.layer.masksToBounds = YES;
-        blur.userInteractionEnabled = NO;
-        [view insertSubview:blur atIndex:0];
-    }
+    // No border, no shadow, no blur: a card is a flat fill. This is what lets a
+    // long list scroll without a compositing pass per row.
 }
 
 + (void)applyPrimaryButtonStyle:(UIButton *)button {

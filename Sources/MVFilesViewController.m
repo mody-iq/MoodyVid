@@ -17,6 +17,35 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeSize = 2,
 };
 
+/// The kind buttons at the top of the Files tab. All browses folders; the other
+/// three narrow the list to files of that kind, by extension.
+typedef NS_ENUM(NSInteger, MVFileKind) {
+    MVFileKindAll = 0,
+    MVFileKindVideo = 1,
+    MVFileKindAudio = 2,
+    MVFileKindOther = 3,
+};
+
+static BOOL MVExtensionIsVideo(NSString *ext) {
+    static NSSet *set;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        set = [NSSet setWithArray:@[@"mp4", @"m4v", @"mov", @"mkv", @"webm", @"avi", @"flv",
+                                    @"3gp", @"ts", @"m2ts", @"mpg", @"mpeg", @"wmv", @"ogv"]];
+    });
+    return [set containsObject:ext];
+}
+
+static BOOL MVExtensionIsAudio(NSString *ext) {
+    static NSSet *set;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        set = [NSSet setWithArray:@[@"mp3", @"m4a", @"aac", @"ogg", @"opus", @"flac", @"wav",
+                                    @"aiff", @"wma", @"mka", @"amr"]];
+    });
+    return [set containsObject:ext];
+}
+
 /// The player surface's backing layer IS the AVPlayerLayer, so Auto Layout keeps
 /// the picture exactly the size of the view through every rotation. Framing a
 /// manual sublayer instead left it stale: the frame was set from bounds that had
@@ -43,6 +72,19 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, copy) NSString *filter;
 @property (nonatomic) MVSortMode sortMode;
+
+/// Which kind of file the list is narrowed to. Video/Audio/Other filter by
+/// extension wherever the file lives, so a video is found even if it sits in a
+/// folder the user made; All shows folders too, for browsing.
+@property (nonatomic) MVFileKind filterKind;
+@property (nonatomic, strong) UISegmentedControl *kindControl;
+/// A path to highlight once the view is on screen, set by -revealPath: when the
+/// file lives in a folder that has to be pushed first.
+@property (nonatomic, copy) NSString *revealTarget;
+/// The rows for the current kind/filter, rebuilt only when that pair changes.
+/// Without it a kind filter would walk the whole tree once per visible row.
+@property (nonatomic, copy) NSArray<NSString *> *rowCache;
+@property (nonatomic, copy) NSString *rowCacheKey;
 
 // Inline player: videos play here, inside the tab page, instead of a black
 // full-screen modal. It carries the same transport as the floating mini bar
@@ -71,7 +113,6 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
     self.title = [MVLang t:@"Files"];
-
     UIBarButtonItem *newFolder = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"folder.badge.plus"]
                                                                 style:UIBarButtonItemStylePlain
                                                                target:self action:@selector(createFolder)];
@@ -122,12 +163,18 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     // is part of the page and scrolls with it, rather than floating over it.
     self.cardHeight = [self.playerCard.heightAnchor constraintEqualToConstant:0];
     self.headerView = [UIView new];
+    [self buildKindBar];
+    [self.headerView addSubview:self.kindControl];
     [self.headerView addSubview:self.storageCard];
     [self.headerView addSubview:self.playerCard];
     self.tableView.tableHeaderView = self.headerView;
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.storageCard.topAnchor constraintEqualToAnchor:self.headerView.topAnchor constant:4],
+        [self.kindControl.topAnchor constraintEqualToAnchor:self.headerView.topAnchor constant:6],
+        [self.kindControl.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:[MVTheme screenPadding]],
+        [self.kindControl.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-[MVTheme screenPadding]],
+
+        [self.storageCard.topAnchor constraintEqualToAnchor:self.kindControl.bottomAnchor constant:12],
         [self.storageCard.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:[MVTheme screenPadding]],
         [self.storageCard.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-[MVTheme screenPadding]],
 
@@ -164,6 +211,12 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refresh];
+    if (self.revealTarget.length) {
+        // Consume it once: coming back to this screen later must not re-scroll.
+        NSString *target = self.revealTarget;
+        self.revealTarget = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{ [self revealPath:target]; });
+    }
     if (self.cardOpen) {
         [self cardStateChanged];
         // The card is back on screen and is the control again.
@@ -253,15 +306,54 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     ]];
 }
 
+/// The four kind buttons. A segmented control, so it looks and behaves like the
+/// system's own and needs no styling code of its own.
+- (void)buildKindBar {
+    UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:@[
+        [MVLang t:@"All"], [MVLang t:@"Video"], [MVLang t:@"Audio"], [MVLang t:@"Other"]
+    ]];
+    control.selectedSegmentIndex = self.filterKind;
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    control.apportionsSegmentWidthsByContent = YES;
+    [control addTarget:self action:@selector(kindChanged:) forControlEvents:UIControlEventValueChanged];
+    self.kindControl = control;
+}
+
+- (void)kindChanged:(UISegmentedControl *)control {
+    self.filterKind = (MVFileKind)control.selectedSegmentIndex;
+    // A kind filter lists files from across the tree, so the folder the user was
+    // browsing no longer applies; drop back to the root for a predictable list.
+    // The root is a different instance, so it has to be told the choice.
+    if (self.filterKind != MVFileKindAll && self.rootOverride) {
+        MVFilesViewController *root = self.navigationController.viewControllers.firstObject;
+        if ([root isKindOfClass:MVFilesViewController.class]) root.filterKind = self.filterKind;
+        [self.navigationController popToRootViewControllerAnimated:YES];
+        return;
+    }
+    [self refresh];
+}
+
 - (void)refresh {
     self.title = [MVLang t:@"Files"];
+    // Files land on disk behind the app's back, so a refresh always drops the
+    // memoised row list rather than trusting the kind/filter key alone.
+    self.rowCache = nil;
+    self.rowCacheKey = nil;
     self.search.searchBar.placeholder = [MVLang t:@"Search files"];
     self.emptyState.title = [MVLang t:@"No files"];
     self.emptyState.message = [MVLang t:@"Downloads land here, and you can add your own folders."];
+    self.kindControl.selectedSegmentIndex = self.filterKind;
+    // Sorting and folder creation only apply to the browsable list; in a kind
+    // filter they would be dead buttons, so they step aside.
+    BOOL browsing = self.filterKind == MVFileKindAll;
+    for (UIBarButtonItem *item in self.navigationItem.rightBarButtonItems) {
+        item.enabled = browsing;
+    }
     [self updateStorageCard];
-    self.emptyState.hidden = [self entries].count > 0;
+    self.emptyState.hidden = [self visibleEntries].count > 0;
     [MVTheme applyWallpaperTo:self.view];
     [self.tableView reloadData];
+    [self sizeHeaderToFit];
 }
 
 - (void)updateStorageCard {
@@ -614,16 +706,16 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    NSArray *entries = [self entries];
+    NSArray *entries = [self visibleEntries];
     self.emptyState.hidden = entries.count > 0;
     return entries.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     MVFileCardCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MVFileCardCell" forIndexPath:indexPath];
-    NSArray<NSString *> *entries = [self entries];
-    NSString *name = entries[indexPath.row];
-    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    NSArray<NSString *> *entries = [self visibleEntries];
+    NSString *path = entries[indexPath.row];
+    NSString *name = path.lastPathComponent;
     BOOL isDir = NO;
     [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
 
@@ -641,9 +733,13 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         NSString *thumbPath = [self thumbnailForPath:path];
         if (thumbPath) thumbnail = [UIImage imageWithContentsOfFile:thumbPath];
         symbol = [MVFileCardCell symbolForExtension:ext];
-        detail = [NSString stringWithFormat:@"%@  \u00b7  %@",
-                  [MVPaths formatBytes:size],
-                  [NSDateFormatter localizedStringFromDate:date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]];
+        // A kind filter lists files from anywhere in the tree, so the parent
+        // folder is the only clue to where the file actually lives.
+        NSString *place = self.filterKind == MVFileKindAll
+            ? [NSDateFormatter localizedStringFromDate:date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]
+            : [path.stringByDeletingLastPathComponent.lastPathComponent stringByAppendingFormat:@"  \u00b7  %@",
+               [NSDateFormatter localizedStringFromDate:date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]];
+        detail = [NSString stringWithFormat:@"%@  \u00b7  %@", [MVPaths formatBytes:size], place];
     }
 
     [cell configureWithName:name detail:detail symbolName:symbol thumbnail:thumbnail isFolder:isDir];
@@ -659,6 +755,106 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     MVFilesViewController *sub = [MVFilesViewController new];
     sub.rootOverride = path;
     [self.navigationController pushViewController:sub animated:YES];
+}
+
+#pragma mark - Reveal
+
+- (void)revealPath:(NSString *)path {
+    if (!path.length) return;
+    // Not on screen yet (never shown, or being pushed by a tab switch): keep the
+    // request for viewWillAppear, where the table is laid out and can scroll.
+    if (!self.isViewLoaded || self.view.window == nil) { self.revealTarget = path; return; }
+
+    // Normalise once: the stored download path and the browsed path are built
+    // independently, so a stray trailing slash must not defeat the comparison.
+    path = path.stringByStandardizingPath;
+    NSString *root = [MVPaths downloads].stringByStandardizingPath;
+    NSString *parent = path.stringByDeletingLastPathComponent;
+    BOOL isRoot = [parent isEqualToString:root];
+
+    // The row must be on screen for a scroll to mean anything, so a file in a
+    // subfolder is revealed by opening that folder and letting its own -refresh
+    // highlight the row.
+    if (!isRoot && ![self.currentDirectory isEqualToString:parent]) {
+        MVFilesViewController *sub = [MVFilesViewController new];
+        sub.rootOverride = parent;
+        sub.revealTarget = path;
+        [self.navigationController pushViewController:sub animated:YES];
+        return;
+    }
+
+    // A kind filter can hide the very file being revealed, so fall back to All.
+    NSArray<NSString *> *visible = [self visibleEntries];
+    if (self.filterKind != MVFileKindAll && ![visible containsObject:path]) {
+        self.filterKind = MVFileKindAll;
+        [self refresh];
+        visible = [self visibleEntries];
+    }
+    NSInteger index = [visible indexOfObject:path];
+    if (index == NSNotFound) return;
+    NSIndexPath *ip = [NSIndexPath indexPathForRow:index inSection:0];
+    [self.tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+    // The row is only dequeued once it is on screen, and scrolling is animated,
+    // so wait for the layout pass before reaching for the cell to flash.
+    dispatch_async(dispatch_get_main_queue(), ^{ [self flashRowAtIndexPath:ip]; });
+}
+
+- (void)flashRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:indexPath];
+    if ([cell isKindOfClass:MVFileCardCell.class]) [(MVFileCardCell *)cell flashHighlight];
+}
+
+/// Walks the tree under `root` and returns the path of every file whose kind
+/// matches the current filter. Filtering by extension (not by folder) means a
+/// video is found wherever it sits, including folders the user created. Hidden
+/// files and the download index are skipped, and folders are never returned.
+- (NSArray<NSString *> *)pathsMatchingKind:(MVFileKind)kind underPath:(NSString *)root {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSDirectoryEnumerator *walk = [fm enumeratorAtURL:[NSURL fileURLWithPath:root]
+                           includingPropertiesForKeys:@[NSURLIsDirectoryKey]
+                                              options:NSDirectoryEnumerationSkipsHiddenFiles
+                                         errorHandler:nil];
+    for (NSURL *url in walk) {
+        NSNumber *isDir = nil;
+        if (![url getResourceValue:&isDir forKey:NSURLIsDirectoryKey error:nil] || isDir.boolValue) continue;
+        NSString *name = url.lastPathComponent;
+        if ([name isEqualToString:@"downloads.json"]) continue;
+        if (self.filter.length && ![name localizedCaseInsensitiveContainsString:self.filter]) continue;
+        NSString *ext = url.pathExtension.lowercaseString;
+        BOOL match = kind == MVFileKindOther ? (!MVExtensionIsVideo(ext) && !MVExtensionIsAudio(ext))
+                                             : (kind == MVFileKindVideo ? MVExtensionIsVideo(ext)
+                                                                        : MVExtensionIsAudio(ext));
+        if (match) [out addObject:url.path];
+    }
+    return [out sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return [a.lastPathComponent localizedStandardCompare:b.lastPathComponent];
+    }];
+}
+
+/// The rows to show, as absolute paths. Kind filters work on the whole tree, so
+/// they ignore `rootOverride` and always describe the library as a whole. The
+/// result is memoised against the kind/filter/folder triple, because the table
+/// asks for it once per row and a kind filter walks the whole tree.
+- (NSArray<NSString *> *)visibleEntries {
+    NSString *key = [NSString stringWithFormat:@"%ld|%@|%@", (long)self.filterKind,
+                     self.filter ?: @"", [self currentDirectory]];
+    if (self.rowCache && [self.rowCacheKey isEqualToString:key]) return self.rowCache;
+
+    NSArray<NSString *> *rows;
+    if (self.filterKind != MVFileKindAll) {
+        rows = [self pathsMatchingKind:self.filterKind underPath:[MVPaths downloads]];
+    } else {
+        NSString *dir = [self currentDirectory];
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        for (NSString *name in [self entries]) {
+            [paths addObject:[dir stringByAppendingPathComponent:name]];
+        }
+        rows = paths;
+    }
+    self.rowCache = rows;
+    self.rowCacheKey = key;
+    return rows;
 }
 
 /// A one-line summary of what a folder holds, so a folder row never claims to
@@ -692,8 +888,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    NSString *name = [self entries][indexPath.row];
-    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    NSString *path = [self visibleEntries][indexPath.row];
+    NSString *name = path.lastPathComponent;
     BOOL isDir = NO;
     [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
 
@@ -759,8 +955,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    NSString *name = [self entries][indexPath.row];
-    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    NSString *path = [self visibleEntries][indexPath.row];
+    NSString *name = path.lastPathComponent;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                      title:[MVLang t:@"Delete"]
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
@@ -886,8 +1082,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
     CGPoint point = [gesture locationInView:self.tableView];
     NSIndexPath *indexPath = [self.tableView indexPathForRowAtPoint:point];
     if (!indexPath) return;
-    NSString *name = [self entries][indexPath.row];
-    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    NSString *path = [self visibleEntries][indexPath.row];
+    NSString *name = path.lastPathComponent;
     [self showFileMenuForPath:path];
 }
 
@@ -896,8 +1092,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 /// press that lands between rows.
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
     contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
-    NSString *name = [self entries][indexPath.row];
-    NSString *path = [[self currentDirectory] stringByAppendingPathComponent:name];
+    NSString *path = [self visibleEntries][indexPath.row];
+    NSString *name = path.lastPathComponent;
     BOOL isDir = NO;
     [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir];
     __weak typeof(self) weakSelf = self;
@@ -1086,13 +1282,14 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
         playable = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"aac", @"wav"]];
     });
 
-    NSArray<NSString *> *names = [self entries];
-    NSString *dir = [self currentDirectory];
+    // Step through whatever the list is currently showing: in a kind filter
+    // that is files from across the tree, otherwise the rows of this folder.
+    NSArray<NSString *> *visible = [self visibleEntries];
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
     NSMutableArray<NSString *> *titles = [NSMutableArray array];
     NSInteger index = 0;
-    for (NSUInteger i = 0; i < names.count; i++) {
-        NSString *p = [dir stringByAppendingPathComponent:names[i]];
+    for (NSUInteger i = 0; i < visible.count; i++) {
+        NSString *p = visible[i];
         NSString *ext = p.pathExtension.lowercaseString;
         if (![playable containsObject:ext]) continue;
         [urls addObject:[NSURL fileURLWithPath:p]];

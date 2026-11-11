@@ -39,26 +39,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
-        // Frosted layout: the blur view added below sits behind the controls.
+        // Flat surface: a solid fill, no blur and no shadow.
         self.backgroundColor = [MVTheme glassCard];
         self.layer.cornerRadius = 16;
         self.layer.cornerCurve = kCACornerCurveContinuous;
-        self.layer.borderWidth = 0.5;
-        self.layer.borderColor = [[MVTheme cardBorder] colorWithAlphaComponent:MVTheme.shared.isDark ? 0.16 : 0.10].CGColor;
-        self.layer.shadowColor = UIColor.blackColor.CGColor;
-        self.layer.shadowOpacity = 0.3;
-        self.layer.shadowRadius = 12;
-        self.layer.shadowOffset = CGSizeMake(0, 5);
-        self.clipsToBounds = NO;
-
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:
-                                     [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
-        glass.frame = self.bounds;
-        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        glass.layer.cornerRadius = 16;
-        glass.layer.cornerCurve = kCACornerCurveContinuous;
-        glass.layer.masksToBounds = YES;
-        [self insertSubview:glass atIndex:0];
+        self.clipsToBounds = YES;
 
         _thumbView = [UIImageView new];
         _thumbView.contentMode = UIViewContentModeScaleAspectFill;
@@ -158,7 +143,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @end
 
 /// The full-screen player. A plain view controller with an AVPlayerLayer and a
-/// glass control bar. It never takes ownership of the player (unlike
+/// control bar. It never takes ownership of the player (unlike
 /// AVPlayerViewController, which pauses its player on dismissal), so the audio
 /// simply keeps playing when the sheet closes and the mini bar takes over —
 /// no resume polling, no audible gap.
@@ -186,7 +171,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     UIButton *_backButton;
     UIButton *_forwardButton;
     UIButton *_closeButton;
-    UIView *_glass;
+    UIView *_bar;
     UIStackView *_row;
     NSArray<UIView *> *_chrome;
     BOOL _chromeHidden;
@@ -201,7 +186,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     // app rather than a black window.
     self.view.backgroundColor = UIColor.clearColor;
 
-    // Wallpaper behind everything, frosting through the glass chrome.
+    // Wallpaper behind everything; the control bar is a flat surface over it.
     [MVTheme applyWallpaperTo:self.view];
 
     // A soft dim scrim helps the video stand out over the wallpaper.
@@ -270,16 +255,16 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     [self.view addSubview:row];
     _row = row;
 
-    // Glass control bar behind the transport row.
-    UIView *glass = [UIView new];
-    glass.translatesAutoresizingMaskIntoConstraints = NO;
-    [MVTheme applyCardStyle:glass cornerRadius:22];
-    [self.view insertSubview:glass belowSubview:row];
-    _glass = glass;
+    // Flat control bar behind the transport row.
+    UIView *bar = [UIView new];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [MVTheme applyCardStyle:bar cornerRadius:22];
+    [self.view insertSubview:bar belowSubview:row];
+    _bar = bar;
 
     // Everything that hides on a tap, like every other video player: the title,
     // the close button, the scrubber, the times and the whole transport bar.
-    _chrome = @[_titleLabel, _closeButton, _timeLabel, _slider, glass, row];
+    _chrome = @[_titleLabel, _closeButton, _timeLabel, _slider, bar, row];
 
     // Tap anywhere on the picture to hide/show the controls. The gesture must not
     // swallow taps meant for the buttons, so it ignores touches on them.
@@ -313,18 +298,18 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         [_nextButton.widthAnchor constraintEqualToConstant:48],
         [_nextButton.heightAnchor constraintEqualToConstant:48],
 
-        [glass.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [glass.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [glass.topAnchor constraintEqualToAnchor:row.topAnchor constant:-18],
-        [glass.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:18],
+        [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [bar.topAnchor constraintEqualToAnchor:row.topAnchor constant:-18],
+        [bar.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:18],
 
         [_timeLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:22],
         [_timeLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-22],
-        [_timeLabel.topAnchor constraintEqualToAnchor:glass.bottomAnchor constant:12],
+        [_timeLabel.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:12],
 
         [_slider.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:22],
         [_slider.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-22],
-        [_slider.bottomAnchor constraintEqualToAnchor:glass.topAnchor constant:-14],
+        [_slider.bottomAnchor constraintEqualToAnchor:bar.topAnchor constant:-14],
     ]];
 }
 

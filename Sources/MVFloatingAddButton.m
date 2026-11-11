@@ -16,10 +16,6 @@
     b.backgroundColor = [MVTheme accent];
     b.layer.cornerRadius = 28.0;
     b.layer.cornerCurve = kCACornerCurveContinuous;
-    b.layer.shadowColor = UIColor.blackColor.CGColor;
-    b.layer.shadowOpacity = 0.28;
-    b.layer.shadowRadius = 12;
-    b.layer.shadowOffset = CGSizeMake(0, 6);
     b.accessibilityLabel = [MVLang t:@"Add"];
     [b addTarget:b action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
     [NSLayoutConstraint activateConstraints:@[

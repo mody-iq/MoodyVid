@@ -27,15 +27,32 @@
     // the tap has a visible result even when the browser was opened from Home.
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(showDownloadsTab)
                                                name:@"MVShowDownloadsTabNotification" object:nil];
+    // A finished download asks to be pointed at in the Files tab.
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(revealFile:)
+                                               name:@"MVRevealFileNotification" object:nil];
 }
 
 - (void)showDownloadsTab {
     if (self.selectedIndex != 1) self.selectedIndex = 1;
 }
 
+/// Switches to Files and asks it to highlight the file. The pop-to-root first
+/// makes sure the file is revealed in the library root, not inside whatever
+/// folder the user last browsed into.
+- (void)revealFile:(NSNotification *)note {
+    NSString *path = note.userInfo[@"path"];
+    if (!path.length || self.viewControllers.count < 3) return;
+    self.selectedIndex = 2;
+    UINavigationController *filesNav = self.viewControllers[2];
+    [filesNav popToRootViewControllerAnimated:NO];
+    if ([filesNav.topViewController isKindOfClass:MVFilesViewController.class]) {
+        [(MVFilesViewController *)filesNav.topViewController revealPath:path];
+    }
+}
+
 - (UIViewController *)wrap:(UIViewController *)root symbol:(NSString *)symbol {
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:root];
-    nav.navigationBar.prefersLargeTitles = YES;
+    nav.navigationBar.prefersLargeTitles = NO;
     // SF Symbols are in the system, so the tabs need no image assets.
     nav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"" image:[UIImage systemImageNamed:symbol] tag:0];
     return nav;
@@ -45,22 +62,22 @@
     BOOL dark = MVTheme.shared.isDark;
     self.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
 
-    // One wallpaper behind the whole shell: every tab and its chrome area sits
-    // over it, so the frosted nav/tab bars frost an actual wallpaper and the
-    // background reads through everywhere, not just in the content area.
-    self.view.backgroundColor = UIColor.clearColor;
-    [MVTheme applyWallpaperTo:self.view];
+    // A flat surface behind the whole shell: one colour, no wallpaper layer and
+    // no frosted bars to re-composite. Each tab paints its own background.
+    self.view.backgroundColor = [MVTheme background];
 
-    // Frosted chrome: the wallpaper shows through translucent blurred bars.
-    UIBlurEffectStyle blurStyle = dark ? UIBlurEffectStyleSystemChromeMaterialDark
-                                        : UIBlurEffectStyleSystemChromeMaterialLight;
-    UIColor *chromeTint = [[MVTheme glassCard] colorWithAlphaComponent:0.2];
+    // Flat chrome: an opaque bar colour, no blur. The chrome is part of the
+    // same surface as the content, so there is nothing to frost and nothing to
+    // re-composite while scrolling.
+    UIColor *chrome = dark ? [UIColor colorWithWhite:0.07 alpha:1.0]
+                           : [UIColor colorWithWhite:0.98 alpha:1.0];
+    UIColor *hairline = dark ? [UIColor colorWithWhite:1.0 alpha:0.12]
+                             : [UIColor colorWithWhite:0.0 alpha:0.12];
 
     UITabBarAppearance *bar = [UITabBarAppearance new];
-    [bar configureWithTransparentBackground];
-    bar.backgroundEffect = [UIBlurEffect effectWithStyle:blurStyle];
-    bar.backgroundColor = chromeTint;
-    bar.shadowColor = [UIColor clearColor];
+    [bar configureWithOpaqueBackground];
+    bar.backgroundColor = chrome;
+    bar.shadowColor = hairline;
     bar.stackedLayoutAppearance.normal.iconColor = [MVTheme secondaryText];
     bar.stackedLayoutAppearance.normal.titleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme secondaryText]};
     bar.stackedLayoutAppearance.selected.iconColor = [MVTheme accent];
@@ -69,22 +86,24 @@
     self.tabBar.scrollEdgeAppearance = bar;
 
     UINavigationBarAppearance *navBar = [UINavigationBarAppearance new];
-    [navBar configureWithTransparentBackground];
-    navBar.backgroundEffect = [UIBlurEffect effectWithStyle:blurStyle];
-    navBar.backgroundColor = chromeTint;
-    navBar.shadowColor = [UIColor clearColor];
-    navBar.titleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme text]};
-    navBar.largeTitleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme text]};
+    [navBar configureWithOpaqueBackground];
+    navBar.backgroundColor = chrome;
+    navBar.shadowColor = hairline;
+    // Inline titles, one comfortable size on every screen: semibold 17 rather
+    // than the oversized large-title treatment.
+    navBar.titleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme text],
+                                   NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]};
+    // Titles stay at the inline size on every screen, so this attribute set is
+    // unused; it is kept in sync anyway in case a large title ever returns.
+    navBar.largeTitleTextAttributes = @{NSForegroundColorAttributeName: [MVTheme text],
+                                        NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]};
     for (UINavigationController *nav in self.viewControllers) {
+        nav.navigationBar.prefersLargeTitles = NO;
         nav.navigationBar.standardAppearance = navBar;
         nav.navigationBar.scrollEdgeAppearance = navBar;
         nav.navigationBar.compactAppearance = navBar;
         nav.navigationBar.tintColor = [MVTheme accent];
-        // A nav controller's view is opaque white by default, which would mask
-        // the shell wallpaper behind the chrome bars and produce the "wallpaper
-        // only in the middle" look. Make it clear so the wallpaper fills the
-        // whole page.
-        nav.view.backgroundColor = UIColor.clearColor;
+        nav.view.backgroundColor = chrome;
     }
 
     NSArray<NSString *> *titles = @[@"Home", @"Downloads", @"Files", @"More"];
@@ -99,17 +118,9 @@
         : UISemanticContentAttributeForceLeftToRight;
 }
 
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    for (CALayer *layer in [self.view.layer.sublayers copy]) {
-        if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
-    }
-}
-
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
-        [MVTheme refreshWallpaperIfPattern:self.view];
         [self applyTheme];
     }
 }
