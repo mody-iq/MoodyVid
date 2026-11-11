@@ -58,7 +58,7 @@
     NSString *name = entry[0];
     NSString *symbol = entry[1];
     NSInteger count = [entry[2] integerValue];
-    NSString *category = entry.count > 3 ? entry[3] : nil;
+    NSString *category = [self categoryForEntry:entry];
 
     UIListContentConfiguration *content = cell.defaultContentConfiguration;
     content.text = name;
@@ -78,13 +78,26 @@
     return cell;
 }
 
+/// `entry` is `@[displayName, symbolName, count, category]`; the "All" row's
+/// category is `NSNull`, which must read back as nil rather than be compared as
+/// a string.
+- (NSString *)categoryForEntry:(NSArray *)entry {
+    if (entry.count <= 3) return nil;
+    id value = entry[3];
+    return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+/// The chosen category, or nil for the "All" row.
+- (NSString *)selectedCategory {
+    return self.selected;
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    NSArray *entry = self.types[indexPath.row];
-    NSString *category = entry.count > 3 ? entry[3] : nil;
+    NSString *category = [self categoryForEntry:self.types[indexPath.row]];
     self.selected = category;
     [tableView reloadData];
-    if (self.onSelect) self.onSelect(category);
+    if (self.onSelect) self.onSelect(category ?: @"");
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 

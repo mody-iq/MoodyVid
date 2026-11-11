@@ -11,9 +11,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// `types` is a list of `@[displayName, symbolName, count, category]`. The first
 /// entry is the "All" row; `category` is nil for it.
-- (instancetype)initWithTypes:(NSArray<NSArray *> *)types selected:(nullable NSString *)category;
+- (instancetype)initWithTypes:(NSArray<NSArray *> *)types selected:(NSString *)category;
 
-@property (nonatomic, copy, nullable) void (^onSelect)(nullable NSString *category);
+/// Called with the chosen category, or an empty string for the "All" row.
+@property (nonatomic, copy, nullable) void (^onSelect)(NSString *category);
 
 @end
 

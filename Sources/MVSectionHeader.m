@@ -4,6 +4,7 @@
 @implementation MVSectionHeader {
     UILabel *_titleLabel;
     UILabel *_trailingLabel;
+    UIView *_trailingView;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {

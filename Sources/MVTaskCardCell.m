@@ -39,7 +39,7 @@
 
         _fillWidth = [_fill.widthAnchor constraintEqualToAnchor:self.widthAnchor multiplier:0.0];
         [NSLayoutConstraint activateConstraints:@[
-            _fill.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+            [_fill.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
             [_fill.topAnchor constraintEqualToAnchor:self.topAnchor],
             [_fill.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
             _fillWidth,
@@ -210,6 +210,13 @@
     _actionButton.enabled = content.actionEnabled;
     _actionButton.accessibilityLabel = content.actionSymbol;
 }
+
+/// These two are declared as methods rather than only as properties because a
+/// cell's block is cleared in -prepareForReuse; a plain property setter there
+/// would be overridden by the synthesised ivar access and the block would leak
+/// into the next use of the cell.
+- (void)setOnAction:(void (^)(void))onAction { _onAction = [onAction copy]; }
+- (void)setOnSelect:(void (^)(void))onSelect { _onSelect = [onSelect copy]; }
 
 - (void)actionTapped {
     if (self.onAction) self.onAction();

@@ -968,16 +968,19 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     }
     NSArray<NSString *> *types = @[@"Video", @"Audio", @"Document", @"Archive", @"Torrent", @"App", @"Other"];
     NSMutableArray<NSArray *> *entries = [NSMutableArray array];
-    [entries addObject:@[[MVLang t:@"All"], @"square.grid.2x2", @(all.count), [NSNull null]]];
+    // The "All" row carries an empty category rather than NSNull: the sheet's
+    // block takes a non-null string, and an empty string already means "no type
+    // filter" everywhere else in this controller.
+    [entries addObject:@[[MVLang t:@"All"], @"square.grid.2x2", @(all.count), @""]];
     for (NSString *type in types) {
         NSInteger count = [counts[type] integerValue];
         if (count == 0) continue;
         [entries addObject:@[[self localizedTypeName:type], [MVTaskCardCell symbolForKindName:type], @(count), type]];
     }
-    MVTypeFilterSheet *sheet = [[MVTypeFilterSheet alloc] initWithTypes:entries selected:self.typeFilter];
+    MVTypeFilterSheet *sheet = [[MVTypeFilterSheet alloc] initWithTypes:entries selected:self.typeFilter ?: @""];
     __weak typeof(self) weakSelf = self;
     sheet.onSelect = ^(NSString *category) {
-        weakSelf.typeFilter = [category isKindOfClass:NSNull.class] ? nil : category;
+        weakSelf.typeFilter = category.length ? category : nil;
         [weakSelf reloadList];
     };
     if (@available(iOS 15.0, *)) {
