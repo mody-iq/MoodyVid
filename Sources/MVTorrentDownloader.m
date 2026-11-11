@@ -6,6 +6,7 @@
 #import "MVTorrentTracker.h"
 #import "MVMagnet.h"
 #import "MVSHA1.h"
+#import "MVBencode.h"
 #import "MVPaths.h"
 #import "MVMediaProbe.h"
 #import "MVLang.h"
@@ -28,6 +29,12 @@ static const NSUInteger kMaxKnownPeers = 400;
 /// pieces already open, plus this many new ones, so a multi-gigabyte torrent
 /// does not reserve its whole size in memory while it downloads.
 static const NSInteger kMaxOpenPieces = 96;
+/// The size of one BEP 9 metadata piece. The spec fixes it at 16 KiB.
+static const NSInteger kMetadataPieceSize = 16384;
+/// How long to wait for a peer to answer a metadata request before trying
+/// another one. A magnet has no other peer source when it has no trackers, so
+/// giving up on the first silent peer would strand the download.
+static const NSTimeInterval kMetadataTimeout = 20;
 
 #pragma mark - Piece
 
@@ -85,6 +92,20 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 @property (nonatomic) BOOL cancelled;
 @property (nonatomic) BOOL finishing;
 @property (nonatomic, strong) NSData *peerID;
+/// BEP 9: the metadata pieces a peer has sent while a magnet link is being
+/// resolved, keyed by piece number. nil once the metadata is known.
+@property (nonatomic, strong, nullable) NSMutableDictionary<NSNumber *, NSData *> *metadataPieces;
+/// The metadata's total length, learned from the piece 0 reply. 0 until then.
+@property (nonatomic) NSInteger metadataSize;
+/// The peer currently serving the metadata, so a silent one can be replaced.
+@property (nonatomic, weak, nullable) MVTorrentPeer *metadataPeer;
+/// YES once a tracker announce has been sent for this job, so resolving a magnet
+/// (which announces to find a metadata peer) is not announced again by
+/// `prepareJob` once the real metadata arrives.
+@property (nonatomic) BOOL hasAnnounced;
+/// Bumped on every metadata request. A late timeout only fires when it is still
+/// the current attempt, so a peer that answered is not then dropped.
+@property (nonatomic) NSInteger metadataAttempt;
 @property (nonatomic, copy, nullable) void (^progressBlock)(MVDownloadTask *task);
 @property (nonatomic, copy, nullable) void (^finishedBlock)(MVDownloadTask *task);
 @property (nonatomic, copy, nullable) void (^failedBlock)(MVDownloadTask *task, NSString *message);
@@ -231,14 +252,203 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     return peerID;
 }
 
+#pragma mark - Metadata (BEP 9)
+
+/// Starts resolving a magnet link.
+///
+/// A magnet carries only the info-hash, so the piece table has to be fetched
+/// from a peer (BEP 9). The job gets a placeholder metadata (name and trackers,
+/// no pieces) and the normal announce path is reused: the peers it finds are the
+/// ones that can serve the metadata. `metadataPieces` marks the job as still
+/// resolving, which is what makes the delegate route the reply to the assembler.
+- (void)resolveMagnetForJob:(MVTorrentJob *)job {
+    MVMagnet *magnet = [MVMagnet magnetWithURL:job.task.url];
+    if (!magnet) {
+        [self failJob:job message:[MVLang t:@"This magnet link has no usable info-hash"]];
+        return;
+    }
+    if (magnet.isV2) {
+        // A v2 (BEP 52) hash names a different metadata format that this engine
+        // does not speak; say so instead of resolving to a torrent we cannot use.
+        [self failJob:job message:[MVLang t:@"This magnet uses a v2 hash, which is not supported yet"]];
+        return;
+    }
+
+    job.metadata = [MVTorrentMetadata metadataWithMagnet:magnet];
+    job.metadataPieces = [NSMutableDictionary dictionary];
+    job.metadataSize = 0;
+    job.task.title = magnet.displayName.length ? magnet.displayName : magnet.infoHashHex;
+    [self reportProgressForJob:job];
+
+    NSArray<NSString *> *trackers = magnet.trackers;
+    if (!trackers.count) {
+        [self failJob:job message:[MVLang t:@"This magnet has no tracker, so no peer can be found"]];
+        return;
+    }
+    [self announceForJob:job event:@"started"];
+}
+
+/// Asks a peer for the metadata, once its extended handshake says it can serve
+/// it. Picks the peer the engine is not already waiting on.
+- (void)requestMetadataFromPeerForJob:(MVTorrentJob *)job {
+    if (!job.metadataPieces) return;             // already resolved
+    if (job.metadataPeer) return;                // a request is outstanding
+    NSInteger piece = [self firstMissingMetadataPieceForJob:job];
+    if (piece < 0) return;
+    for (MVTorrentPeer *peer in job.peers) {
+        if (!peer.connected) continue;
+        if (!peer.extendedHandshakeReceived) continue;
+        NSDictionary *m = peer.extendedHandshake[@"m"];
+        if (![m isKindOfClass:NSDictionary.class]) continue;
+        NSNumber *metadataID = m[@"ut_metadata"];
+        if (![metadataID isKindOfClass:NSNumber.class]) continue;
+        [self askPeer:peer forMetadataPiece:piece inJob:job];
+        return;
+    }
+}
+
+/// The lowest metadata piece still missing, or -1 when they are all in. Piece 0
+/// is special: it carries the total size, so it must be asked for first and its
+/// absence means the size is not yet known.
+- (NSInteger)firstMissingMetadataPieceForJob:(MVTorrentJob *)job {
+    if (!job.metadataPieces[@(0)]) return 0;
+    if (!job.metadataSize) return -1;
+    NSInteger count = (job.metadataSize + kMetadataPieceSize - 1) / kMetadataPieceSize;
+    for (NSInteger i = 1; i < count; i++) {
+        if (!job.metadataPieces[@(i)]) return i;
+    }
+    return -1;
+}
+
+/// Sends one metadata request and arms its deadline. The attempt counter makes
+/// the deadline a no-op once this peer has answered or another peer was tried,
+/// so a peer that is serving pieces is never dropped by a stale timer.
+- (void)askPeer:(MVTorrentPeer *)peer forMetadataPiece:(NSInteger)piece inJob:(MVTorrentJob *)job {
+    job.metadataPeer = peer;
+    job.metadataAttempt += 1;
+    NSInteger attempt = job.metadataAttempt;
+    MVLogInfo(@"torrent: asking %@:%ld for metadata piece %ld", peer.host, (long)peer.port, (long)piece);
+    [peer sendMetadataRequestForPiece:piece];
+
+    __weak typeof(self) weakSelf = self;
+    __weak MVTorrentPeer *weakPeer = peer;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMetadataTimeout * NSEC_PER_SEC)),
+                   _queue, ^{
+        typeof(self) self_ = weakSelf;
+        if (!self_ || !job.metadataPieces) return;
+        if (job.metadataAttempt != attempt) return;
+        if (job.metadataPeer != weakPeer) return;
+        // The peer accepted the request but went quiet; try someone else.
+        job.metadataPeer = nil;
+        [self_ requestMetadataFromPeerForJob:job];
+    });
+}
+
+/// A `ut_metadata` reply. Piece 0 carries the total size; pieces are collected
+/// until they are all in, then the metadata is rebuilt and handed to the normal
+/// torrent path.
+- (void)handleMetadataMessage:(NSData *)payload forPeer:(MVTorrentPeer *)peer {
+    MVTorrentJob *job = _jobs[peer.jobIdentifier];
+    if (!job || job.cancelled || job.paused || job.finishing) return;
+    if (!job.metadataPieces) return;
+
+    // The message is a bencoded header followed by the raw metadata bytes; the
+    // header's own length says where the payload starts.
+    NSInteger headerLength = [MVBencode byteLengthOfValueIn:payload];
+    if (headerLength <= 0 || (NSUInteger)headerLength > payload.length) return;
+    NSString *error = nil;
+    id header = [MVBencode decode:[payload subdataWithRange:NSMakeRange(0, (NSUInteger)headerLength)]
+                            error:&error];
+    if (![header isKindOfClass:NSDictionary.class]) return;
+    NSNumber *msgType = header[@"msg_type"];
+    NSNumber *pieceNumber = header[@"piece"];
+    if (![pieceNumber isKindOfClass:NSNumber.class]) return;
+    if (![msgType isKindOfClass:NSNumber.class]) return;
+
+    if (msgType.integerValue == 2) {
+        // "reject": this peer will not serve the metadata; try another.
+        job.metadataAttempt += 1;
+        job.metadataPeer = nil;
+        [self requestMetadataFromPeerForJob:job];
+        return;
+    }
+    if (msgType.integerValue != 1) return;       // only "data" carries the info dict
+
+    NSData *body = [payload subdataWithRange:NSMakeRange((NSUInteger)headerLength,
+                                                         payload.length - (NSUInteger)headerLength)];
+    NSNumber *totalSize = header[@"total_size"];
+    if ([totalSize isKindOfClass:NSNumber.class] && totalSize.integerValue > 0) {
+        job.metadataSize = totalSize.integerValue;
+    }
+    if (!job.metadataSize) return;               // a piece before the size is useless
+    // Ignore a piece that would extend past the announced size, so a peer cannot
+    // make the assembler allocate a huge buffer.
+    if (pieceNumber.integerValue < 0) return;
+    if ((long long)pieceNumber.integerValue * kMetadataPieceSize + body.length > job.metadataSize) return;
+    job.metadataPieces[pieceNumber] = body;
+
+    NSInteger next = [self firstMissingMetadataPieceForJob:job];
+    if (next < 0) {
+        [self finishMetadataForJob:job];
+        return;
+    }
+    // The peer that just answered is still serving us, so ask it for the next
+    // piece rather than starting over with a new peer.
+    MVTorrentPeer *current = job.metadataPeer;
+    if (current) {
+        [self askPeer:current forMetadataPiece:next inJob:job];
+    } else {
+        [self requestMetadataFromPeerForJob:job];
+    }
+}
+
+/// Assembles the pieces, checks them against the magnet's info-hash, and turns
+/// them into the piece table the rest of the engine already understands.
+- (void)finishMetadataForJob:(MVTorrentJob *)job {
+    NSInteger pieceCount = (job.metadataSize + kMetadataPieceSize - 1) / kMetadataPieceSize;
+    NSMutableData *infoBytes = [NSMutableData dataWithCapacity:(NSUInteger)job.metadataSize];
+    for (NSInteger i = 0; i < pieceCount; i++) {
+        NSData *piece = job.metadataPieces[@(i)];
+        if (!piece) return;
+        [infoBytes appendData:piece];
+    }
+    job.metadataPieces = nil;
+    job.metadataPeer = nil;
+    job.metadataAttempt += 1;
+
+    // The hash is the only proof that this is the torrent the link named; a peer
+    // could otherwise hand us anything, and the row would happily download
+    // unrelated content under the name from the link.
+    NSData *expected = job.metadata.infoHash;
+    NSData *actual = [MVSHA1 digest:infoBytes];
+    if (![actual isEqualToData:expected]) {
+        MVLogWarn(@"torrent: magnet metadata hash mismatch (%@ != %@)",
+                  [MVSHA1 hexString:actual], [MVSHA1 hexString:expected]);
+        [self failJob:job message:[MVLang t:@"A peer sent metadata that does not match this magnet"]];
+        return;
+    }
+
+    NSData *torrentBytes = [MVBencode encode:@{@"info": infoBytes}];
+    NSString *decodeError = nil;
+    MVTorrentMetadata *metadata = [MVTorrentMetadata metadataWithTorrentData:torrentBytes
+                                                                       error:&decodeError];
+    if (!metadata) {
+        [self failJob:job message:decodeError ?: [MVLang t:@"This torrent file could not be read"]];
+        return;
+    }
+    // A magnet's own trackers must survive the swap: the peer-supplied info dict
+    // usually has none, and they are the only way to find more peers.
+    metadata.trackers = job.metadata.trackers;
+    MVLogInfo(@"torrent: magnet resolved to \"%@\" (%lld bytes)", metadata.name, metadata.totalLength);
+    [self prepareJob:job metadata:metadata];
+}
+
 #pragma mark - Metadata
 
 - (void)loadTorrentForJob:(MVTorrentJob *)job {
     NSString *url = job.task.url;
     if ([MVMagnet isMagnetURL:url]) {
-        // A magnet needs the BEP 9 metadata exchange from a peer; that path is a
-        // later phase. Report it honestly instead of hanging at 0%.
-        [self failJob:job message:[MVLang t:@"Magnet links need the metadata exchange, coming in a later update"]];
+        [self resolveMagnetForJob:job];
         return;
     }
 
@@ -267,6 +477,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 - (void)prepareJob:(MVTorrentJob *)job metadata:(MVTorrentMetadata *)metadata {
     if (job.cancelled || job.paused) return;
     job.metadata = metadata;
+
+    // Peers found while resolving a magnet were built when the piece count was
+    // still unknown, so they cannot report or serve pieces. Their addresses stay
+    // in knownPeers, so dropping them loses nothing: they are reconnected below
+    // with the real geometry.
+    if (job.peers.count) [self stopAllPeersForJob:job];
 
     // Each torrent owns a folder named after it, so two torrents never collide
     // and a cancel can delete exactly what it wrote.
@@ -321,7 +537,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     job.task.phase = [MVLang t:@"Finding peers"];
     [self reportProgressForJob:job];
 
-    [self announceForJob:job event:@"started"];
+    // Reconnect the addresses already known (a resolved magnet keeps them), then
+    // announce. A magnet has already announced by now, so it is not announced
+    // twice.
+    [self connectMorePeersForJob:job];
+    [self fillPipelinesForJob:job];
+    if (!job.hasAnnounced) [self announceForJob:job event:@"started"];
 }
 
 #pragma mark - Trackers
@@ -336,6 +557,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 }
 
 - (void)announceForJob:(MVTorrentJob *)job event:(NSString *)event {
+    job.hasAnnounced = YES;
     NSArray<NSString *> *trackers = job.metadata.trackers;
     if (!trackers.count) {
         [self failJob:job message:[MVLang t:@"This torrent has no HTTP tracker to find peers"]];
@@ -575,6 +797,9 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     // Report now so a connected swarm clears the "Finding peers" phase at once
     // instead of waiting for the first piece to finish.
     [self reportProgressForJob:job];
+    // A magnet has no piece table yet, so there is nothing to fetch until the
+    // metadata arrives; the handshake that follows this callback starts that.
+    if (job.metadataPieces) return;
     [self fillPipelinesForJob:job];
 }
 
@@ -623,7 +848,13 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 }
 
 - (void)peer:(MVTorrentPeer *)peer didReceiveExtendedMessage:(NSInteger)extendedID payload:(NSData *)payload {
-    // BEP 9 metadata and BEP 10 PEX are not used by this engine yet.
+    if (extendedID == 0) {
+        // The peer's extended handshake just arrived, so this peer can now be
+        // asked for a magnet's metadata.
+        [self requestMetadataFromPeerForJob:_jobs[peer.jobIdentifier]];
+        return;
+    }
+    [self handleMetadataMessage:payload forPeer:peer];
 }
 
 - (void)peerDidDisconnect:(MVTorrentPeer *)peer reason:(NSString *)reason {

@@ -1,4 +1,5 @@
 #import "MVBencode.h"
+#import "MVSHA1.h"
 
 /// Walks a byte buffer, decoding one value at a time. A class rather than a
 /// pile of functions so the cursor and the error live in one place.
@@ -187,6 +188,21 @@
     id value = [reader readValue];
     if (!value && error) *error = reader.error ?: @"malformed bencode";
     return value;
+}
+
++ (NSInteger)byteLengthOfValueIn:(NSData *)data {
+    if (!data.length) return -1;
+    MVBencodeReader *reader = [MVBencodeReader new];
+    reader.data = data;
+    id value = [reader readValue];
+    if (!value) return -1;
+    return (NSInteger)reader.pos;
+}
+
++ (NSData *)infoHashFromTorrentData:(NSData *)data {
+    NSData *infoBytes = [self rawValueForTopLevelKey:@"info" inData:data];
+    if (!infoBytes.length) return nil;
+    return [MVSHA1 digest:infoBytes];
 }
 
 + (NSData *)rawValueForTopLevelKey:(NSString *)key inData:(NSData *)data {

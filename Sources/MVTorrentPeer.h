@@ -60,6 +60,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// How many requested blocks have not arrived yet.
 @property (nonatomic, readonly) NSInteger blocksInFlight;
 
+/// The peer's BEP 10 extended handshake (its `m` map), once it has arrived, or
+/// nil. The engine reads the peer's `ut_metadata` id from here before asking it
+/// for the metadata of a magnet link.
+@property (nonatomic, readonly, nullable) NSDictionary *extendedHandshake;
+/// YES once the peer's extended handshake has been parsed.
+@property (nonatomic, readonly) BOOL extendedHandshakeReceived;
+/// How many pieces the peer said it holds, or 0 when it sent no bitfield. A
+/// peer with no pieces is skipped as a metadata source (it has nothing to send).
+@property (nonatomic, readonly) NSInteger announcedPieceCount;
+
 - (instancetype)initWithHost:(NSString *)host
                         port:(NSInteger)port
                     infoHash:(NSData *)infoHash
@@ -80,6 +90,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)sendNotInterested;
 /// Sends an extended-protocol message (BEP 10). `extendedID` 0 is the handshake.
 - (void)sendExtendedMessage:(NSInteger)extendedID payload:(NSData *)payload;
+
+/// Sends a BEP 9 `ut_metadata` request for the metadata piece `piece`. The peer
+/// must have advertised a `ut_metadata` id in its extended handshake first.
+- (void)sendMetadataRequestForPiece:(NSInteger)piece;
 /// Stops the peer and closes the socket.
 - (void)stop;
 

@@ -65,6 +65,8 @@ static const char kProtocol[] = "BitTorrent protocol";
     __weak id<MVTorrentPeerDelegate> _delegate;
     NSMutableData *_receiveBuffer;
     dispatch_queue_t _engineQueue;
+    NSDictionary *_extendedHandshake;
+    BOOL _extendedHandshakeReceived;
 }
 
 - (instancetype)initWithHost:(NSString *)host
@@ -98,6 +100,18 @@ static const char kProtocol[] = "BitTorrent protocol";
 
 - (NSInteger)blocksInFlight {
     @synchronized (self) { return (NSInteger)_outstanding.count; }
+}
+
+- (NSDictionary *)extendedHandshake {
+    @synchronized (self) { return _extendedHandshake; }
+}
+
+- (BOOL)extendedHandshakeReceived {
+    @synchronized (self) { return _extendedHandshakeReceived; }
+}
+
+- (NSInteger)announcedPieceCount {
+    @synchronized (self) { return (NSInteger)_pieces.count; }
 }
 
 - (BOOL)connected {
@@ -333,6 +347,17 @@ static const NSTimeInterval kBlockTimeout = 30;
     [self sendMessage:6 payload:payload];
 }
 
+- (void)sendMetadataRequestForPiece:(NSInteger)piece {
+    // The request goes out under the id the peer chose for ut_metadata in its
+    // own handshake, not a fixed number.
+    NSDictionary *handshake = self.extendedHandshake;
+    NSDictionary *m = [handshake[@"m"] isKindOfClass:NSDictionary.class] ? handshake[@"m"] : nil;
+    NSNumber *metadataID = m[@"ut_metadata"];
+    if (![metadataID isKindOfClass:NSNumber.class]) return;
+    NSData *payload = [MVBencode encode:@{@"msg_type": @0, @"piece": @(piece)}];
+    [self sendExtendedMessage:metadataID.integerValue payload:payload];
+}
+
 - (void)sendExtendedMessage:(NSInteger)extendedID payload:(NSData *)payload {
     NSMutableData *body = [NSMutableData data];
     uint8_t identifier = (uint8_t)extendedID;
@@ -508,9 +533,17 @@ static const NSTimeInterval kBlockTimeout = 30;
     NSInteger extendedID = bytes[0];
     NSData *body = payload.length > 1 ? [payload subdataWithRange:NSMakeRange(1, payload.length - 1)] : [NSData data];
     if (extendedID == 0) {
-        // The peer's extended handshake. BEP 9 metadata exchange and BEP 10 PEX
-        // are not spoken yet, so it is passed through to the delegate and nothing
-        // is recorded from it.
+        // The peer's extended handshake (BEP 10). Its `m` map names the extended
+        // messages it speaks; `ut_metadata` is the id it wants BEP 9 requests
+        // sent under, which is per-peer and so must be read from here.
+        NSString *error = nil;
+        id decoded = [MVBencode decode:body error:&error];
+        if ([decoded isKindOfClass:NSDictionary.class]) {
+            @synchronized (self) {
+                _extendedHandshake = decoded;
+                _extendedHandshakeReceived = YES;
+            }
+        }
         [self onEngineQueue:^{
             id<MVTorrentPeerDelegate> delegate = _delegate;
             if ([delegate respondsToSelector:@selector(peer:didReceiveExtendedMessage:payload:)]) {

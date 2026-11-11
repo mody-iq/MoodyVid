@@ -32,6 +32,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// original bytes instead of trusting the re-encode.
 + (nullable NSData *)rawValueForTopLevelKey:(NSString *)key inData:(NSData *)data;
 
+/// The SHA-1 info-hash of a `.torrent` file: the hash of the raw `info`
+/// dictionary bytes. Used to check that a `.torrent` a peer handed us (BEP 9)
+/// is the torrent the magnet link actually named.
++ (nullable NSData *)infoHashFromTorrentData:(NSData *)data;
+
+/// How many bytes the first bencoded value in `data` occupies, or -1 when it is
+/// malformed. A BEP 9 `ut_metadata` data message is a bencoded header followed
+/// by the raw metadata bytes, so the boundary has to be measured rather than
+/// guessed by re-encoding the header.
++ (NSInteger)byteLengthOfValueIn:(NSData *)data;
+
 @end
 
 NS_ASSUME_NONNULL_END

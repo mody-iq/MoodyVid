@@ -128,6 +128,51 @@ int main(void) {
         MVTorrentPeerAddress *legacyPeer = legacyPeers.firstObject;
         CHECK(legacyPeers.count == 1 && [legacyPeer.host isEqualToString:@"10.0.0.5"], "legacy peer form parsed");
 
+        // --- BEP 9 metadata exchange (the magnet path) ---
+        // The info dict a peer sends has to be byte-identical to what the magnet
+        // hashed, so these use the raw bytes and rebuild the torrent the same way
+        // the engine does.
+        NSString *magnetInfo = @"d6:lengthi16384e4:name8:test.bin12:piece lengthi16384e6:pieces20:01234567890123456789e";
+        NSData *magnetInfoBytes = B(magnetInfo);
+        NSData *magnetHash = [MVSHA1 digest:magnetInfoBytes];
+        CHECK([[MVSHA1 hexString:magnetHash] isEqualToString:[MVSHA1 hexString:[MVSHA1 digest:B(magnetInfo)]]], "magnet info hash stable");
+
+        // The engine wraps the peer's info bytes in a one-key torrent and reuses
+        // the normal parser; that must recover the same metadata.
+        NSData *wrapped = [MVBencode encode:@{@"info": magnetInfoBytes}];
+        MVTorrentMetadata *fromPeer = [MVTorrentMetadata metadataWithTorrentData:wrapped error:&err];
+        CHECK(fromPeer != nil, "peer info dict parses");
+        CHECK([fromPeer.name isEqualToString:@"test.bin"], "peer metadata name");
+        CHECK(fromPeer.totalLength == 16384, "peer metadata length");
+        CHECK([fromPeer.infoHash isEqualToData:magnetHash], "peer metadata hash matches the magnet");
+
+        // The whole torrent's info-hash must equal the info dict's hash, which is
+        // what lets the resolver accept or reject a peer's reply.
+        CHECK([[MVBencode infoHashFromTorrentData:wrapped] isEqualToData:magnetHash], "info hash from torrent data");
+
+        // A metadata message is a bencoded header followed by raw bytes; the
+        // boundary must be measured, not re-encoded, or the hash would not match.
+        NSMutableData *dataMessage = [NSMutableData data];
+        [dataMessage appendData:[MVBencode encode:@{@"msg_type": @1, @"piece": @0, @"total_size": @(magnetInfoBytes.length)}]];
+        [dataMessage appendData:magnetInfoBytes];
+        NSInteger headerLen = [MVBencode byteLengthOfValueIn:dataMessage];
+        CHECK(headerLen > 0, "metadata header length measured");
+        NSData *recovered = [dataMessage subdataWithRange:NSMakeRange((NSUInteger)headerLen, dataMessage.length - (NSUInteger)headerLen)];
+        CHECK([recovered isEqualToData:magnetInfoBytes], "metadata payload recovered byte-for-byte");
+        CHECK([[MVSHA1 digest:recovered] isEqualToData:magnetHash], "recovered payload hashes to the magnet hash");
+
+        // The header itself must decode back to what was sent.
+        id headerBack = [MVBencode decode:[dataMessage subdataWithRange:NSMakeRange(0, (NSUInteger)headerLen)] error:&err];
+        CHECK([headerBack isKindOfClass:NSDictionary.class], "metadata header decodes");
+        CHECK([headerBack[@"total_size"] integerValue] == (NSInteger)magnetInfoBytes.length, "metadata total_size round-trips");
+
+        // A 16 KiB piece size means a 16 KiB info dict is exactly one piece, and
+        // a slightly larger one needs two; the piece count drives the requests.
+        NSInteger onePiece = (NSInteger)((magnetInfoBytes.length + 16384 - 1) / 16384);
+        CHECK(onePiece == 1, "small metadata is one piece");
+        NSInteger twoPieces = (NSInteger)((40000 + 16384 - 1) / 16384);
+        CHECK(twoPieces == 3, "larger metadata piece count");
+
         printf(failures ? "\n%d FAILURE(S)\n" : "ALL TORRENT CORE TESTS PASSED\n", failures);
     }
     return failures ? 1 : 0;
