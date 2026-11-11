@@ -74,6 +74,15 @@
 		<string>instagram</string>
 		<string>fb</string>
 	</array>
+	<!-- Trackers in .torrent files are frequently plain http://, and the tracker
+	     host is not known in advance (it comes from the file the user opened).
+	     ATS would block those announces, so allow arbitrary loads. The app is
+	     sideloaded, not distributed through the App Store. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>يحتاج MoodyVid إلى إذن الصور لحفظ الفيديوهات التي تم تحميلها.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
