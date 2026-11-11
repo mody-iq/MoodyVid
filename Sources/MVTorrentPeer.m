@@ -11,7 +11,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-static const NSInteger kBlockSize = 16384;
 /// A peer that sends nothing for this long is dropped.
 static const NSTimeInterval kIdleTimeout = 90;
 /// The wire protocol version this client announces.
