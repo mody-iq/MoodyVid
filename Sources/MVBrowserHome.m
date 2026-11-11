@@ -144,6 +144,7 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
 
 + (NSArray<MVBrowserShortcut *> *)defaultShortcuts {
     return @[
+        [MVBrowserShortcut name:@"Google" url:@"https://www.google.com" symbol:@"magnifyingglass" color:@"#4285F4"],
         [MVBrowserShortcut name:@"YouTube" url:@"https://m.youtube.com" symbol:@"play.rectangle.fill" color:@"#FF3B30"],
         [MVBrowserShortcut name:@"Instagram" url:@"https://www.instagram.com" symbol:@"camera.fill" color:@"#E1306C"],
         [MVBrowserShortcut name:@"Facebook" url:@"https://m.facebook.com" symbol:@"f.circle.fill" color:@"#1877F2"],
@@ -163,7 +164,16 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
     for (NSDictionary *dict in raw) {
         if ([dict isKindOfClass:NSDictionary.class]) [out addObject:[MVBrowserShortcut fromDictionary:dict]];
     }
-    return out.count ? out : [self defaultShortcuts];
+    if (!out.count) return [self defaultShortcuts];
+    // A saved list keeps the user's own tiles, but a built-in site added in an
+    // update (Google) must still appear, so append any default whose URL is not
+    // already there.
+    NSMutableSet<NSString *> *urls = [NSMutableSet set];
+    for (MVBrowserShortcut *shortcut in out) [urls addObject:shortcut.url];
+    for (MVBrowserShortcut *builtin in [self defaultShortcuts]) {
+        if (![urls containsObject:builtin.url]) [out addObject:builtin];
+    }
+    return out;
 }
 
 + (void)setShortcuts:(NSArray<MVBrowserShortcut *> *)shortcuts {

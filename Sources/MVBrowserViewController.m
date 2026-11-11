@@ -158,6 +158,9 @@ static id gParkedObserver = nil;
 @property (nonatomic, strong) UILabel *clipboardLabel;
 @property (nonatomic, strong) UIView *toolbar;
 @property (nonatomic, strong) UIStackView *toolbarRow;
+/// The sniff button's distance from the bottom safe area, kept so the button can
+/// step aside when the floating player bar appears under it.
+@property (nonatomic, strong) NSLayoutConstraint *sniffBottomConstraint;
 
 @property (nonatomic, strong) NSMutableArray<MVBrowserTab *> *tabs;
 @property (nonatomic, copy, nullable) NSString *activeTabID;
@@ -344,8 +347,8 @@ static id gParkedObserver = nil;
     self.contentView.clipsToBounds = YES;
     [self.view addSubview:self.contentView];
 
-    [self buildHomeView];
     [self buildChrome];
+    [self buildHomeView];
 
     MVBrowserTab *tab = [self createTabWithURL:self.initialURL isPopup:self.isPopup];
     self.activeTabID = tab.identifier;
@@ -385,6 +388,24 @@ static id gParkedObserver = nil;
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(snifferChanged:)
                                                name:MVSnifferStoreDidChangeNotification object:nil];
+    // The floating player bar sits in the bottom-right corner too, so the sniff
+    // button lifts above it when the bar is up.
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(playerBarVisibilityChanged:)
+                                               name:MVPlayerBarVisibilityDidChangeNotification object:nil];
+    [self updateSniffButtonForPlayerBar];
+}
+
+- (void)playerBarVisibilityChanged:(NSNotification *)note {
+    [self updateSniffButtonForPlayerBar];
+}
+
+/// Keeps the sniff button clear of the floating player bar (80 pt tall, 54 pt
+/// from the bottom safe area).
+- (void)updateSniffButtonForPlayerBar {
+    CGFloat offset = MVPlayerCenter.shared.floatingBarVisible ? -160 : -16;
+    if (self.sniffBottomConstraint.constant == offset) return;
+    self.sniffBottomConstraint.constant = offset;
+    [UIView animateWithDuration:0.2 animations:^{ [self.view layoutIfNeeded]; }];
 }
 
 - (void)dealloc {
@@ -476,7 +497,7 @@ static id gParkedObserver = nil;
     self.homeView.hidden = YES;
     [self.view addSubview:self.homeView];
     [NSLayoutConstraint activateConstraints:@[
-        [self.homeView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.homeView.topAnchor constraintEqualToAnchor:self.loadBar.bottomAnchor],
         [self.homeView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.homeView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.homeView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
@@ -520,6 +541,14 @@ static id gParkedObserver = nil;
     button.translatesAutoresizingMaskIntoConstraints = NO;
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
+}
+
+- (NSLayoutConstraint *)sniffBottomConstraint {
+    if (!_sniffBottomConstraint) {
+        _sniffBottomConstraint =
+            [self.sniffButton.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-16];
+    }
+    return _sniffBottomConstraint;
 }
 
 - (void)buildChrome {
@@ -593,20 +622,20 @@ static id gParkedObserver = nil;
     [self buildClipboardBanner];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.contentView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [self.contentView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.contentView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.contentView.bottomAnchor constraintEqualToAnchor:self.toolbar.topAnchor constant:-6],
+        [self.toolbar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
+        [self.toolbar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:10],
+        [self.toolbar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-10],
+        [self.toolbar.heightAnchor constraintEqualToConstant:46],
 
-        [self.loadBar.topAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        [self.loadBar.topAnchor constraintEqualToAnchor:self.toolbar.bottomAnchor constant:4],
         [self.loadBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.loadBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.loadBar.heightAnchor constraintEqualToConstant:2],
 
-        [self.toolbar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:10],
-        [self.toolbar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-10],
-        [self.toolbar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-6],
-        [self.toolbar.heightAnchor constraintEqualToConstant:46],
+        [self.contentView.topAnchor constraintEqualToAnchor:self.loadBar.bottomAnchor],
+        [self.contentView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.contentView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.contentView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
 
         [self.toolbarRow.leadingAnchor constraintEqualToAnchor:self.toolbar.leadingAnchor constant:12],
         [self.toolbarRow.trailingAnchor constraintEqualToAnchor:self.toolbar.trailingAnchor constant:-12],
@@ -622,7 +651,7 @@ static id gParkedObserver = nil;
         [self.tabsButton.widthAnchor constraintGreaterThanOrEqualToConstant:30],
 
         [self.sniffButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
-        [self.sniffButton.bottomAnchor constraintEqualToAnchor:self.toolbar.topAnchor constant:-14],
+        self.sniffBottomConstraint,
         [self.sniffButton.widthAnchor constraintEqualToConstant:52],
         [self.sniffButton.heightAnchor constraintEqualToConstant:52],
 
@@ -658,7 +687,7 @@ static id gParkedObserver = nil;
     [NSLayoutConstraint activateConstraints:@[
         [self.clipboardBanner.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:14],
         [self.clipboardBanner.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-14],
-        [self.clipboardBanner.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
+        [self.clipboardBanner.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:58],
         [self.clipboardBanner.heightAnchor constraintEqualToConstant:44],
 
         [icon.leadingAnchor constraintEqualToAnchor:self.clipboardBanner.leadingAnchor constant:12],
@@ -715,7 +744,7 @@ static id gParkedObserver = nil;
             address = [@"https://" stringByAppendingString:address];
         } else {
             NSString *query = [address stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-            address = [@"https://m.duckduckgo.com/?q=" stringByAppendingString:query ?: @""];
+            address = [@"https://www.google.com/search?q=" stringByAppendingString:query ?: @""];
         }
     }
     NSURL *url = [NSURL URLWithString:address];
@@ -1211,7 +1240,7 @@ static id gParkedObserver = nil;
     [self.view addSubview:toast];
     [NSLayoutConstraint activateConstraints:@[
         [toast.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [toast.bottomAnchor constraintEqualToAnchor:self.toolbar.topAnchor constant:-14],
+        [toast.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-14],
         [toast.heightAnchor constraintEqualToConstant:34],
         [toast.widthAnchor constraintGreaterThanOrEqualToConstant:140],
     ]];
