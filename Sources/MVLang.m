@@ -163,6 +163,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"No files": @"لا توجد ملفات",
             @"Move to folder": @"نقل إلى مجلد",
             @"Nothing to move to": @"لا توجد مجلدات",
+            @"Could not move the file": @"تعذّر نقل الملف",
 
             // Settings
             @"Language": @"اللغة",
@@ -260,7 +261,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Could not be reached": @"تعذّر الوصول إليه",
             @"Returned no peers": @"لم يُرجع أي أقران",
             @"Already in downloads": @"موجود بالفعل في التنزيلات",
-            @"Magnet links need the metadata exchange, coming in a later update": @"روابط المغناط تحتاج تبادل البيانات الوصفية، ويأتي ذلك في تحديث لاحق",
+
             @"This magnet link has no usable info-hash": @"رابط المغناط هذا لا يحتوي على بصمة صالحة",
             @"This magnet uses a v2 hash, which is not supported yet": @"هذا المغناط يستخدم بصمة v2، وهي غير مدعومة بعد",
             @"This magnet has no tracker, so no peer can be found": @"لا يوجد متتبّع لهذا المغناط، فلا يمكن العثور على أقران",

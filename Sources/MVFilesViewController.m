@@ -781,6 +781,81 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
 }
 
 /// Keeps the Downloads list honest when a file is deleted from the Files tab.
+/// YES when the file has an audio track, which is what "Convert to MP3" needs.
+/// A video with sound qualifies too, so a downloaded clip can be turned into a
+/// track without a separate step.
+- (BOOL)pathHasAudioTrack:(NSString *)path {
+    AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+    return [asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
+}
+
+- (void)convertPathToMP3:(NSString *)path {
+    NSString *outPath = [[path stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp3"];
+    UIAlertController *busy = [UIAlertController alertControllerWithTitle:[MVLang t:@"Converting…"]
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:busy animated:YES completion:nil];
+    [MVMediaConverter convertToMP3:path to:outPath completion:^(BOOL ok, NSString *error) {
+        [busy dismissViewControllerAnimated:YES completion:^{
+            if (ok) {
+                [self refresh];
+                [self playPathInQueue:outPath];
+            } else {
+                [self alert:[MVLang t:@"Could not convert this file"] message:error];
+            }
+        }];
+    }];
+}
+
+/// Moves a file into one of the category folders. The picker lists every
+/// category the app knows, so a download can be filed where the user expects it
+/// without leaving the Files tab.
+- (void)promptMovePath:(NSString *)path {
+    NSMutableArray<NSString *> *destinations = [NSMutableArray array];
+    for (NSString *category in [MVPaths categories]) {
+        NSString *dir = [MVPaths directoryForCategory:category];
+        if ([path isEqualToString:dir]) continue;
+        if ([path hasPrefix:[dir stringByAppendingString:@"/"]]) continue;   // already there
+        [destinations addObject:category];
+    }
+    if (!destinations.count) {
+        [self alert:[MVLang t:@"Nothing to move to"] message:nil];
+        return;
+    }
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Move to folder"]
+                                                                   message:path.lastPathComponent
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSString *category in destinations) {
+        [sheet addAction:[UIAlertAction actionWithTitle:category style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self movePath:path toCategory:category];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2,
+                                                                self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)movePath:(NSString *)path toCategory:(NSString *)category {
+    NSString *dir = [MVPaths directoryForCategory:category];
+    NSString *dest = [MVPaths uniquePathInDirectory:dir filename:path.lastPathComponent];
+    NSError *error = nil;
+    if (![NSFileManager.defaultManager moveItemAtPath:path toPath:dest error:&error]) {
+        [self alert:[MVLang t:@"Could not move the file"] message:error.localizedDescription];
+        return;
+    }
+    // A download's record points at the old path; follow the file so the
+    // Downloads tab does not show a row for a file that is no longer there.
+    for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
+        if ([r.path isEqualToString:path]) {
+            r.path = dest;
+            [MVDownloadStore.shared update:r];
+        }
+    }
+    [self refresh];
+}
+
 - (void)forgetRecordAtPath:(NSString *)path {
     for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
         if ([r.path isEqualToString:path]) [MVDownloadStore.shared remove:r];
@@ -844,6 +919,10 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
             [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Convert"] image:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"]
                                                identifier:nil handler:^(UIAction *a) { [weakSelf offerConversionForPath:path]; }]];
         }
+        if (!isDir && [self pathHasAudioTrack:path]) {
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Convert to MP3"] image:[UIImage systemImageNamed:@"music.note"]
+                                               identifier:nil handler:^(UIAction *a) { [weakSelf convertPathToMP3:path]; }]];
+        }
         if (!isDir) {
             [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Save to Photos"] image:[UIImage systemImageNamed:@"photo.on.rectangle"]
                                                identifier:nil handler:^(UIAction *a) {
@@ -852,6 +931,8 @@ typedef NS_ENUM(NSInteger, MVSortMode) {
                     else if (err) [weakSelf alert:[MVLang t:@"Failed"] message:err];
                 }];
             }]];
+            [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Move to folder"] image:[UIImage systemImageNamed:@"folder.badge.plus"]
+                                               identifier:nil handler:^(UIAction *a) { [weakSelf promptMovePath:path]; }]];
         }
         [actions addObject:[UIAction actionWithTitle:[MVLang t:@"Share"] image:[UIImage systemImageNamed:@"square.and.arrow.up"]
                                            identifier:nil handler:^(UIAction *a) {

@@ -215,6 +215,7 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     NSArray<NSArray *> *items = @[
         @[@"pause.fill", [MVLang t:@"Pause"], @"editPause"],
         @[@"play.fill", [MVLang t:@"Resume"], @"editResume"],
+        @[@"arrow.clockwise", [MVLang t:@"Retry"], @"editRetry"],
         @[@"square.and.arrow.up", [MVLang t:@"Share"], @"editShare"],
         @[@"trash", [MVLang t:@"Delete"], @"editDelete"],
     ];
@@ -254,8 +255,38 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     UIBarButtonItem *filter = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"line.3.horizontal.decrease.circle"]
                                                                style:UIBarButtonItemStylePlain
                                                               target:self action:@selector(showTypeFilter)];
+    UIBarButtonItem *more = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
+                                                             style:UIBarButtonItemStylePlain
+                                                            target:nil action:nil];
     sort.menu = [self sortMenu];
-    self.navigationItem.rightBarButtonItems = @[edit, filter, sort];
+    more.menu = [self moreMenu];
+    self.navigationItem.rightBarButtonItems = @[edit, filter, sort, more];
+}
+
+/// The bulk actions, which act on the whole queue rather than a selection.
+/// `MVDownloadManager` already implements them; they were unreachable from the
+/// UI, so a queue of failed downloads had to be retried one row at a time.
+- (UIMenu *)moreMenu {
+    __weak typeof(self) weakSelf = self;
+    UIAction *resumeAll = [UIAction actionWithTitle:[MVLang t:@"Resume all"]
+                                             image:[UIImage systemImageNamed:@"play.fill"]
+                                        identifier:nil handler:^(UIAction *a) {
+        [MVDownloadManager.shared resumeAll];
+        [weakSelf reloadList];
+    }];
+    UIAction *pauseAll = [UIAction actionWithTitle:[MVLang t:@"Pause all"]
+                                            image:[UIImage systemImageNamed:@"pause.fill"]
+                                       identifier:nil handler:^(UIAction *a) {
+        [MVDownloadManager.shared pauseAll];
+        [weakSelf reloadList];
+    }];
+    UIAction *retryAll = [UIAction actionWithTitle:[MVLang t:@"Retry all"]
+                                            image:[UIImage systemImageNamed:@"arrow.clockwise"]
+                                       identifier:nil handler:^(UIAction *a) {
+        [MVDownloadManager.shared retryAllFailed];
+        [weakSelf reloadList];
+    }];
+    return [UIMenu menuWithTitle:@"" children:@[resumeAll, pauseAll, retryAll]];
 }
 
 - (UIMenu *)sortMenu {
@@ -825,6 +856,13 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 - (void)editResume {
     [self selectedRowsApply:^(MVDownloadRow *row) {
         if (row.isPaused || row.isFailed) [MVDownloadActions resumeRow:row];
+    }];
+    [self exitEditModeAfterAction];
+}
+
+- (void)editRetry {
+    [self selectedRowsApply:^(MVDownloadRow *row) {
+        if (row.isFailed) [MVDownloadActions retryRow:row];
     }];
     [self exitEditModeAfterAction];
 }
