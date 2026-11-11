@@ -15,13 +15,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, nullable) NSString *errorText;
 @property (nonatomic, copy) NSString *symbolName;
 @property (nonatomic, strong) UIColor *tint;
-/// 0…1. A value < 0 hides the progress bar (finished/failed rows).
+/// 0…1. Clamped; ignored when `showsProgress` is NO.
 @property (nonatomic) double progress;
+/// YES to show the progress bar (a running or paused row).
 @property (nonatomic) BOOL showsProgress;
 /// The trailing button's glyph.
 @property (nonatomic, copy) NSString *actionSymbol;
-/// YES when the trailing button draws a progress ring instead of a glyph.
-@property (nonatomic) BOOL actionShowsRing;
 @property (nonatomic) BOOL actionEnabled;
 @end
 
