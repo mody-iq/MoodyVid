@@ -3,8 +3,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// The tab switcher: a grid of open tabs, each closing on its own button, plus a
-/// "new tab" tile. Presented as a sheet from the browser's toolbar.
+/// The tab switcher: a sheet of open tabs, each closing on its own button, plus
+/// a "new tab" tile. Presenting it full height (rather than as a medium-detent
+/// sheet with a visible Done-less header) is what makes it read as a switcher
+/// rather than a stray panel.
 @interface MVTabsViewController : UIViewController
 
 - (instancetype)initWithTabs:(NSArray<MVBrowserTab *> *)tabs activeIdentifier:(NSString *)activeID;

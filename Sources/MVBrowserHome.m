@@ -31,10 +31,8 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
 @property (nonatomic, strong) UIStackView *stack;
 @property (nonatomic, strong) UITextField *historySearch;
 @property (nonatomic, strong) UIStackView *shortcutGrid;
-@property (nonatomic, strong) UIStackView *bookmarkList;
 @property (nonatomic, strong) UIStackView *historyList;
 @property (nonatomic, strong) UILabel *historyEmpty;
-@property (nonatomic, strong) UILabel *bookmarkEmpty;
 @end
 
 @implementation MVBrowserHomeView
@@ -53,19 +51,23 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
         _stack = [UIStackView new];
         _stack.translatesAutoresizingMaskIntoConstraints = NO;
         _stack.axis = UILayoutConstraintAxisVertical;
-        _stack.spacing = 18;
+        _stack.spacing = 22;
         [_scroll addSubview:_stack];
 
+        // Pinned to the content guide, not the frame: the page must be able to
+        // scroll, and a stack of fixed-width tiles must not fight a frame pin.
+        UILayoutGuide *content = _scroll.contentLayoutGuide;
         [NSLayoutConstraint activateConstraints:@[
             [_scroll.topAnchor constraintEqualToAnchor:self.topAnchor],
             [_scroll.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
             [_scroll.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
             [_scroll.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
 
-            [_stack.topAnchor constraintEqualToAnchor:_scroll.topAnchor constant:18],
-            [_stack.leadingAnchor constraintEqualToAnchor:_scroll.leadingAnchor constant:18],
-            [_stack.trailingAnchor constraintEqualToAnchor:_scroll.trailingAnchor constant:-18],
-            [_stack.bottomAnchor constraintEqualToAnchor:_scroll.bottomAnchor constant:-24],
+            [_stack.topAnchor constraintEqualToAnchor:content.topAnchor constant:16],
+            [_stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-28],
+            [_stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:18],
+            [_stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-18],
+            [_stack.widthAnchor constraintEqualToAnchor:_scroll.frameLayoutGuide.widthAnchor constant:-36],
         ]];
 
         [self buildSections];
@@ -82,24 +84,26 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
     return label;
 }
 
+- (UILabel *)emptyLabel:(NSString *)key {
+    UILabel *label = [UILabel new];
+    label.text = [MVLang t:key];
+    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    label.textColor = [MVTheme secondaryText];
+    label.numberOfLines = 0;
+    return label;
+}
+
 - (void)buildSections {
-    // Shortcuts
+    // Shortcuts: the row of site tiles, the page's one loud element.
     [_stack addArrangedSubview:[self sectionTitle:@"Shortcuts"]];
     _shortcutGrid = [UIStackView new];
     _shortcutGrid.axis = UILayoutConstraintAxisVertical;
-    _shortcutGrid.spacing = 12;
+    _shortcutGrid.spacing = 10;
     [_stack addArrangedSubview:_shortcutGrid];
 
-    // Bookmarks
-    [_stack addArrangedSubview:[self sectionTitle:@"Bookmarks"]];
-    _bookmarkList = [UIStackView new];
-    _bookmarkList.axis = UILayoutConstraintAxisVertical;
-    _bookmarkList.spacing = 8;
-    [_stack addArrangedSubview:_bookmarkList];
-    _bookmarkEmpty = [self emptyLabel:@"No bookmarks yet"];
-    [_stack addArrangedSubview:_bookmarkEmpty];
-
-    // History
+    // One list, not three: bookmarked pages are the rows that carry a star, so
+    // history and bookmarks share the same section and the search field filters
+    // both. Three stacked sections made the page long and repetitive.
     [_stack addArrangedSubview:[self sectionTitle:@"History"]];
     _historySearch = [UITextField new];
     _historySearch.placeholder = [MVLang t:@"Search history"];
@@ -117,7 +121,7 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
 
     _historyList = [UIStackView new];
     _historyList.axis = UILayoutConstraintAxisVertical;
-    _historyList.spacing = 8;
+    _historyList.spacing = 6;
     [_stack addArrangedSubview:_historyList];
 
     _historyEmpty = [self emptyLabel:@"No history yet"];
@@ -127,17 +131,9 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
     [clear setTitle:[MVLang t:@"Clear history"] forState:UIControlStateNormal];
     [clear setTitleColor:[MVTheme danger] forState:UIControlStateNormal];
     clear.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    clear.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
     [clear addTarget:self action:@selector(clearTapped) forControlEvents:UIControlEventTouchUpInside];
     [_stack addArrangedSubview:clear];
-}
-
-- (UILabel *)emptyLabel:(NSString *)key {
-    UILabel *label = [UILabel new];
-    label.text = [MVLang t:key];
-    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    label.textColor = [MVTheme secondaryText];
-    label.numberOfLines = 0;
-    return label;
 }
 
 #pragma mark - Shortcuts
@@ -186,7 +182,6 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
 
 - (void)reload {
     [self rebuildShortcuts];
-    [self rebuildBookmarks];
     [self rebuildHistory];
     self.semanticContentAttribute = MVLang.shared.isRTL
         ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
@@ -217,24 +212,53 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
     }
 }
 
+/// A shortcut tile: the brand glyph over the site name. The brand colour is kept
+/// on the glyph only — a wall of saturated tiles was the loudest thing on the
+/// page — and the tile itself stays a quiet card. Built as a stack rather than a
+/// button so the icon-above-title layout does not depend on inset arithmetic.
 - (UIView *)tileForShortcut:(MVBrowserShortcut *)shortcut {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.backgroundColor = [MVTheme glassCard];
-    [MVTheme applyCardStyle:button cornerRadius:16];
-    button.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-    [button setTitle:shortcut.name forState:UIControlStateNormal];
-    [button setTitleColor:[MVTheme text] forState:UIControlStateNormal];
-    [button setImage:[UIImage systemImageNamed:shortcut.symbol] forState:UIControlStateNormal];
-    [button setTintColor:[self colorForHex:shortcut.color]];
-    // Title under the icon, the way a mobile new-tab grid looks.
-    button.configuration = nil;
-    button.titleEdgeInsets = UIEdgeInsetsMake(56, 0, 0, 0);
-    button.imageEdgeInsets = UIEdgeInsetsMake(-18, 0, 0, 0);
-    [button addTarget:self action:@selector(shortcutTapped:) forControlEvents:UIControlEventTouchUpInside];
-    button.accessibilityLabel = shortcut.name;
-    [button.heightAnchor constraintEqualToConstant:84].active = YES;
-    objc_setAssociatedObject(button, "MVShortcutURL", shortcut.url, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    return button;
+    UIView *tile = [UIView new];
+    [MVTheme applyCardStyle:tile cornerRadius:16];
+    tile.isAccessibilityElement = YES;
+    tile.accessibilityLabel = shortcut.name;
+    tile.accessibilityTraits = UIAccessibilityTraitButton;
+
+    UIImageView *icon = [UIImageView new];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.image = [UIImage systemImageNamed:shortcut.symbol];
+    icon.tintColor = [self colorForHex:shortcut.color];
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+
+    UILabel *label = [UILabel new];
+    label.text = shortcut.name;
+    label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    label.textColor = [MVTheme text];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.adjustsFontSizeToFitWidth = YES;
+    label.minimumScaleFactor = 0.75;
+
+    UIStackView *column = [UIStackView new];
+    column.translatesAutoresizingMaskIntoConstraints = NO;
+    column.axis = UILayoutConstraintAxisVertical;
+    column.alignment = UIStackViewAlignmentCenter;
+    column.spacing = 8;
+    [column addArrangedSubview:icon];
+    [column addArrangedSubview:label];
+    [tile addSubview:column];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [tile.heightAnchor constraintEqualToConstant:84],
+        [icon.widthAnchor constraintEqualToConstant:26],
+        [icon.heightAnchor constraintEqualToConstant:26],
+        [column.centerXAnchor constraintEqualToAnchor:tile.centerXAnchor],
+        [column.centerYAnchor constraintEqualToAnchor:tile.centerYAnchor],
+        [column.leadingAnchor constraintGreaterThanOrEqualToAnchor:tile.leadingAnchor constant:6],
+        [column.trailingAnchor constraintLessThanOrEqualToAnchor:tile.trailingAnchor constant:-6],
+    ]];
+
+    objc_setAssociatedObject(tile, "MVShortcutURL", shortcut.url, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [tile addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(shortcutTapped:)]];
+    return tile;
 }
 
 - (UIColor *)colorForHex:(NSString *)hex {
@@ -248,24 +272,27 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
                            alpha:1.0];
 }
 
-- (void)shortcutTapped:(UIButton *)sender {
-    NSString *url = objc_getAssociatedObject(sender, "MVShortcutURL");
-    if (url.length) [self.delegate homeView:self didSelectURL:url title:sender.accessibilityLabel];
+- (void)shortcutTapped:(UITapGestureRecognizer *)gesture {
+    NSString *url = objc_getAssociatedObject(gesture.view, "MVShortcutURL");
+    NSString *title = gesture.view.accessibilityLabel;
+    if (url.length) [self.delegate homeView:self didSelectURL:url title:title];
 }
 
-#pragma mark - Bookmarks / history
+#pragma mark - History
 
-- (UIView *)linkRowWithTitle:(NSString *)title url:(NSString *)url symbol:(NSString *)symbol {
+/// One history line: a glyph that is a star for a bookmarked page and a clock
+/// otherwise, then the title. Bookmarks are just the starred rows, so the page
+/// has one list instead of three.
+- (UIView *)linkRowWithTitle:(NSString *)title url:(NSString *)url favorite:(BOOL)favorite {
     UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-    row.backgroundColor = [MVTheme glassCard];
     [MVTheme applyCardStyle:row cornerRadius:12];
-    [row setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
-    [row setTintColor:[MVTheme accent]];
+    [row setImage:[UIImage systemImageNamed:(favorite ? @"star.fill" : @"clock")] forState:UIControlStateNormal];
+    [row setTintColor:favorite ? [MVTheme warning] : [MVTheme secondaryText]];
     [row setTitle:title forState:UIControlStateNormal];
     [row setTitleColor:[MVTheme text] forState:UIControlStateNormal];
     row.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     row.titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    row.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    row.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
     row.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
     [row.heightAnchor constraintEqualToConstant:42].active = YES;
     objc_setAssociatedObject(row, "MVLinkURL", url, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -280,28 +307,26 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
     if (url.length) [self.delegate homeView:self didSelectURL:url title:title];
 }
 
-- (void)rebuildBookmarks {
-    for (UIView *view in _bookmarkList.arrangedSubviews.copy) {
-        [_bookmarkList removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    NSArray<MVBrowserEntry *> *favorites = MVBrowserHistory.shared.favorites;
-    _bookmarkEmpty.hidden = favorites.count > 0;
-    for (MVBrowserEntry *entry in favorites) {
-        NSString *title = entry.title.length ? entry.title : entry.url;
-        [_bookmarkList addArrangedSubview:[self linkRowWithTitle:title url:entry.url symbol:@"star.fill"]];
-    }
-}
-
 - (void)rebuildHistory {
     for (UIView *view in _historyList.arrangedSubviews.copy) {
         [_historyList removeArrangedSubview:view];
         [view removeFromSuperview];
     }
+    NSArray<MVBrowserEntry *> *favorites = MVBrowserHistory.shared.favorites;
+    NSMutableSet<NSString *> *favoriteURLs = [NSMutableSet set];
+    for (MVBrowserEntry *entry in favorites) [favoriteURLs addObject:entry.url];
+
     NSString *filter = _historySearch.text.lowercaseString;
     NSMutableArray<MVBrowserEntry *> *rows = [NSMutableArray array];
+    // Bookmarked pages lead the list, then the rest of the history.
+    for (MVBrowserEntry *entry in favorites) {
+        if (filter.length &&
+            ![entry.title.lowercaseString containsString:filter] &&
+            ![entry.url.lowercaseString containsString:filter]) continue;
+        [rows addObject:entry];
+    }
     for (MVBrowserEntry *entry in MVBrowserHistory.shared.history) {
-        if (entry.favorite) continue;   // already shown under Bookmarks
+        if ([favoriteURLs containsObject:entry.url]) continue;   // already listed
         if (filter.length &&
             ![entry.title.lowercaseString containsString:filter] &&
             ![entry.url.lowercaseString containsString:filter]) continue;
@@ -311,7 +336,8 @@ static NSString *const kShortcutsKey = @"MVBrowserShortcuts";
     _historyEmpty.hidden = rows.count > 0;
     for (MVBrowserEntry *entry in rows) {
         NSString *title = entry.title.length ? entry.title : entry.url;
-        [_historyList addArrangedSubview:[self linkRowWithTitle:title url:entry.url symbol:@"clock"]];
+        BOOL favorite = [favoriteURLs containsObject:entry.url];
+        [_historyList addArrangedSubview:[self linkRowWithTitle:title url:entry.url favorite:favorite]];
     }
 }
 

@@ -37,6 +37,10 @@ extern NSString *const MVThemeDidChangeNotification;
 + (UIColor *)warning;
 + (UIColor *)danger;
 
+/// The tint for decorative icon chips, so a glyph's colour never competes with
+/// the status colours (success/warning/danger) that carry real meaning.
++ (UIColor *)iconTint;
+
 // Wallpapers
 //
 /// The gradient a screen draws behind its content. Both colours already adapt

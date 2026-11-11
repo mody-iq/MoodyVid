@@ -10,6 +10,7 @@
 #import "MVMediaConverter.h"
 #import "MVFileCardCell.h"
 #import "MVEmptyStateView.h"
+#import "MVThumbnailCache.h"
 
 typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeName = 0,
@@ -722,6 +723,8 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
     NSString *detail;
     NSString *symbol;
     UIImage *thumbnail = nil;
+    NSString *ext = path.pathExtension.lowercaseString;
+    BOOL isVideo = !isDir && MVExtensionIsVideo(ext);
     if (isDir) {
         detail = [self summaryForFolderAtPath:path];
         symbol = @"folder.fill";
@@ -729,9 +732,9 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
         NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
         long long size = [attrs[NSFileSize] longLongValue];
         NSDate *date = attrs[NSFileModificationDate];
-        NSString *ext = path.pathExtension.lowercaseString;
         NSString *thumbPath = [self thumbnailForPath:path];
         if (thumbPath) thumbnail = [UIImage imageWithContentsOfFile:thumbPath];
+        else if (isVideo) thumbnail = [MVThumbnailCache.shared cachedThumbnailForPath:path];
         symbol = [MVFileCardCell symbolForExtension:ext];
         // A kind filter lists files from anywhere in the tree, so the parent
         // folder is the only clue to where the file actually lives.
@@ -743,6 +746,15 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
     }
 
     [cell configureWithName:name detail:detail symbolName:symbol thumbnail:thumbnail isFolder:isDir];
+    cell.representedPath = path;
+    // A video with no cached artwork still gets a real frame: generate one in the
+    // background and drop it into the cell, which ignores it if it has since been
+    // reused for another file.
+    if (isVideo && !thumbnail) {
+        [MVThumbnailCache.shared thumbnailForPath:path completion:^(UIImage *image) {
+            [cell setThumbnailImage:image forPath:path];
+        }];
+    }
     __weak typeof(self) weakSelf = self;
     cell.onAction = ^{
         if (isDir) [weakSelf openFolderAtPath:path];

@@ -134,9 +134,19 @@
     if (self.onAction) self.onAction();
 }
 
+- (void)setThumbnailImage:(UIImage *)image forPath:(NSString *)path {
+    if (!image || !path.length || ![self.representedPath isEqualToString:path]) return;
+    _icon.image = image;
+    _icon.contentMode = UIViewContentModeScaleAspectFill;
+    _icon.tintColor = nil;
+    _iconTile.backgroundColor = [MVTheme separator];
+    _iconTile.layer.borderWidth = 0;
+}
+
 - (void)prepareForReuse {
     [super prepareForReuse];
     self.onAction = nil;
+    self.representedPath = nil;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {

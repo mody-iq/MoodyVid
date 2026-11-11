@@ -129,9 +129,10 @@
         [_stack addArrangedSubview:bar];
     }
 
-    // The facts, one per line.
+    // The facts worth showing: what it costs, how fast, how long, where it
+    // landed. The raw source URL and the engine's own status line are debug
+    // detail — the URL is one tap away under "Copy link".
     NSMutableArray<NSArray *> *facts = [NSMutableArray array];
-    [facts addObject:@[[MVLang t:@"Source URL"], row.url ?: @""]];
     if (row.totalBytes > 0) {
         [facts addObject:@[[MVLang t:@"Size"],
                            [NSString stringWithFormat:@"%@ %@ %@", [MVPaths formatBytes:row.doneBytes],
@@ -144,28 +145,26 @@
         [facts addObject:@[[MVLang t:@"Time left"], [MVPaths formatDuration:row.eta]]];
     }
     if (row.path.length) [facts addObject:@[[MVLang t:@"Saved path"], row.path.lastPathComponent]];
-    if (row.kind == MVRowKindTask) {
-        NSString *detail = [MVDownloadRow detailMessageForTask:row.task];
-        if (detail.length) [facts addObject:@[[MVLang t:@"Engine"], detail]];
-    }
 
-    UIView *factsCard = [UIView new];
-    [MVTheme applyCardStyle:factsCard cornerRadius:[MVTheme cardCornerRadius]];
-    UIStackView *factsStack = [UIStackView new];
-    factsStack.translatesAutoresizingMaskIntoConstraints = NO;
-    factsStack.axis = UILayoutConstraintAxisVertical;
-    factsStack.spacing = 10;
-    [factsCard addSubview:factsStack];
-    [NSLayoutConstraint activateConstraints:@[
-        [factsStack.topAnchor constraintEqualToAnchor:factsCard.topAnchor constant:14],
-        [factsStack.bottomAnchor constraintEqualToAnchor:factsCard.bottomAnchor constant:-14],
-        [factsStack.leadingAnchor constraintEqualToAnchor:factsCard.leadingAnchor constant:14],
-        [factsStack.trailingAnchor constraintEqualToAnchor:factsCard.trailingAnchor constant:-14],
-    ]];
-    for (NSArray *fact in facts) {
-        [factsStack addArrangedSubview:[self factRowTitle:fact[0] value:fact[1]]];
+    if (facts.count) {
+        UIView *factsCard = [UIView new];
+        [MVTheme applyCardStyle:factsCard cornerRadius:[MVTheme cardCornerRadius]];
+        UIStackView *factsStack = [UIStackView new];
+        factsStack.translatesAutoresizingMaskIntoConstraints = NO;
+        factsStack.axis = UILayoutConstraintAxisVertical;
+        factsStack.spacing = 10;
+        [factsCard addSubview:factsStack];
+        [NSLayoutConstraint activateConstraints:@[
+            [factsStack.topAnchor constraintEqualToAnchor:factsCard.topAnchor constant:14],
+            [factsStack.bottomAnchor constraintEqualToAnchor:factsCard.bottomAnchor constant:-14],
+            [factsStack.leadingAnchor constraintEqualToAnchor:factsCard.leadingAnchor constant:14],
+            [factsStack.trailingAnchor constraintEqualToAnchor:factsCard.trailingAnchor constant:-14],
+        ]];
+        for (NSArray *fact in facts) {
+            [factsStack addArrangedSubview:[self factRowTitle:fact[0] value:fact[1]]];
+        }
+        [_stack addArrangedSubview:factsCard];
     }
-    [_stack addArrangedSubview:factsCard];
 
     if (row.errorText.length) {
         UILabel *err = [UILabel new];
@@ -176,30 +175,63 @@
         [_stack addArrangedSubview:err];
     }
 
-    // Actions.
-    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    // One primary action, then the rest as a compact icon row: a stack of six
+    // full-width buttons is what made this sheet feel like a form.
     if (row.isFinished && row.path.length) {
-        [buttons addObject:[self actionButton:[MVLang t:@"Open"] symbol:@"play.fill" primary:YES
-                                      handler:^{ if (self.onPlay) self.onPlay(row); }]];
-        [buttons addObject:[self actionButton:[MVLang t:@"Share"] symbol:@"square.and.arrow.up" primary:NO
-                                      handler:^{ if (self.onShare) self.onShare(row); }]];
-        [buttons addObject:[self actionButton:[MVLang t:@"Save to Photos"] symbol:@"photo.on.rectangle" primary:NO
-                                      handler:^{ if (self.onSaveToPhotos) self.onSaveToPhotos(row); }]];
-        [buttons addObject:[self actionButton:[MVLang t:@"Show in Files"] symbol:@"folder" primary:NO
-                                      handler:^{ if (self.onRevealInFiles) self.onRevealInFiles(row); }]];
+        [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Open"] symbol:@"play.fill" primary:YES
+                                             handler:^{ if (self.onPlay) self.onPlay(row); }]];
+        [_stack addArrangedSubview:[self iconRow:@[
+            @[[MVLang t:@"Share"], @"square.and.arrow.up", ^{ if (self.onShare) self.onShare(row); }],
+            @[[MVLang t:@"Save to Photos"], @"photo.on.rectangle", ^{ if (self.onSaveToPhotos) self.onSaveToPhotos(row); }],
+            @[[MVLang t:@"Show in Files"], @"folder", ^{ if (self.onRevealInFiles) self.onRevealInFiles(row); }],
+            @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
+        ]]];
     } else if (row.isPaused || row.isFailed) {
-        [buttons addObject:[self actionButton:[MVLang t:@"Resume"] symbol:@"play.fill" primary:YES
-                                      handler:^{ [MVDownloadActions resumeRow:row]; [self dismissSelf]; }]];
+        [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Resume"] symbol:@"play.fill" primary:YES
+                                             handler:^{ [MVDownloadActions resumeRow:row]; [self dismissSelf]; }]];
+        [_stack addArrangedSubview:[self iconRow:@[
+            @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
+        ]]];
     } else if (row.isActive) {
-        [buttons addObject:[self actionButton:[MVLang t:@"Pause"] symbol:@"pause.fill" primary:YES
-                                      handler:^{ [MVDownloadActions pauseRow:row]; [self dismissSelf]; }]];
+        [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Pause"] symbol:@"pause.fill" primary:YES
+                                             handler:^{ [MVDownloadActions pauseRow:row]; [self dismissSelf]; }]];
+        [_stack addArrangedSubview:[self iconRow:@[
+            @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
+        ]]];
+    } else {
+        [_stack addArrangedSubview:[self iconRow:@[
+            @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
+        ]]];
     }
-    [buttons addObject:[self actionButton:[MVLang t:@"Copy link"] symbol:@"doc.on.doc" primary:NO
-                                  handler:^{ UIPasteboard.generalPasteboard.string = row.url; }]];
-    [buttons addObject:[self actionButton:[MVLang t:@"Delete"] symbol:@"trash" primary:NO destructive:YES
-                                  handler:^{ if (self.onDelete) self.onDelete(row); [self dismissSelf]; }]];
+    [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Delete"] symbol:@"trash" primary:NO destructive:YES
+                                         handler:^{ if (self.onDelete) self.onDelete(row); [self dismissSelf]; }]];
+}
 
-    for (UIButton *b in buttons) [_stack addArrangedSubview:b];
+/// A row of equally sized icon buttons, each with its own accessibility label.
+/// The labels are what a screen reader announces; the row stays compact because
+/// the icons carry the meaning visually.
+- (UIView *)iconRow:(NSArray<NSArray *> *)items {
+    UIStackView *row = [UIStackView new];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.distribution = UIStackViewDistributionFillEqually;
+    row.spacing = 10;
+    for (NSArray *item in items) {
+        NSString *title = item[0];
+        NSString *symbol = item[1];
+        void (^handler)(void) = item[2];
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        b.translatesAutoresizingMaskIntoConstraints = NO;
+        b.backgroundColor = [[MVTheme secondaryText] colorWithAlphaComponent:0.12];
+        b.tintColor = [MVTheme text];
+        b.layer.cornerRadius = 14.0;
+        b.layer.cornerCurve = kCACornerCurveContinuous;
+        [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+        b.accessibilityLabel = title;
+        [b.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+        [b addAction:[UIAction actionWithHandler:^(UIAction *a) { handler(); }] forControlEvents:UIControlEventTouchUpInside];
+        [row addArrangedSubview:b];
+    }
+    return row;
 }
 
 - (void)dismissSelf {

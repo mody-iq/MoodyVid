@@ -558,43 +558,40 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
 #pragma mark - Table
 
 typedef NS_ENUM(NSInteger, MVMoreSection) {
-    MVMoreSectionLanguage = 0,
-    MVMoreSectionAppearance,
-    MVMoreSectionWallpaper,
+    MVMoreSectionGeneral = 0,   // language, appearance, wallpaper
     MVMoreSectionBrowser,
     MVMoreSectionDownloads,
-    MVMoreSectionStorage,
+    MVMoreSectionStorage,       // free space + clear cache
     MVMoreSectionAbout,
 };
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 7; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case MVMoreSectionLanguage:   return 1;
-        case MVMoreSectionAppearance: return 1;
-        case MVMoreSectionWallpaper:  return 1;
-        case MVMoreSectionBrowser:    return 3;
-        case MVMoreSectionDownloads:  return 3;
-        case MVMoreSectionStorage:    return 2;
-        case MVMoreSectionAbout:      return 4;
+        case MVMoreSectionGeneral:   return 3;
+        case MVMoreSectionBrowser:   return 3;
+        case MVMoreSectionDownloads: return 3;
+        case MVMoreSectionStorage:   return 2;
+        case MVMoreSectionAbout:     return 4;
         default: return 0;
     }
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case MVMoreSectionBrowser:    return [MVLang t:@"Browser"];
-        case MVMoreSectionDownloads:  return [MVLang t:@"Download engine"];
-        case MVMoreSectionStorage:    return [MVLang t:@"Storage"];
-        case MVMoreSectionAbout:      return [MVLang t:@"About"];
+        case MVMoreSectionGeneral:   return [MVLang t:@"General"];
+        case MVMoreSectionBrowser:   return [MVLang t:@"Browser"];
+        case MVMoreSectionDownloads: return [MVLang t:@"Download engine"];
+        case MVMoreSectionStorage:   return [MVLang t:@"Storage"];
+        case MVMoreSectionAbout:     return [MVLang t:@"About"];
         default: return nil;
     }
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     NSString *title = [self tableView:tableView titleForHeaderInSection:section];
-    return title.length ? 44 : 16;
+    return title.length ? 44 : 0;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
@@ -638,27 +635,25 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     [cell setHasChevron:NO];
 
     switch (indexPath.section) {
-        case MVMoreSectionLanguage: {
-            cell.titleLabel.text = [MVLang t:@"Language"];
-            cell.subtitleLabel.text = [MVLang displayNameForCode:MVLang.shared.code];
-            [cell configureIcon:@"globe" tint:[MVTheme accent]];
-            [cell setHasChevron:YES];
-            break;
-        }
-        case MVMoreSectionAppearance: {
-            cell.titleLabel.text = [MVLang t:@"Appearance"];
-            cell.subtitleLabel.text = [self modeName];
-            [self attachToRight:cell view:[self modeBadge]];
-            [cell configureIcon:@"paintpalette.fill" tint:[MVTheme warning]];
-            [cell setHasChevron:YES];
-            break;
-        }
-        case MVMoreSectionWallpaper: {
-            cell.titleLabel.text = [MVLang t:@"Wallpaper"];
-            cell.subtitleLabel.text = [MVLang t:[self wallpaperLabelForKey:MVTheme.wallpaperName]];
-            [self attachToRight:cell view:[self wallpaperSwatchViewForName:MVTheme.wallpaperName]];
-            [cell configureIcon:@"photo.on.rectangle.angled" tint:[MVTheme success]];
-            [cell setHasChevron:YES];
+        case MVMoreSectionGeneral: {
+            if (indexPath.row == 0) {
+                cell.titleLabel.text = [MVLang t:@"Language"];
+                cell.subtitleLabel.text = [MVLang displayNameForCode:MVLang.shared.code];
+                [cell configureIcon:@"globe" tint:[MVTheme iconTint]];
+                [cell setHasChevron:YES];
+            } else if (indexPath.row == 1) {
+                cell.titleLabel.text = [MVLang t:@"Appearance"];
+                cell.subtitleLabel.text = [self modeName];
+                [self attachToRight:cell view:[self modeBadge]];
+                [cell configureIcon:@"paintpalette.fill" tint:[MVTheme iconTint]];
+                [cell setHasChevron:YES];
+            } else {
+                cell.titleLabel.text = [MVLang t:@"Wallpaper"];
+                cell.subtitleLabel.text = [MVLang t:[self wallpaperLabelForKey:MVTheme.wallpaperName]];
+                [self attachToRight:cell view:[self wallpaperSwatchViewForName:MVTheme.wallpaperName]];
+                [cell configureIcon:@"photo.on.rectangle.angled" tint:[MVTheme iconTint]];
+                [cell setHasChevron:YES];
+            }
             break;
         }
         case MVMoreSectionBrowser: {
@@ -666,17 +661,17 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
             if (indexPath.row == 0) {
                 cell.titleLabel.text = [MVLang t:@"Ad and popup blocking"];
                 cell.subtitleLabel.text = MVAdBlocker.shared.enabled ? [MVLang t:@"On"] : [MVLang t:@"Off"];
-                [cell configureIcon:@"shield.lefthalf.filled" tint:[MVTheme success]];
+                [cell configureIcon:@"shield.lefthalf.filled" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else if (indexPath.row == 1) {
                 cell.titleLabel.text = [MVLang t:@"Clear browser data"];
                 cell.subtitleLabel.text = [MVLang t:@"Tap to clear"];
-                [cell configureIcon:@"safari.fill" tint:[MVTheme accent]];
+                [cell configureIcon:@"safari.fill" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Wi-Fi only"];
                 cell.subtitleLabel.text = manager.wifiOnly ? [MVLang t:@"On"] : [MVLang t:@"Off"];
-                [cell configureIcon:@"wifi" tint:[MVTheme warning]];
+                [cell configureIcon:@"wifi" tint:[MVTheme iconTint]];
             }
             break;
         }
@@ -685,17 +680,17 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
             if (indexPath.row == 0) {
                 cell.titleLabel.text = [MVLang t:@"Connections per download"];
                 cell.subtitleLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)manager.maxConnections];
-                [cell configureIcon:@"arrow.triangle.branch" tint:[MVTheme accent]];
+                [cell configureIcon:@"arrow.triangle.branch" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else if (indexPath.row == 1) {
                 cell.titleLabel.text = [MVLang t:@"Concurrent downloads"];
                 cell.subtitleLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)manager.maxConcurrentTasks];
-                [cell configureIcon:@"square.stack.3d.up.fill" tint:[MVTheme accentSoft]];
+                [cell configureIcon:@"square.stack.3d.up.fill" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Speed limit"];
                 cell.subtitleLabel.text = [self speedLimitLabel];
-                [cell configureIcon:@"speedometer" tint:[MVTheme warning]];
+                [cell configureIcon:@"speedometer" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             }
             break;
@@ -706,11 +701,11 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
                 cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ %@ · %@ %@",
                                            [MVPaths formatBytes:[MVPaths freeSpace]], [MVLang t:@"available"],
                                            [MVPaths formatBytes:[MVPaths totalSpace]], [MVLang t:@"total"]];
-                [cell configureIcon:@"internaldrive.fill" tint:[MVTheme accentSoft]];
+                [cell configureIcon:@"internaldrive.fill" tint:[MVTheme iconTint]];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Clear cache"];
                 cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ — %@", [MVPaths formatBytes:[self cacheSize]], [MVLang t:@"Tap to clear"]];
-                [cell configureIcon:@"trash.fill" tint:[MVTheme danger]];
+                [cell configureIcon:@"trash.fill" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             }
             break;
@@ -719,20 +714,20 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
             if (indexPath.row == 0) {
                 cell.titleLabel.text = [MVLang t:@"Version"];
                 cell.subtitleLabel.text = [self engineVersion];
-                [cell configureIcon:@"info.circle.fill" tint:[MVTheme accent]];
+                [cell configureIcon:@"info.circle.fill" tint:[MVTheme iconTint]];
             } else if (indexPath.row == 1) {
                 cell.titleLabel.text = [MVLang t:@"Developer"];
                 cell.subtitleLabel.text = @"Mohammed-Mutar 🇮🇶";
-                [cell configureIcon:@"person.crop.circle.fill" tint:[MVTheme success]];
+                [cell configureIcon:@"person.crop.circle.fill" tint:[MVTheme iconTint]];
             } else if (indexPath.row == 2) {
                 cell.titleLabel.text = [MVLang t:@"Share logs"];
                 cell.subtitleLabel.text = [MVLang t:@"Send the log to the developer"];
-                [cell configureIcon:@"doc.text.magnifyingglass" tint:[MVTheme accentSoft]];
+                [cell configureIcon:@"doc.text.magnifyingglass" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Contact"];
                 cell.subtitleLabel.text = [MVLang t:@"Follow me on social media"];
-                [cell configureIcon:@"at" tint:[MVTheme accent]];
+                [cell configureIcon:@"at" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             }
             break;
@@ -745,14 +740,10 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     switch (indexPath.section) {
-        case MVMoreSectionLanguage:
-            [self showLanguageMenu];
-            break;
-        case MVMoreSectionAppearance:
-            [self showAppearanceMenu];
-            break;
-        case MVMoreSectionWallpaper:
-            [self showWallpaperMenu];
+        case MVMoreSectionGeneral:
+            if (indexPath.row == 0) [self showLanguageMenu];
+            else if (indexPath.row == 1) [self showAppearanceMenu];
+            else [self showWallpaperMenu];
             break;
         case MVMoreSectionBrowser:
             if (indexPath.row == 0) [self toggleAdBlock];

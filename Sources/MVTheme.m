@@ -71,6 +71,11 @@ static UIColor *MVColor(CGFloat dr, CGFloat dg, CGFloat db, CGFloat lr, CGFloat 
 + (UIColor *)warning      { return MVColor(1.00, 0.62, 0.04,  1.00, 0.58, 0.00); }
 + (UIColor *)danger       { return MVColor(1.00, 0.27, 0.23,  1.00, 0.23, 0.19); }
 
+// The single tint for decorative icon chips (settings rows, file tiles, media
+// cards). Status colours — success, warning, danger — stay reserved for real
+// state, so a row's colour always means something rather than being decoration.
++ (UIColor *)iconTint     { return MVColor(0.68, 0.68, 0.72,  0.36, 0.36, 0.41); }
+
 #pragma mark - Wallpapers
 
 // Each wallpaper lists any number of colour stops; each stop carries a dark and

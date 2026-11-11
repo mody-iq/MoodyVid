@@ -46,6 +46,9 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) MVStatusChipsView *chips;
 @property (nonatomic, strong) MVSectionHeader *summaryHeader;
+/// The chips + summary header, kept so its height can be re-fitted once the
+/// table has a real width (the first fit happens before the view is laid out).
+@property (nonatomic, strong) UIView *tableHeader;
 @property (nonatomic, strong) MVEmptyStateView *emptyState;
 @property (nonatomic, strong) MVFloatingAddButton *addButton;
 @property (nonatomic, strong) UIView *editBar;
@@ -128,6 +131,7 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 /// scroll away with the content instead of eating vertical space on a phone.
 - (void)buildChips {
     UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 96)];
+    self.tableHeader = header;
 
     self.chips = [[MVStatusChipsView alloc] initWithFrame:CGRectZero];
     self.chips.translatesAutoresizingMaskIntoConstraints = NO;
@@ -170,7 +174,9 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     [self.view addSubview:self.emptyState];
     [NSLayoutConstraint activateConstraints:@[
         [self.emptyState.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.emptyState.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor constant:-40],
+        // Top-aligned just under the chips rather than centred: with the search
+        // bar and the header above it, centring left a wide empty band at the top.
+        [self.emptyState.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:150],
         [self.emptyState.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
         [self.emptyState.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
     ]];
@@ -329,6 +335,24 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     for (CALayer *layer in [self.view.layer.sublayers copy]) {
         if ([layer.name isEqualToString:@"MVWallpaperLayer"]) layer.frame = self.view.bounds;
     }
+    [self fitTableHeader];
+}
+
+/// A table header is measured the first time it is assigned, when the table is
+/// still zero-width, so the chips' own width is unknown and the header can be
+/// left taller than its content — the blank band under the search bar. Re-fit it
+/// once a real width exists, and only reassign when the height actually changed,
+/// because assigning a header view mid-scroll cancels the gesture.
+- (void)fitTableHeader {
+    UIView *header = self.tableHeader;
+    CGFloat width = self.tableView.bounds.size.width;
+    if (!header || width <= 0 || self.editingMode) return;
+    CGSize size = [header systemLayoutSizeFittingSize:CGSizeMake(width, 0)
+                         withHorizontalFittingPriority:UILayoutPriorityRequired
+                               verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+    if (fabs(size.height - header.frame.size.height) < 0.5) return;
+    header.frame = CGRectMake(0, 0, width, size.height);
+    self.tableView.tableHeaderView = header;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {

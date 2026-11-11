@@ -166,6 +166,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Could not move the file": @"تعذّر نقل الملف",
 
             // Settings
+            @"General": @"عام",
             @"Language": @"اللغة",
             @"Arabic": @"العربية",
             @"English": @"الإنجليزية",
@@ -279,6 +280,7 @@ static NSDictionary<NSString *, NSString *> *MVTable(void) {
             @"Find on page": @"بحث في الصفحة",
             @"Not found": @"غير موجود",
             @"A link is on the clipboard — tap to open it": @"يوجد رابط في الحافظة — اضغط لفتحه",
+            @"Paste and go": @"الصق وانتقل",
             @"Ad and popup blocking": @"حجب الإعلانات والنوافذ المنبثقة",
             @"Share logs": @"مشاركة السجلات",
             @"Clear browser data": @"مسح بيانات المتصفح",

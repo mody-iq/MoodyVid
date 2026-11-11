@@ -11,11 +11,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, copy, nullable) void (^onAction)(void);
 
+/// The file path this cell currently shows, so a thumbnail generated in the
+/// background can be dropped if the cell was reused for another file meanwhile.
+@property (nonatomic, copy, nullable) NSString *representedPath;
+
 - (void)configureWithName:(NSString *)name
                    detail:(NSString *)detail
                symbolName:(NSString *)symbolName
                 thumbnail:(nullable UIImage *)thumbnail
                  isFolder:(BOOL)isFolder;
+
+/// Swaps in a thumbnail once it has been generated, keeping the current glyph
+/// until then. A no-op if the cell no longer represents that file.
+- (void)setThumbnailImage:(nullable UIImage *)image forPath:(NSString *)path;
 
 /// The glyph for a file extension, matching the Files browser's own mapping.
 + (NSString *)symbolForExtension:(NSString *)ext;

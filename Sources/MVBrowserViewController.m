@@ -141,8 +141,6 @@ static id gParkedObserver = nil;
 @property (nonatomic, strong) UIButton *menuButton;
 @property (nonatomic, strong) UIButton *sniffButton;
 @property (nonatomic, strong) UILabel *sniffBadge;
-@property (nonatomic, strong) UIButton *clipboardBanner;
-@property (nonatomic, strong) UILabel *clipboardLabel;
 @property (nonatomic, strong) UIView *toolbar;
 @property (nonatomic, strong) UIStackView *toolbarRow;
 /// The sniff button's distance from the bottom safe area, kept so the button can
@@ -283,7 +281,6 @@ static id gParkedObserver = nil;
         self.homeView.hidden = YES;
         [self.view bringSubviewToFront:self.sniffButton];
         [self.view bringSubviewToFront:self.loadBar];
-        [self.view bringSubviewToFront:self.clipboardBanner];
     }
     if (tab.savedScrollY > 0) {
         NSString *js = [NSString stringWithFormat:@"window.scrollTo(0, %f);", tab.savedScrollY];
@@ -409,11 +406,6 @@ static id gParkedObserver = nil;
     [self refreshText];
 }
 
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    [self checkClipboardBanner];
-}
-
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     for (CALayer *layer in [self.view.layer.sublayers copy]) {
@@ -474,6 +466,9 @@ static id gParkedObserver = nil;
     self.forwardButton.enabled = tab.webView.canGoForward;
     [self.tabsButton setTitle:[NSString stringWithFormat:@"%lu", (unsigned long)self.tabs.count]
                      forState:UIControlStateNormal];
+    // The menu's bookmark row and its wording depend on the active tab, so it is
+    // rebuilt on every toolbar sync rather than captured once at build time.
+    self.menuButton.menu = [self browserMenu];
 }
 
 #pragma mark - Home
@@ -498,7 +493,6 @@ static id gParkedObserver = nil;
     [self.view bringSubviewToFront:self.homeView];
     [self.view bringSubviewToFront:self.sniffButton];
     [self.view bringSubviewToFront:self.loadBar];
-    [self.view bringSubviewToFront:self.clipboardBanner];
     [self syncToolbar];
     [self refreshSniffBadge];
 }
@@ -526,7 +520,7 @@ static id gParkedObserver = nil;
     [button setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
     button.tintColor = [MVTheme accent];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    if (action) [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
 
@@ -557,7 +551,9 @@ static id gParkedObserver = nil;
     self.forwardButton = [self toolbarButton:@"chevron.forward" action:@selector(goForward)];
     self.homeButton = [self toolbarButton:@"house" action:@selector(homeTapped)];
     self.tabsButton = [self toolbarButton:@"square.on.square" action:@selector(showTabs)];
-    self.menuButton = [self toolbarButton:@"ellipsis.circle" action:@selector(showMenu)];
+    self.menuButton = [self toolbarButton:@"ellipsis.circle" action:nil];
+    self.menuButton.showsMenuAsPrimaryAction = YES;
+    self.menuButton.menu = [self browserMenu];
     [self.tabsButton setTitleColor:[MVTheme accent] forState:UIControlStateNormal];
     self.tabsButton.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
 
@@ -602,8 +598,6 @@ static id gParkedObserver = nil;
     self.loadBar.progressTintColor = [MVTheme accent];
     [self.view addSubview:self.loadBar];
 
-    [self buildClipboardBanner];
-
     [NSLayoutConstraint activateConstraints:@[
         [self.toolbar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:6],
         [self.toolbar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:10],
@@ -645,62 +639,13 @@ static id gParkedObserver = nil;
     ]];
 }
 
-- (void)buildClipboardBanner {
-    self.clipboardBanner = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.clipboardBanner.translatesAutoresizingMaskIntoConstraints = NO;
-    self.clipboardBanner.backgroundColor = [MVTheme glassCard];
-    [MVTheme applyCardStyle:self.clipboardBanner cornerRadius:14];
-    self.clipboardBanner.hidden = YES;
-    [self.clipboardBanner addTarget:self action:@selector(clipboardBannerTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.clipboardBanner];
+#pragma mark - Clipboard
 
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"doc.on.clipboard"]];
-    icon.tintColor = [MVTheme accent];
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.clipboardBanner addSubview:icon];
-
-    self.clipboardLabel = [UILabel new];
-    self.clipboardLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.clipboardLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    self.clipboardLabel.textColor = [MVTheme text];
-    self.clipboardLabel.numberOfLines = 1;
-    self.clipboardLabel.text = [MVLang t:@"A link is on the clipboard — tap to open it"];
-    [self.clipboardBanner addSubview:self.clipboardLabel];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.clipboardBanner.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:14],
-        [self.clipboardBanner.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-14],
-        [self.clipboardBanner.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:58],
-        [self.clipboardBanner.heightAnchor constraintEqualToConstant:44],
-
-        [icon.leadingAnchor constraintEqualToAnchor:self.clipboardBanner.leadingAnchor constant:12],
-        [icon.centerYAnchor constraintEqualToAnchor:self.clipboardBanner.centerYAnchor],
-        [icon.widthAnchor constraintEqualToConstant:20],
-        [icon.heightAnchor constraintEqualToConstant:20],
-
-        [self.clipboardLabel.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:10],
-        [self.clipboardLabel.trailingAnchor constraintEqualToAnchor:self.clipboardBanner.trailingAnchor constant:-12],
-        [self.clipboardLabel.centerYAnchor constraintEqualToAnchor:self.clipboardBanner.centerYAnchor],
-    ]];
-}
-
-#pragma mark - Clipboard banner
-
-/// Checks the pasteboard without reading it. iOS 16+ prompts the user before an
-/// app may read the clipboard, and prompting on every launch is hostile, so the
-/// banner only *offers*: the content is read when the user taps.
-- (void)checkClipboardBanner {
-    if (!UIPasteboard.generalPasteboard.hasStrings) {
-        self.clipboardBanner.hidden = YES;
-        return;
-    }
-    self.clipboardBanner.hidden = NO;
-    [self.view bringSubviewToFront:self.clipboardBanner];
-}
-
-- (void)clipboardBannerTapped {
+/// The clipboard is only ever consulted on an explicit tap, never on launch:
+/// reading the pasteboard raises iOS's own "Paste" prompt, and an app that
+/// triggers it unprompted reads as hostile. The menu carries the entry point.
+- (void)pasteFromClipboard {
     NSString *text = UIPasteboard.generalPasteboard.string;
-    self.clipboardBanner.hidden = YES;
     if (!text.length) return;
     text = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if ([text.lowercaseString hasPrefix:@"magnet:"]) {
@@ -737,7 +682,6 @@ static id gParkedObserver = nil;
     self.homeView.hidden = YES;
     [self.view bringSubviewToFront:self.sniffButton];
     [self.view bringSubviewToFront:self.loadBar];
-    [self.view bringSubviewToFront:self.clipboardBanner];
     MVBrowserTab *tab = self.activeTab;
     tab.url = address;
     [tab.webView loadRequest:[NSURLRequest requestWithURL:url]];
@@ -1110,9 +1054,12 @@ static id gParkedObserver = nil;
     MVTabsViewController *tabs = [[MVTabsViewController alloc] initWithTabs:self.tabs
                                                           activeIdentifier:self.activeTabID];
     tabs.modalPresentationStyle = UIModalPresentationPageSheet;
-    UISheetPresentationController *presentation = tabs.sheetPresentationController;
-    if (presentation) presentation.detents = @[[UISheetPresentationControllerDetent mediumDetent],
-                                               [UISheetPresentationControllerDetent largeDetent]];
+    // Full height, no detents: a tab switcher shown as a short half-sheet with
+    // no visible dismiss control is what made this window feel broken.
+    if (@available(iOS 15.0, *)) {
+        tabs.sheetPresentationController.prefersGrabberVisible = YES;
+        tabs.sheetPresentationController.preferredCornerRadius = 24;
+    }
     __weak typeof(self) weakSelf = self;
     tabs.onSelect = ^(NSString *identifier) {
         for (MVBrowserTab *tab in weakSelf.tabs) {
@@ -1124,42 +1071,46 @@ static id gParkedObserver = nil;
     [self presentViewController:tabs animated:YES completion:nil];
 }
 
-- (void)showMenu {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-
+/// The browser's own menu, attached to the toolbar's ellipsis as a pull-down.
+/// A UIMenu rather than an action sheet: it anchors to the button that opened
+/// it, keeps its icons, and needs no Cancel row or popover plumbing.
+- (UIMenu *)browserMenu {
     MVBrowserTab *tab = self.activeTab;
     BOOL favorite = [MVBrowserHistory.shared isFavorite:tab.url];
-    [sheet addAction:[UIAlertAction actionWithTitle:(favorite ? [MVLang t:@"Remove bookmark"] : [MVLang t:@"Add bookmark"])
-                                              style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    __weak typeof(self) weakSelf = self;
+
+    UIAction *bookmark = [UIAction actionWithTitle:(favorite ? [MVLang t:@"Remove bookmark"] : [MVLang t:@"Add bookmark"])
+                                             image:[UIImage systemImageNamed:(favorite ? @"star.slash" : @"star")]
+                                        identifier:nil handler:^(UIAction *a) {
         [MVBrowserHistory.shared setFavorite:tab.url title:tab.title favorite:!favorite];
-    }]];
+    }];
+    UIAction *paste = [UIAction actionWithTitle:[MVLang t:@"Paste and go"]
+                                          image:[UIImage systemImageNamed:@"doc.on.clipboard"]
+                                     identifier:nil handler:^(UIAction *a) {
+        [weakSelf pasteFromClipboard];
+    }];
+    UIAction *desktop = [UIAction actionWithTitle:(self.desktopMode ? [MVLang t:@"Mobile site"] : [MVLang t:@"Desktop site"])
+                                            image:[UIImage systemImageNamed:(self.desktopMode ? @"iphone" : @"desktopcomputer")]
+                                       identifier:nil handler:^(UIAction *a) {
+        [weakSelf toggleDesktopMode];
+    }];
+    UIAction *find = [UIAction actionWithTitle:[MVLang t:@"Find on page"]
+                                         image:[UIImage systemImageNamed:@"magnifyingglass"]
+                                    identifier:nil handler:^(UIAction *a) {
+        [weakSelf promptFindInPage];
+    }];
+    UIAction *share = [UIAction actionWithTitle:[MVLang t:@"Share"]
+                                          image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                     identifier:nil handler:^(UIAction *a) {
+        [weakSelf shareCurrentPage];
+    }];
+    UIAction *reload = [UIAction actionWithTitle:[MVLang t:@"Reload"]
+                                           image:[UIImage systemImageNamed:@"arrow.clockwise"]
+                                      identifier:nil handler:^(UIAction *a) {
+        [weakSelf.activeTab.webView reload];
+    }];
 
-    [sheet addAction:[UIAlertAction actionWithTitle:(self.desktopMode ? [MVLang t:@"Mobile site"] : [MVLang t:@"Desktop site"])
-                                              style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self toggleDesktopMode];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Find on page"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self promptFindInPage];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self shareCurrentPage];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"New tab"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self openURLInNewTab:nil];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Reload"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self.activeTab.webView reload];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = self.menuButton;
-    sheet.popoverPresentationController.sourceRect = self.menuButton.bounds;
-    [self presentViewController:sheet animated:YES completion:nil];
+    return [UIMenu menuWithTitle:@"" children:@[bookmark, paste, reload, desktop, find, share]];
 }
 
 - (void)toggleDesktopMode {
@@ -1366,7 +1317,6 @@ static id gParkedObserver = nil;
     self.addressField.attributedPlaceholder =
         [[NSAttributedString alloc] initWithString:[MVLang t:@"Search or enter address"]
                                         attributes:@{NSForegroundColorAttributeName: [MVTheme secondaryText]}];
-    self.clipboardLabel.text = [MVLang t:@"A link is on the clipboard — tap to open it"];
     self.sniffButton.accessibilityLabel = [MVLang t:@"Found media"];
     self.view.semanticContentAttribute = MVLang.shared.isRTL
         ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
