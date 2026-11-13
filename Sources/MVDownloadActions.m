@@ -34,10 +34,7 @@
         [[MVDownloadManager shared] removeTask:row.task deleteFile:deleteFile];
         return;
     }
-    if (deleteFile && row.path.length) {
-        [[NSFileManager defaultManager] removeItemAtPath:row.path error:nil];
-    }
-    [MVDownloadStore.shared remove:row.record];
+    [[MVDownloadEngine shared] removeDownload:row.record.identifier deleteFile:deleteFile];
 }
 
 + (void)retryRow:(MVDownloadRow *)row {

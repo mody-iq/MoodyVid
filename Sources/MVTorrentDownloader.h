@@ -11,15 +11,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// piece's SHA-1 before it is written to disk, so a corrupt or hostile peer
 /// cannot poison the file.
 ///
-/// Only HTTP(S) trackers are used; UDP trackers and the DHT are not spoken, and
-/// a magnet link (which needs the BEP 9 metadata exchange) is reported as a
-/// later phase rather than pretended to work.
+/// Only HTTP(S) trackers are used; UDP trackers and the DHT are not spoken.
+/// Version 1 magnet links can fetch metadata from a peer via BEP 9; version 2
+/// magnets and magnets without usable trackers are not supported.
 @interface MVTorrentDownloader : NSObject
 
 + (instancetype)shared;
 
-/// Global speed cap in bytes/second; 0 is unlimited. Kept for parity with the
-/// other engines so the manager's setting applies everywhere.
+/// Reserved for a future torrent throttle; currently not enforced by peers.
 @property (nonatomic) long long speedLimit;
 
 - (BOOL)isRunningTask:(MVDownloadTask *)task;
@@ -31,9 +30,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)pauseTask:(MVDownloadTask *)task;
 - (void)cancelTask:(MVDownloadTask *)task;
-
-/// Deletes the files a torrent wrote (the folder it owns).
-+ (void)removePartFilesForTask:(MVDownloadTask *)task;
+/// Call on the main thread. Deletion waits for peer writes to stop, then checks
+/// current saved references and skips a task that has already been restarted.
+- (void)cancelTask:(MVDownloadTask *)task deletingFiles:(BOOL)deleteFiles;
 
 @end
 

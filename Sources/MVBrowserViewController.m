@@ -404,6 +404,8 @@ static id gParkedObserver = nil;
     [super viewWillAppear:animated];
     [MVTheme applyWallpaperTo:self.view];
     [self refreshText];
+    // Settings may have cleared history while the browser was hidden.
+    if (self.showingHome) [self.homeView reload];
 }
 
 - (void)viewDidLayoutSubviews {

@@ -19,6 +19,10 @@ FOUNDATION_EXPORT NSString *const MVPathsThumbsDir;
 /// Documents/MoodyVid, where the engine writes downloads. Created on demand.
 + (NSString *)downloads;
 
+/// Private yt-dlp workspace for a record. The path convention matches Python;
+/// the identifier is hashed so it can never introduce path components.
++ (nullable NSString *)pythonWorkDirectoryForIdentifier:(NSString *)identifier;
+
 /// The folder a category saves into, e.g. Documents/MoodyVid/Videos. Every
 /// category folder is created on demand so the Files app shows a tidy tree.
 + (NSString *)directoryForCategory:(NSString *)category;
@@ -36,6 +40,10 @@ FOUNDATION_EXPORT NSString *const MVPathsThumbsDir;
 
 /// Strips path separators and control characters from a server-supplied name.
 + (NSString *)sanitizeFilename:(NSString *)filename;
+
+/// Conservative overlap for file/folder ownership, including symlinks and
+/// parent/child paths. Use before deleting a path another record may reference.
++ (BOOL)path:(nullable NSString *)path overlapsPath:(nullable NSString *)other;
 
 /// The yt-dlp cache directory.
 + (NSString *)cache;

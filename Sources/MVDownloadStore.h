@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "MVQueuePolicy.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -6,14 +7,14 @@ NS_ASSUME_NONNULL_BEGIN
 extern NSString *const MVDownloadStoreDidChangeNotification;
 
 typedef NS_ENUM(NSInteger, MVDownloadState) {
-    MVDownloadStateWaiting = 0,
-    MVDownloadStateActive = 1,
-    MVDownloadStateCompleted = 2,
-    MVDownloadStateFailed = 3,
-    MVDownloadStateCancelled = 4,
+    MVDownloadStateWaiting = MVPythonWaiting,
+    MVDownloadStateActive = MVPythonActive,
+    MVDownloadStateCompleted = MVPythonCompleted,
+    MVDownloadStateFailed = MVPythonFailed,
+    MVDownloadStateCancelled = MVPythonCancelled,
     /// Stopped by the user but kept resumable (the .part file is left on disk),
     /// so it is deliberately distinct from Cancelled.
-    MVDownloadStatePaused = 5,
+    MVDownloadStatePaused = MVPythonPaused,
 };
 
 /// One download, as shown in the Downloads and Files screens.

@@ -15,12 +15,13 @@ on:
         type: boolean
         default: false
 
+# Test and build jobs can read source/dependencies, but cannot modify releases.
+# Only the guarded publish job below receives a write token.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  # Fast gate: the downloader's Python contract is testable off-device, and these
-  # run in seconds on Linux. If they fail there is no point paying for macOS.
+  # Fast gate: the downloader's Python contract is testable off-device.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -36,8 +37,17 @@ jobs:
       - name: Install test dependencies
         run: pip install Pillow
 
-      - name: Run tests
+      - name: Run Python tests
         run: python3 -m unittest discover -s tests -v
+
+      - name: Run portable cookie policy tests
+        run: bash scripts/http-policy-tests.sh
+
+      - name: Run portable transfer and torrent policy tests
+        run: bash scripts/transfer-policy-tests.sh
+
+      - name: Check translations
+        run: python3 scripts/check-strings.py
 
   build:
     needs: test
@@ -64,20 +74,23 @@ jobs:
           python3 --version
           which ldid || true
 
-      # The torrent core (bencode, SHA-1, magnet, metadata, tracker) is pure
-      # Foundation, so it is proven here with the system clang before the device
-      # build — a wrong info-hash or piece offset would otherwise only show up as
-      # a download that never verifies.
       - name: Run torrent core tests
         run: bash scripts/torrent-tests.sh
+
+      - name: Run native queue recovery tests
+        run: bash scripts/queue-tests.sh
+
+      - name: Run native privacy tests
+        run: bash scripts/privacy-tests.sh
+
+      - name: Run native transfer tests
+        run: bash scripts/transfer-tests.sh
 
       - name: Build IPA
         env:
           BUILD_NUMBER: ${{ github.run_number }}
           GH_TOKEN: ${{ github.token }}
-          # The side-by-side copy keeps its own identity so it installs next to the
-          # shipping app instead of replacing it. Both share the same Documents
-          # folder inside their own container, so the two are fully independent.
+          # A side-by-side copy has a separate identity and sandbox.
           MV_APP_NAME: ${{ inputs.variant && 'MoodyVidTest' || 'MoodyVid' }}
           MV_BUNDLE_ID: ${{ inputs.variant && 'com.mody.moodyvid.test' || 'com.mody.moodyvid' }}
           MV_DISPLAY_NAME: ${{ inputs.variant && 'MoodyVid Test' || 'MoodyVid' }}
@@ -85,6 +98,7 @@ jobs:
           MV_ICON_BOTTOM: ${{ inputs.variant && '95,50,160' || '8,116,132' }}
         run: bash scripts/build.sh
 
+      # Every branch and test variant still gets a downloadable Actions artifact.
       - name: Upload IPA
         uses: actions/upload-artifact@v7
         with:
@@ -92,17 +106,75 @@ jobs:
           path: ${{ inputs.variant && 'build/MoodyVidTest.ipa' || 'build/MoodyVid.ipa' }}
           if-no-files-found: error
 
-      # The artifact above is private and disappears after 90 days. The release
-      # asset below is public and permanent, and is what the AltStore source
-      # points at — so a user who installs once keeps getting updates.
+  # A push or manual non-variant run on main is the only official publisher.
+  # Experimental branches, tags and variant builds cannot reach this job.
+  publish:
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' && !inputs.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: moodyvid-official-publish
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Builds can finish out of order. A later code or source.json change
+      # makes this artifact stale. Docs-only commits are safe and do not start
+      # another build, so base the source.json commit on that newer docs tip.
+      - name: Check current main revision
+        id: revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main
+          TIP=$(git rev-parse FETCH_HEAD)
+          if python3 scripts/publish_revision.py "$GITHUB_SHA" "$TIP"; then
+            git checkout --detach "$TIP"
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            CODE=$?
+            if [ "$CODE" -ne 1 ]; then exit "$CODE"; fi
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'Main has newer code or a newer publication; skipping this build.'
+          fi
+
+      - name: Download official IPA artifact
+        if: ${{ steps.revision.outputs.current == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: MoodyVid-ipa
+          path: build
+
+      - name: Validate official IPA metadata
+        if: ${{ steps.revision.outputs.current == 'true' }}
+        run: python3 scripts/ipa_metadata.py build/MoodyVid.ipa --expected-build "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
       - name: Publish release
-        if: ${{ !inputs.variant }}
+        if: ${{ steps.revision.outputs.current == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/Payload/MoodyVid.app/Info.plist)
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          set -euo pipefail
+          # A new commit can land after the first revision check while the IPA
+          # is downloading. Recheck before changing release metadata and again
+          # immediately before replacing the asset. GitHub offers no atomic
+          # operation across a branch update and a release upload.
+          check_main_is_publishable() {
+            local tip
+            git fetch --no-tags origin refs/heads/main
+            tip=$(git rev-parse FETCH_HEAD)
+            if ! python3 scripts/publish_revision.py "$GITHUB_SHA" "$tip"; then
+              echo '::error::Main moved since this build; refusing to modify the release.'
+              return 1
+            fi
+          }
+          check_main_is_publishable
           NOTES=$(cat <<EOF
           **MoodyVid $VERSION** (build ${{ github.run_number }})
 
@@ -116,19 +188,17 @@ jobs:
           Or download the IPA below and sign it yourself.
           EOF
           )
-          # One rolling release on the tag "latest". --clobber replaces its assets,
-          # so the download URL in source.json is fixed for the life of the repo.
+          # One rolling release. --clobber keeps the download URL stable.
           gh release view latest --repo "${{ github.repository }}" >/dev/null 2>&1 \
             || gh release create latest --repo "${{ github.repository }}" \
                  --title "MoodyVid — أحدث إصدار" --notes "$NOTES"
           gh release edit latest --repo "${{ github.repository }}" --notes "$NOTES"
+          check_main_is_publishable
           gh release upload latest build/MoodyVid.ipa Resources/icon-source.png \
             --repo "${{ github.repository }}" --clobber
 
-      # A source.json that points at a dead URL installs nothing, and the user
-      # sees only a generic failure. Prove the link works before publishing it.
       - name: Verify download link
-        if: ${{ !inputs.variant }}
+        if: ${{ steps.revision.outputs.current == 'true' }}
         run: |
           set -e
           URL="https://github.com/${{ github.repository }}/releases/download/latest/MoodyVid.ipa"
@@ -141,13 +211,9 @@ jobs:
           echo "ERROR: $URL did not resolve to 200"; exit 1
 
       - name: Write AltStore source
-        if: ${{ !inputs.variant }}
+        if: ${{ steps.revision.outputs.current == 'true' }}
         run: |
           set -e
-          SIZE=$(stat -f%z build/MoodyVid.ipa)
-          # Read the requirement from the app itself, so the published source can
-          # never disagree with what the binary actually supports.
-          MINOS=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" build/Payload/MoodyVid.app/Info.plist)
           python3 scripts/make_source.py \
             --ipa build/MoodyVid.ipa \
             --version "$VERSION" \
@@ -162,14 +228,19 @@ jobs:
             --out source.json
 
       - name: Commit source.json
-        if: ${{ !inputs.variant }}
+        if: ${{ steps.revision.outputs.current == 'true' }}
         run: |
           set -e
           git config user.name "moodyvid-bot"
           git config user.email "moodyvid-bot@users.noreply.github.com"
+          BASE=$(git rev-parse HEAD)
           git add source.json
           git diff --cached --quiet && { echo "source.json unchanged"; exit 0; }
           git commit -m "release: MoodyVid $VERSION (build ${{ github.run_number }})"
-          # Explicit ref: a checkout of a tag or a detached HEAD has no upstream
-          # to push to, and this must always land on the branch the raw URL reads.
-          git push origin HEAD:${GITHUB_REF_NAME}
+          git fetch --no-tags origin refs/heads/main
+          TIP=$(git rev-parse FETCH_HEAD)
+          # If only docs moved since publication, preserve them while committing.
+          # Any code/new source change aborts instead of overwriting it.
+          python3 scripts/publish_revision.py "$BASE" "$TIP"
+          git rebase "$TIP"
+          git push origin HEAD:refs/heads/main

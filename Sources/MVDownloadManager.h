@@ -10,8 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// task finishes. The UI only ever talks to this class, so a direct file, an HLS
 /// stream and (later) a torrent all behave the same way in the Downloads list.
 ///
-/// Phase 1 ships the direct-file path plus the queue and the persistence. The
-/// HLS and torrent engines plug in at the same seam later without touching the UI.
+/// The native direct, HLS, DASH and torrent engines plug in at the same seam.
 @interface MVDownloadManager : NSObject
 
 + (instancetype)shared;
@@ -29,8 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Queues a sniffed item, choosing the engine from its kind: HLS, DASH,
 /// torrent, or a plain HTTP file. A magnet link is queued like any other
-/// torrent; its engine reports the honest reason it cannot fetch the metadata
-/// yet rather than leaving the row stuck at 0%.
+/// torrent; tracker-backed v1 magnets can fetch metadata through BEP 9.
 - (MVDownloadTask *)enqueueItem:(MVSnifferItem *)item;
 
 /// Same, but reports whether a new task was created. `added` is set to NO when
@@ -67,9 +65,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) NSUInteger maxConnections;
 /// How many tasks run at once. Persisted.
 @property (nonatomic) NSUInteger maxConcurrentTasks;
-/// Global speed cap in bytes/second; 0 is unlimited. Persisted.
+/// Approximate per-direct-transfer cap in bytes/second; 0 is unlimited.
+/// Other engines are not throttled. Persisted.
 @property (nonatomic) long long speedLimit;
-/// When YES, tasks only start on Wi-Fi.
+/// When YES, both download queues wait for an observed Wi-Fi default path
+/// before starting. This is not a cellular firewall for running sockets.
 @property (nonatomic) BOOL wifiOnly;
 
 @end

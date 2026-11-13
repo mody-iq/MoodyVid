@@ -18,8 +18,18 @@ fi
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
-SOURCES="Sources/MVBencode.m Sources/MVSHA1.m Sources/MVMagnet.m Sources/MVTorrentMetadata.m Sources/MVTorrentTracker.m"
+SOURCES="Sources/MVBencode.m Sources/MVSHA1.m Sources/MVMagnet.m Sources/MVTorrentMetadata.m Sources/MVTorrentTracker.m Sources/MVTorrentStorage.m Sources/MVTorrentPolicy.c Sources/MVPaths.m"
 TEST="tests/torrent_core_test.m"
 
 clang -fobjc-arc -fblocks -I Sources $TEST $SOURCES -framework Foundation -o "$OUT/torrent_core_test"
 "$OUT/torrent_core_test"
+
+clang -fobjc-arc -fblocks -I Sources tests/torrent_peer_test.m \
+  Sources/MVTorrentPeer.m Sources/MVBencode.m Sources/MVSHA1.m \
+  -framework Foundation -o "$OUT/torrent_peer_test"
+"$OUT/torrent_peer_test"
+
+clang -fobjc-arc -fblocks -I Sources tests/torrent_engine_test.m tests/torrent_engine_stubs.m \
+  Sources/MVTorrentDownloader.m Sources/MVTorrentPeer.m Sources/MVDownloadTask.m Sources/MVFileProtection.m $SOURCES \
+  -framework Foundation -o "$OUT/torrent_engine_test"
+"$OUT/torrent_engine_test"

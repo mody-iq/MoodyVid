@@ -1,7 +1,9 @@
 """MoodyVid downloader module using yt-dlp."""
+import hashlib
 import json
 import os
 import re
+import stat
 import time
 
 # iOS ships no ffmpeg, so yt-dlp cannot merge a separate video stream with a
@@ -112,11 +114,49 @@ def _use_bundled_certificates():
 
 
 def _output_dir():
-    """The Files-app folder we ship downloads into, so they survive and are visible."""
+    """The Files-app folder where native code publishes finished downloads."""
     base = (os.environ.get("MV_DOCUMENTS")
             or os.environ.get("HOME")
             or os.environ.get("TMPDIR", "/tmp"))
     return os.path.join(base, "MoodyVid")
+
+
+def _task_output_dir(task):
+    """A stable, private workspace for one native record, shared across retries.
+
+    Extractors can resolve different URLs to the same title and video ID; a
+    directory per record prevents both final names and yt-dlp's .part files from
+    colliding. Hash the identifier rather than using it as a path component. The
+    native side uses the same SHA-256 convention when publishing and deleting.
+    Calls without a native task retain the standalone API's original location.
+    """
+    if not task:
+        return _output_dir()
+    owner = hashlib.sha256(task.encode("utf-8")).hexdigest()
+    return os.path.join(_output_dir(), ".moodyvid-work", owner)
+
+
+def _prepare_output_dir(task):
+    """Create an isolated workspace without following a redirected work root.
+
+    yt-dlp writes ordinary pathnames, so a concurrently replaced directory cannot
+    be fully protected here; native publication checks ownership again. Existing
+    symlinks are rejected before the downloader writes into them.
+    """
+    output = _output_dir()
+    os.makedirs(output, exist_ok=True)
+    if not task:
+        return output
+    root = os.path.join(output, ".moodyvid-work")
+    work = _task_output_dir(task)
+    for directory in (root, work):
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            pass
+        if not stat.S_ISDIR(os.lstat(directory).st_mode):
+            raise OSError("download workspace is not a safe directory")
+    return work
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -215,9 +255,8 @@ def download(url, quality="best", _task=""):
 
     _use_bundled_certificates()
 
-    out_dir = _output_dir()
     try:
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = _prepare_output_dir(_task)
     except OSError as e:
         return _error(f"cannot create the download folder: {e}")
 
@@ -328,7 +367,7 @@ def _progress_hook(native, task):
 def _download_once(yt_dlp, url, fmt, client, out_dir, native=None, task=""):
     opts = {
         "format": fmt,
-        "outtmpl": os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s"),
+        "outtmpl": os.path.join(out_dir, "%(title).100B [%(id).64B].%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -389,6 +428,8 @@ def download_fragment(url, kind, quality="best", _task=""):
     (progressive) and muxes them natively with AVFoundation. This function
     returns just the one fragment; the native side combines the pair.
     """
+    if kind not in ("video", "audio"):
+        return _error("invalid stream kind")
     try:
         import yt_dlp
     except Exception as e:
@@ -398,9 +439,8 @@ def download_fragment(url, kind, quality="best", _task=""):
 
     fmt = _fragment_format(kind, quality)
 
-    out_dir = _output_dir()
     try:
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = _prepare_output_dir(_task)
     except OSError as e:
         return _error(f"cannot create the download folder: {e}")
 
@@ -418,7 +458,7 @@ def download_fragment(url, kind, quality="best", _task=""):
                 # the same extension. The marker keeps the two files apart so one
                 # can never overwrite the other.
                 "outtmpl": os.path.join(out_dir,
-                                        "%(title).100B [%(id)s]." + kind + ".%(ext)s"),
+                                        "%(title).100B [%(id).64B]." + kind + ".%(ext)s"),
                 "quiet": True,
                 "no_warnings": True,
                 "noplaylist": True,

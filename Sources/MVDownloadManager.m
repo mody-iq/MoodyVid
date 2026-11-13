@@ -1,19 +1,19 @@
 #import "MVDownloadManager.h"
 #import "MVTaskStore.h"
+#import "MVDownloadStore.h"
 #import "MVFastDownloader.h"
 #import "MVHLSDownloader.h"
 #import "MVMPDDownloader.h"
 #import "MVTorrentDownloader.h"
 #import "MVPaths.h"
+#import "MVFileProtection.h"
 #import "MVMediaProbe.h"
 #import "MVLang.h"
 #import "MVLog.h"
 #import "MVBackgroundKeeper.h"
+#import "MVNetworkPolicy.h"
 #import <UserNotifications/UserNotifications.h>
 #import <UIKit/UIKit.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <string.h>
 
 /// A per-task throttle cap when the user has not set one. Kept here rather than
 /// in the downloader so the default lives with the other queue settings.
@@ -23,7 +23,7 @@ static const NSUInteger kDefaultConcurrent = 3;
 @implementation MVDownloadManager {
     UIBackgroundTaskIdentifier _backgroundTask;
     BOOL _awake;
-    NSTimer *_ticker;
+    NSMutableDictionary<NSString *, NSString *> *_runTokens;
 }
 
 + (instancetype)shared {
@@ -36,11 +36,11 @@ static const NSUInteger kDefaultConcurrent = 3;
 - (instancetype)init {
     if ((self = [super init])) {
         _backgroundTask = UIBackgroundTaskInvalid;
+        _runTokens = [NSMutableDictionary dictionary];
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         _maxConnections = [defaults objectForKey:@"MVMaxConnections"] ? [defaults integerForKey:@"MVMaxConnections"] : kDefaultConnections;
         _maxConcurrentTasks = [defaults objectForKey:@"MVMaxConcurrent"] ? [defaults integerForKey:@"MVMaxConcurrent"] : kDefaultConcurrent;
         _speedLimit = [defaults integerForKey:@"MVSpeedLimit"];
-        _wifiOnly = [defaults boolForKey:@"MVWifiOnly"];
         [MVFastDownloader shared].speedLimit = _speedLimit;
         [MVHLSDownloader shared].speedLimit = _speedLimit;
         [MVMPDDownloader shared].speedLimit = _speedLimit;
@@ -50,6 +50,9 @@ static const NSUInteger kDefaultConcurrent = 3;
 
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(pump)
                                                    name:MVTaskStoreDidChangeNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(pump)
+                                                   name:MVNetworkPolicyDidChangeNotification object:nil];
+        (void)MVNetworkPolicy.shared; // start observing the default path
     }
     return self;
 }
@@ -76,10 +79,10 @@ static const NSUInteger kDefaultConcurrent = 3;
     [MVTorrentDownloader shared].speedLimit = _speedLimit;
 }
 
+- (BOOL)wifiOnly { return MVNetworkPolicy.shared.wifiOnly; }
+
 - (void)setWifiOnly:(BOOL)wifiOnly {
-    _wifiOnly = wifiOnly;
-    [NSUserDefaults.standardUserDefaults setBool:wifiOnly forKey:@"MVWifiOnly"];
-    [self pump];
+    MVNetworkPolicy.shared.wifiOnly = wifiOnly;
 }
 
 #pragma mark - Enqueue
@@ -214,9 +217,7 @@ static const NSUInteger kDefaultConcurrent = 3;
                     filename:[self mp4NameForItem:item] label:@"DASH" added:added];
 }
 
-/// Queues a `.torrent` file. A magnet link is queued too — the engine reports
-/// the honest reason it cannot be fetched yet, rather than the row being stuck
-/// at 0%.
+/// Queues a .torrent file or a tracker-backed v1 magnet link.
 - (MVDownloadTask *)enqueueTorrentItem:(MVSnifferItem *)item added:(BOOL *)added {
     BOOL created = NO;
     MVDownloadTask *task = [self enqueueItem:item source:MVTaskSourceTorrent category:@"Torrents"
@@ -258,11 +259,10 @@ static const NSUInteger kDefaultConcurrent = 3;
     return count;
 }
 
-/// Starts queued direct tasks while there is room, respecting Wi-Fi-only.
-/// Called on the main queue, and idempotent, so it is safe from a notification.
+/// Called on the main queue; a network change wakes a queue held for Wi-Fi.
 - (void)pump {
-    if (self.wifiOnly && !self.isOnWifi) {
-        MVLogInfo(@"manager: holding queue, Wi-Fi only");
+    if (!MVNetworkPolicy.shared.allowsNewDownloads) {
+        [self updateBackgroundTask];
         return;
     }
     NSMutableArray<MVDownloadTask *> *queued = [NSMutableArray array];
@@ -284,8 +284,40 @@ static const NSUInteger kDefaultConcurrent = 3;
     [self updateBackgroundTask];
 }
 
+/// A legacy partial base can be shared with another saved row, or have been
+/// replaced with a symlink. Do not reuse it in either case: leave it untouched
+/// and start in a fresh hidden base belonging to this task.
+- (BOOL)preparePartialBaseForTask:(MVDownloadTask *)task {
+    if (task.source == MVTaskSourceTorrent) return YES;
+    NSMutableArray<NSString *> *protected = [[MVFileProtection pathsExcludingTask:task record:nil] mutableCopy];
+    if (task.path.length) [protected addObject:task.path];
+    if ([MVFileProtection isSafePartialBase:task.tempPath] &&
+        ![MVFileProtection path:task.tempPath conflictsWithPaths:protected]) return YES;
+
+    NSString *directory = [MVPaths directoryForCategory:task.category];
+    NSString *base = [directory stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@".moodyvid-%@", NSUUID.UUID.UUIDString]];
+    if (![MVFileProtection isSafePartialBase:base] ||
+        [MVFileProtection path:base conflictsWithPaths:protected]) return NO;
+    task.tempPath = base;
+    task.segments = @[];
+    task.doneBytes = 0;
+    task.acceptsRanges = NO;
+    task.etag = nil;
+    task.lastModified = nil;
+    return YES;
+}
+
 - (void)startTask:(MVDownloadTask *)task {
-    if (task.state == MVTaskStateRunning) return;   // pump is re-entrant
+    if (task.state != MVTaskStateQueued) return;   // pump is re-entrant
+    if (![self preparePartialBaseForTask:task]) {
+        task.state = MVTaskStateFailed;
+        task.error = [MVLang t:@"Could not save the file"];
+        [MVTaskStore.shared update:task];
+        return;
+    }
+    NSString *token = NSUUID.UUID.UUIDString;
+    _runTokens[task.identifier] = token;
     task.state = MVTaskStateRunning;
     task.error = nil;
     task.phase = nil;
@@ -293,14 +325,21 @@ static const NSUInteger kDefaultConcurrent = 3;
     [MVTaskStore.shared update:task];
 
     __weak typeof(self) weakSelf = self;
+    BOOL (^isCurrent)(MVDownloadTask *) = ^BOOL(MVDownloadTask *t) {
+        typeof(self) self_ = weakSelf;
+        return self_ && t.state == MVTaskStateRunning &&
+            [self_->_runTokens[t.identifier] isEqualToString:token] &&
+            [MVTaskStore.shared taskWithIdentifier:t.identifier] == t;
+    };
     void (^onProgress)(MVDownloadTask *) = ^(MVDownloadTask *t) {
-        // The engine already computed the rate; the manager only stores.
+        if (!isCurrent(t)) return;
         [weakSelf updateSpeedForTask:t];
         [MVTaskStore.shared update:t];
     };
     void (^onFinished)(MVDownloadTask *) = ^(MVDownloadTask *t) {
         typeof(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || !isCurrent(t)) return;
+        [self_->_runTokens removeObjectForKey:t.identifier];
         t.state = MVTaskStateCompleted;
         t.error = nil;
         t.phase = nil;
@@ -310,7 +349,8 @@ static const NSUInteger kDefaultConcurrent = 3;
     };
     void (^onFailed)(MVDownloadTask *, NSString *) = ^(MVDownloadTask *t, NSString *message) {
         typeof(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || !isCurrent(t)) return;
+        [self_->_runTokens removeObjectForKey:t.identifier];
         t.state = MVTaskStateFailed;
         t.error = message;
         t.phase = nil;
@@ -339,7 +379,7 @@ static const NSUInteger kDefaultConcurrent = 3;
     dispatch_once(&once, ^{ samples = [NSMutableDictionary dictionary]; });
 
     NSDictionary *previous = samples[task.identifier];
-    NSTimeInterval now = NSDate.date.timeIntervalSinceNow;
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
     if (previous) {
         NSTimeInterval elapsed = now - [previous[@"t"] doubleValue];
         long long delta = task.doneBytes - [previous[@"b"] longLongValue];
@@ -359,9 +399,16 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 #pragma mark - Controls
 
+- (BOOL)path:(NSString *)path isReferencedBesidesTask:(MVDownloadTask *)task {
+    return [MVFileProtection path:path
+               conflictsWithPaths:[MVFileProtection pathsExcludingTask:task record:nil]];
+}
+
 - (void)resumeTask:(MVDownloadTask *)task {
     if (!task) return;
-    if (task.state == MVTaskStateCompleted) return;
+    // Repeated Resume while queued or running must not create a second engine.
+    if (task.state != MVTaskStatePaused && task.state != MVTaskStateFailed &&
+        task.state != MVTaskStateCancelled) return;
     task.state = MVTaskStateQueued;
     task.error = nil;
     task.phase = nil;
@@ -372,6 +419,7 @@ static const NSUInteger kDefaultConcurrent = 3;
 - (void)pauseTask:(MVDownloadTask *)task {
     if (!task) return;
     if (task.state == MVTaskStateRunning) {
+        [_runTokens removeObjectForKey:task.identifier];
         if (task.source == MVTaskSourceHLS) [[MVHLSDownloader shared] pauseTask:task];
         else if (task.source == MVTaskSourceDASH) [[MVMPDDownloader shared] pauseTask:task];
         else if (task.source == MVTaskSourceTorrent) [[MVTorrentDownloader shared] pauseTask:task];
@@ -388,16 +436,20 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 - (void)cancelTask:(MVDownloadTask *)task deleteFile:(BOOL)deleteFile {
     if (!task) return;
+    [_runTokens removeObjectForKey:task.identifier];
     if (task.source == MVTaskSourceHLS) [[MVHLSDownloader shared] cancelTask:task];
     else if (task.source == MVTaskSourceDASH) [[MVMPDDownloader shared] cancelTask:task];
-    else if (task.source == MVTaskSourceTorrent) [[MVTorrentDownloader shared] cancelTask:task];
+    else if (task.source == MVTaskSourceTorrent) [[MVTorrentDownloader shared] cancelTask:task deletingFiles:deleteFile];
     else [[MVFastDownloader shared] cancelTask:task];
     if (deleteFile) {
+        // The sweep checks every individual part, not just its base path.
         if (task.source == MVTaskSourceHLS) [MVHLSDownloader removePartFilesForTask:task];
         else if (task.source == MVTaskSourceDASH) [MVMPDDownloader removePartFilesForTask:task];
-        else if (task.source == MVTaskSourceTorrent) [MVTorrentDownloader removePartFilesForTask:task];
-        else [MVFastDownloader removePartFilesForTask:task];
-        if (task.path.length) [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
+        else if (task.source != MVTaskSourceTorrent) [MVFastDownloader removePartFilesForTask:task];
+        // Torrent cleanup waits for peer writes to stop.
+        if (task.source != MVTaskSourceTorrent && task.path.length &&
+            ![self path:task.path isReferencedBesidesTask:task])
+            [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     task.state = MVTaskStateCancelled;
     task.speed = 0;
@@ -408,16 +460,19 @@ static const NSUInteger kDefaultConcurrent = 3;
 
 - (void)removeTask:(MVDownloadTask *)task deleteFile:(BOOL)deleteFile {
     if (!task) return;
+    [_runTokens removeObjectForKey:task.identifier];
     if (task.source == MVTaskSourceHLS) [[MVHLSDownloader shared] cancelTask:task];
     else if (task.source == MVTaskSourceDASH) [[MVMPDDownloader shared] cancelTask:task];
-    else if (task.source == MVTaskSourceTorrent) [[MVTorrentDownloader shared] cancelTask:task];
+    else if (task.source == MVTaskSourceTorrent) [[MVTorrentDownloader shared] cancelTask:task deletingFiles:deleteFile];
     else [[MVFastDownloader shared] cancelTask:task];
     if (deleteFile) {
         if (task.source == MVTaskSourceHLS) [MVHLSDownloader removePartFilesForTask:task];
         else if (task.source == MVTaskSourceDASH) [MVMPDDownloader removePartFilesForTask:task];
-        else if (task.source == MVTaskSourceTorrent) [MVTorrentDownloader removePartFilesForTask:task];
-        else [MVFastDownloader removePartFilesForTask:task];
-        if (task.path.length) [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
+        else if (task.source != MVTaskSourceTorrent) [MVFastDownloader removePartFilesForTask:task];
+        // Torrent cleanup waits for peer writes to stop.
+        if (task.source != MVTaskSourceTorrent && task.path.length &&
+            ![self path:task.path isReferencedBesidesTask:task])
+            [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     [MVTaskStore.shared remove:task];
     [self updateBackgroundTask];
@@ -458,46 +513,16 @@ static const NSUInteger kDefaultConcurrent = 3;
 }
 
 - (void)resumeInterrupted {
-    for (MVDownloadTask *task in MVTaskStore.shared.tasks) {
-        // A task left Running was killed with the process; it is resumable, so
-        // re-queue it rather than making the user press Retry on every row.
-        if (task.state == MVTaskStateRunning) {
-            task.state = MVTaskStateQueued;
-            [MVTaskStore.shared update:task];
-        }
-    }
-    // One pass now, and one after a short delay: a row that was left "Running"
-    // is only correct once the store's load has finished replacing it, and the
-    // second pass also picks up a queue the user restored in the meantime.
+    // The store synchronously converts interrupted Running records to Queued
+    // while loading. Repeated calls must never requeue a live in-process run.
     [self pump];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [self pump]; });
-}
-
-#pragma mark - Wi-Fi
-
-/// Wi-Fi is the only network the "Wi-Fi only" rule allows, so a cellular or
-/// unknown connection reports NO and the queue waits for Wi-Fi.
-///
-/// getifaddrs is used because it reports the interface type without the Network
-/// framework. An "en" interface with a routable IPv4 address is Wi-Fi; "pdp_ip"
-/// is cellular. The syscall never touches the network itself.
-- (BOOL)isOnWifi {
-    struct ifaddrs *interfaces = NULL;
-    if (getifaddrs(&interfaces) != 0) return YES;   // fail open rather than stall
-    BOOL wifi = NO;
-    for (struct ifaddrs *ifa = interfaces; ifa != NULL; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
-        if (strncmp(ifa->ifa_name, "en", 2) == 0) { wifi = YES; break; }
-    }
-    freeifaddrs(interfaces);
-    return wifi;
 }
 
 #pragma mark - Background time
 
 - (void)updateBackgroundTask {
-    BOOL busy = self.runningCount > 0 || MVTaskStore.shared.activeTasks.count > 0;
+    // Paused rows and a queue waiting for Wi-Fi must not keep silent audio on.
+    BOOL busy = self.runningCount > 0;
     if (busy) {
         if (!_awake) {
             _awake = YES;

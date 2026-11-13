@@ -26,6 +26,9 @@ NS_ASSUME_NONNULL_BEGIN
                   to:(NSString *)outPath
           completion:(void (^)(BOOL ok, NSString *_Nullable error))completion;
 
+/// YES when AVFoundation can read a video track from the file.
++ (BOOL)hasVideoTrack:(NSString *)path;
+
 /// YES when the file already carries an audio track.
 ///
 /// A "best quality" request downloads a picture-only stream and then the sound,

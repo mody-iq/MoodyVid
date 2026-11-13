@@ -26,9 +26,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// without hammering the server all at once.
 - (void)probeAll:(NSArray<MVSnifferItem *> *)items completion:(void (^_Nullable)(void))completion;
 
-/// The headers every request for `url` should carry: a desktop/mobile Safari UA,
-/// the Referer of the page that found it, and the site's cookies.
+/// Headers for this URL, with a privacy-preserving Referer and cookies filtered
+/// against both the target and the page. Cookie retrieval is best-effort and
+/// normally happens off the main thread; the main thread never waits for WebKit.
 + (NSDictionary<NSString *, NSString *> *)headersForURL:(NSString *)url referer:(nullable NSString *)referer;
+
+/// Also applies custom non-cookie headers. Stored/raw Cookie and Cookie2 values
+/// are ignored; fresh, scoped browser cookies are selected for every request.
++ (NSDictionary<NSString *, NSString *> *)headersForURL:(NSString *)url
+                                                 referer:(nullable NSString *)referer
+                                       additionalHeaders:(nullable NSDictionary<NSString *, NSString *> *)additionalHeaders;
+
+/// Suspend cookie snapshots while website data is being cleared, then discard
+/// any in-flight snapshot before enabling them again. Already-created requests
+/// and running downloads are not cancelled.
++ (void)beginClearingBrowserCookies;
++ (void)finishClearingBrowserCookies;
 
 @end
 

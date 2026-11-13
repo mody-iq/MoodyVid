@@ -39,17 +39,16 @@
     // records the old engine left behind so one list shows everything.
     [[MVDownloadManager shared] resumeInterrupted];
 
-    // If the system killed us mid-download, pick the queue back up. yt-dlp
-    // continues the .part files it left behind.
+    // If the system killed us mid-download, pick the queue back up. yt-dlp may
+    // continue compatible task-owned partials where the source supports it.
     [[MVDownloadEngine shared] resumeInterrupted];
     return YES;
 }
 
 #pragma mark - Background URL sessions
 
-/// The system wakes the app here when a background transfer finishes. The direct
-/// engine hands its work to a background session when the app is suspended, so
-/// this call is what lets it complete and update the row.
+/// Acknowledge background session events if the system delivers them. These
+/// engines currently use foreground URL sessions, not a background session.
 - (void)application:(UIApplication *)application
     handleEventsForBackgroundURLSession:(NSString *)identifier
                       completionHandler:(void (^)(void))completionHandler {

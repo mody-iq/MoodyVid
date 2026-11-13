@@ -1,10 +1,16 @@
 #import "MVHLSDownloader.h"
 #import "MVPaths.h"
+#import "MVFileProtection.h"
 #import "MVMediaProbe.h"
+#import "MVHTTPSession.h"
+#import "MVByteRange.h"
+#import "MVMediaConverter.h"
 #import "MVLang.h"
 #import "MVLog.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CommonCrypto/CommonCryptor.h>
+#include <limits.h>
+#include <stdio.h>
 
 /// How many media segments are fetched at once. Segments are small and
 /// independent, so a few in flight is the difference between a stream that
@@ -34,6 +40,7 @@ static const NSInteger kMaxSegmentRetries = 3;
 @property (nonatomic) NSInteger sequence;
 @property (nonatomic) NSInteger retries;
 @property (nonatomic) BOOL done;
+@property (nonatomic) BOOL inFlight;
 @end
 @implementation MVHLSSegment
 @end
@@ -45,8 +52,11 @@ static const NSInteger kMaxSegmentRetries = 3;
 /// The fMP4 init segment (EXT-X-MAP), if the playlist names one.
 @property (nonatomic, strong, nullable) MVHLSSegment *mapSegment;
 @property (nonatomic) BOOL isFMP4;
-@property (nonatomic) BOOL paused;
-@property (nonatomic) BOOL cancelled;
+@property (nonatomic, copy) NSString *runToken;
+@property (nonatomic, copy) NSString *tempPath;
+@property (atomic) BOOL paused;
+@property (atomic) BOOL cancelled;
+@property (atomic) BOOL failureRequested;
 @property (nonatomic) BOOL finishing;
 @property (nonatomic) NSUInteger inFlight;
 @property (nonatomic) long long doneBytes;
@@ -103,25 +113,36 @@ static const NSInteger kMaxSegmentRetries = 3;
     job.progressBlock = progress;
     job.finishedBlock = finished;
     job.failedBlock = failed;
+    job.runToken = NSUUID.UUID.UUIDString;
+    (void)[self segmentPathForJob:job index:-1];
+    task.doneBytes = 0; // HLS segments are fetched again after a restart
+    task.totalBytes = 0;
     @synchronized (self) { _jobs[task.identifier] = job; }
+    if (progress) progress(task);
     [self fetchPlaylistForJob:job];
 }
 
 - (void)pauseTask:(MVDownloadTask *)task {
     MVHLSJob *job = nil;
-    @synchronized (self) { job = _jobs[task.identifier]; }
+    @synchronized (self) {
+        job = _jobs[task.identifier];
+        if (job) { job.paused = YES; [_jobs removeObjectForKey:task.identifier]; }
+    }
     if (!job) return;
-    job.paused = YES;
-    @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
     MVLogInfo(@"hls: paused %@ at %lld bytes", task.title, job.doneBytes);
 }
 
 - (void)cancelTask:(MVDownloadTask *)task {
-    MVHLSJob *job = nil;
-    @synchronized (self) { job = _jobs[task.identifier]; }
-    if (!job) return;
-    job.cancelled = YES;
-    @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
+    @synchronized (self) {
+        MVHLSJob *job = _jobs[task.identifier];
+        if (job) { job.cancelled = YES; [_jobs removeObjectForKey:task.identifier]; }
+    }
+}
+
+- (BOOL)isCurrentJob:(MVHLSJob *)job {
+    @synchronized (self) {
+        return _jobs[job.task.identifier] == job && !job.paused && !job.cancelled;
+    }
 }
 
 #pragma mark - Playlist
@@ -146,8 +167,16 @@ static const NSInteger kMaxSegmentRetries = 3;
         // A master playlist points at a variant; a media playlist lists segments.
         NSString *variant = [self firstVariantInPlaylist:text baseURL:url];
         if (variant) {
+            if ([self firstVariantNeedsSeparateAudio:text]) {
+                [self failJob:job message:[MVLang t:@"Separate HLS audio is not supported"]];
+                return;
+            }
             NSError *verror = nil;
-            NSData *vdata = [self syncGet:variant headers:headers error:&verror];
+            // A variant may live on a different host or path from the master.
+            // Scope it to the page (or the original manifest for manual URLs),
+            // never to the variant itself or the master's cached Cookie header.
+            NSDictionary *variantHeaders = [MVMediaProbe headersForURL:variant referer:job.task.resourceContextURL];
+            NSData *vdata = [self syncGet:variant headers:variantHeaders error:&verror];
             NSString *vtext = vdata ? [[NSString alloc] initWithData:vdata encoding:NSUTF8StringEncoding] : nil;
             if (!vtext.length) {
                 [self failJob:job message:verror.localizedDescription ?: [MVLang t:@"Could not open the stream"]];
@@ -158,32 +187,67 @@ static const NSInteger kMaxSegmentRetries = 3;
             [self parseMediaPlaylist:text baseURL:url into:job];
         }
 
+        if (job.paused || job.cancelled || job.failureRequested) return;
         if (!job.segments.count) {
             [self failJob:job message:[MVLang t:@"Could not open the stream"]];
             return;
         }
 
-        // An fMP4 stream begins with an init segment; it must be written first
-        // so the joined file starts with the moov box the media needs.
+        // Fetch on a worker, but publish the init file only if this is still the
+        // active run. A paused run must never overwrite a newer run's parts.
+        NSData *initData = nil;
         if (job.mapSegment) {
             NSError *initError = nil;
-            NSData *initData = [self syncGet:job.mapSegment.url
-                                     headers:[MVMediaProbe headersForURL:job.mapSegment.url
-                                                                 referer:job.task.referer]
-                                       error:&initError];
+            NSMutableDictionary *initHeaders = [[MVMediaProbe headersForURL:job.mapSegment.url
+                                                    referer:job.task.resourceContextURL] mutableCopy];
+            if (job.mapSegment.byteStart >= 0) {
+                initHeaders[@"Range"] = [NSString stringWithFormat:@"bytes=%lld-%lld", job.mapSegment.byteStart,
+                                         job.mapSegment.byteStart + job.mapSegment.byteLength - 1];
+            }
+            initData = [self syncGet:job.mapSegment.url headers:initHeaders error:&initError];
             if (!initData.length) {
                 [self failJob:job message:[MVLang t:@"Could not open the stream"]];
                 return;
             }
-            [self writeSegment:initData index:-1 job:job];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (job.paused || job.cancelled) return;
+            if (![self isCurrentJob:job] || job.failureRequested) return;
+            if (job.mapSegment && ![self writeSegment:initData index:-1 job:job]) {
+                [self failJob:job message:[MVLang t:@"Could not save the file"]];
+                return;
+            }
             job.task.phase = [MVLang t:@"Downloading segments"];
             [self pumpJob:job];
         });
     });
+}
+
+/// This engine cannot yet combine alternate HLS audio renditions. Refuse a
+/// selected variant that needs one instead of claiming a silent download worked.
+- (BOOL)firstVariantNeedsSeparateAudio:(NSString *)text {
+    __block NSString *group = nil;
+    [text enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if ([trimmed hasPrefix:@"#EXT-X-STREAM-INF:"]) {
+            group = [self attribute:@"AUDIO" in:trimmed];
+            *stop = YES;
+        }
+    }];
+    if (!group.length) return NO;
+    __block BOOL foundGroup = NO, separate = NO;
+    [text enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (![trimmed hasPrefix:@"#EXT-X-MEDIA:"]) return;
+        NSString *type = [self attribute:@"TYPE" in:trimmed];
+        NSString *groupID = [self attribute:@"GROUP-ID" in:trimmed];
+        NSString *uri = [self attribute:@"URI" in:trimmed];
+        if ([type isEqualToString:@"AUDIO"] && [groupID isEqualToString:group]) {
+            foundGroup = YES;
+            if (uri.length) { separate = YES; *stop = YES; }
+        }
+    }];
+    return !foundGroup || separate;
 }
 
 /// The first `#EXT-X-STREAM-INF` variant URL, resolved against the playlist.
@@ -203,141 +267,181 @@ static const NSInteger kMaxSegmentRetries = 3;
 
 - (void)parseMediaPlaylist:(NSString *)text baseURL:(NSString *)base into:(MVHLSJob *)job {
     __block MVHLSKey *currentKey = nil;
-    __block long long nextByteOffset = 0;
-    __block BOOL hasPendingByteRange = NO;
-    __block NSInteger index = 0;
-    __block BOOL hasEndList = NO;
+    __block long long pendingLength = -1, pendingStart = -1, lastRangeEnd = -1;
+    __block NSString *lastRangeURL = nil;
+    __block BOOL hasPendingRange = NO, hasEndList = NO, sawMap = NO;
+    __block BOOL invalidRange = NO, invalidMap = NO, invalidKey = NO, unsupported = NO;
     __block NSString *mapURL = nil;
-    __block NSInteger mediaSequence = 0;
+    __block long long mapStart = -1, mapLength = -1;
+    __block long long mediaSequence = 0;
 
     [text enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
         NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
         if (!trimmed.length) return;
-
-        if ([trimmed hasPrefix:@"#EXT-X-ENDLIST"]) { hasEndList = YES; return; }
-
-        if ([trimmed hasPrefix:@"#EXT-X-MEDIA-SEQUENCE"]) {
-            mediaSequence = (NSInteger)[[[trimmed componentsSeparatedByString:@":"] lastObject] integerValue];
+        if ([trimmed isEqualToString:@"#EXT-X-ENDLIST"]) { hasEndList = YES; return; }
+        if ([trimmed isEqualToString:@"#EXT-X-DISCONTINUITY"] ||
+            [trimmed isEqualToString:@"#EXT-X-GAP"] ||
+            [trimmed isEqualToString:@"#EXT-X-I-FRAMES-ONLY"] ||
+            [trimmed hasPrefix:@"#EXT-X-STREAM-INF:"]) {
+            unsupported = YES;
             return;
         }
-
-        if ([trimmed hasPrefix:@"#EXT-X-MAP"]) {
+        if ([trimmed hasPrefix:@"#EXT-X-MEDIA-SEQUENCE:"]) {
+            NSString *value = [trimmed substringFromIndex:[@"#EXT-X-MEDIA-SEQUENCE:" length]];
+            NSScanner *scanner = [NSScanner scannerWithString:value];
+            if (job.segments.count || ![scanner scanLongLong:&mediaSequence] || !scanner.isAtEnd ||
+                mediaSequence < 0 || mediaSequence > NSIntegerMax) invalidRange = YES;
+            return;
+        }
+        if ([trimmed hasPrefix:@"#EXT-X-MAP:"]) {
+            if (sawMap || job.segments.count) invalidMap = YES;
+            sawMap = YES;
             NSString *uri = [self attribute:@"URI" in:trimmed];
-            if (uri.length) mapURL = [self absoluteURL:uri base:base];
+            mapURL = uri.length ? [self absoluteURL:uri base:base] : nil;
+            if (!mapURL.length) invalidMap = YES;
+            NSString *range = [self attribute:@"BYTERANGE" in:trimmed];
+            if (range.length) {
+                NSArray<NSString *> *parts = [range componentsSeparatedByString:@"@"];
+                NSScanner *lengthScanner = [NSScanner scannerWithString:parts.firstObject];
+                NSScanner *startScanner = parts.count == 2 ? [NSScanner scannerWithString:parts.lastObject] : nil;
+                if (parts.count != 2 || ![lengthScanner scanLongLong:&mapLength] || !lengthScanner.isAtEnd ||
+                    ![startScanner scanLongLong:&mapStart] || !startScanner.isAtEnd || mapLength <= 0 ||
+                    mapStart < 0 || mapStart > LLONG_MAX - mapLength) invalidMap = YES;
+            }
+            if (currentKey && ![currentKey.method isEqualToString:@"NONE"]) invalidMap = YES;
             return;
         }
-
-        if ([trimmed hasPrefix:@"#EXT-X-KEY"]) {
-            NSString *method = [self attribute:@"METHOD" in:trimmed] ?: @"NONE";
+        if ([trimmed hasPrefix:@"#EXT-X-KEY:"]) {
+            NSString *method = [self attribute:@"METHOD" in:trimmed];
+            NSString *format = [self attribute:@"KEYFORMAT" in:trimmed];
             MVHLSKey *key = [MVHLSKey new];
-            key.method = method;
+            key.method = method ?: @"";
+            if (!method.length || (format.length && ![format isEqualToString:@"identity"])) invalidKey = YES;
             if (![method isEqualToString:@"NONE"]) {
                 NSString *uri = [self attribute:@"URI" in:trimmed];
                 if (uri.length) key.uri = [self absoluteURL:uri base:base];
                 NSString *iv = [self attribute:@"IV" in:trimmed];
-                if (iv.length) key.iv = [self dataFromHexIV:iv];
+                if (iv.length) {
+                    key.iv = [self dataFromHexIV:iv];
+                    if (!key.iv) invalidKey = YES;
+                }
+                if (![method isEqualToString:@"AES-128"] || !key.uri.length) invalidKey = YES;
             }
             currentKey = key;
             return;
         }
-
-        if ([trimmed hasPrefix:@"#EXT-X-BYTERANGE"]) {
-            // "LENGTH[@OFFSET]" — a missing offset continues after the last
-            // sub-range, which is the common "one resource, many ranges" form.
-            NSString *value = [[trimmed componentsSeparatedByString:@":"] lastObject];
+        if ([trimmed hasPrefix:@"#EXT-X-BYTERANGE:"]) {
+            // An omitted offset is legal only immediately after a range of the
+            // same resource. Defer that check until the URI line is known.
+            if (hasPendingRange) invalidRange = YES;
+            NSString *value = [trimmed substringFromIndex:[@"#EXT-X-BYTERANGE:" length]];
             NSArray<NSString *> *parts = [value componentsSeparatedByString:@"@"];
-            long long length = [parts.firstObject longLongValue];
-            long long start = parts.count > 1 ? [parts[1] longLongValue] : nextByteOffset;
-            nextByteOffset = start + length;
-            hasPendingByteRange = YES;
-            // The range applies to the next segment URI.
-            MVHLSSegment *segment = [MVHLSSegment new];
-            segment.index = index++;
-            segment.sequence = mediaSequence + segment.index;
-            segment.byteStart = start;
-            segment.byteLength = length;
-            segment.key = currentKey;
-            segment.url = @"";   // filled when the URI line arrives
-            [job.segments addObject:segment];
+            pendingLength = -1;
+            pendingStart = -1;
+            NSScanner *lengthScanner = [NSScanner scannerWithString:parts.firstObject];
+            NSScanner *startScanner = parts.count == 2 ? [NSScanner scannerWithString:parts.lastObject] : nil;
+            if (parts.count > 2 || ![lengthScanner scanLongLong:&pendingLength] || !lengthScanner.isAtEnd ||
+                (startScanner && (![startScanner scanLongLong:&pendingStart] || !startScanner.isAtEnd)) ||
+                pendingLength <= 0 || (parts.count == 2 && pendingStart < 0)) invalidRange = YES;
+            hasPendingRange = YES;
             return;
         }
-
         if ([trimmed hasPrefix:@"#"]) return;
 
         NSString *absolute = [self absoluteURL:trimmed base:base];
-        if (hasPendingByteRange && job.segments.count &&
-            ![job.segments.lastObject.url length]) {
-            // The URI belongs to the byterange declared just above it.
-            job.segments.lastObject.url = absolute;
-            hasPendingByteRange = NO;
-        } else {
-            MVHLSSegment *segment = [MVHLSSegment new];
-            segment.index = index++;
-            segment.sequence = mediaSequence + segment.index;
-            segment.byteStart = -1;
-            segment.byteLength = -1;
-            segment.key = currentKey;
-            segment.url = absolute;
-            [job.segments addObject:segment];
+        if (!absolute.length || job.segments.count >= 100000 ||
+            mediaSequence > NSIntegerMax - (long long)job.segments.count) {
+            invalidRange = YES;
+            return;
         }
+        long long start = -1, length = -1;
+        if (hasPendingRange) {
+            start = pendingStart;
+            length = pendingLength;
+            if (start < 0) {
+                if (lastRangeEnd < 0 || ![absolute isEqualToString:lastRangeURL]) invalidRange = YES;
+                else start = lastRangeEnd + 1;
+            }
+            if (length <= 0 || start < 0 || start > LLONG_MAX - length) invalidRange = YES;
+            else {
+                lastRangeEnd = start + length - 1;
+                lastRangeURL = absolute;
+            }
+        } else {
+            lastRangeEnd = -1;
+            lastRangeURL = nil;
+        }
+        MVHLSSegment *segment = [MVHLSSegment new];
+        segment.index = (NSInteger)job.segments.count;
+        segment.sequence = (NSInteger)(mediaSequence + segment.index);
+        segment.byteStart = start;
+        segment.byteLength = length;
+        segment.key = currentKey;
+        segment.url = absolute;
+        [job.segments addObject:segment];
+        hasPendingRange = NO;
     }];
 
     if (!hasEndList) {
-        // A live playlist has no end, so it can never be "finished" as a file.
-        job.task.phase = nil;
         [self failJob:job message:[MVLang t:@"Live streams can't be downloaded"]];
+        return;
+    }
+    if (invalidRange || hasPendingRange || ![text containsString:@"#EXTM3U"]) {
+        [self failJob:job message:[MVLang t:@"Could not open the stream"]];
+        return;
+    }
+    if (invalidMap) {
+        [self failJob:job message:[MVLang t:@"Unsupported HLS initialization segment"]];
+        return;
+    }
+    if (invalidKey) {
+        [self failJob:job message:[MVLang t:@"This stream is protected and can't be downloaded"]];
+        return;
+    }
+    if (unsupported) {
+        [self failJob:job message:[MVLang t:@"Unsupported HLS playlist"]];
         return;
     }
     if (mapURL.length) {
         MVHLSSegment *init = [MVHLSSegment new];
         init.index = -1;
         init.url = mapURL;
-        init.byteStart = -1;
-        init.byteLength = -1;
-        init.key = nil;
+        init.byteStart = mapStart;
+        init.byteLength = mapLength;
         job.mapSegment = init;
         job.isFMP4 = YES;
     }
-    // Drop any segment whose URI line never arrived (malformed playlist).
-    [job.segments filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(MVHLSSegment *s, NSDictionary *bindings) {
-        return s.url.length > 0;
-    }]];
 
-    // Fetch each distinct key once, up front, so a segment never has to wait on
-    // a key request mid-download.
-    NSMutableDictionary<NSString *, MVHLSKey *> *byURI = [NSMutableDictionary dictionary];
+    // Fetch each distinct key once, up front. Reuse key bytes, not the key tag,
+    // since different tags can carry different IVs for the same URI.
+    NSMutableDictionary<NSString *, NSData *> *byURI = [NSMutableDictionary dictionary];
     for (MVHLSSegment *segment in job.segments) {
+        if (job.paused || job.cancelled) return;
         MVHLSKey *key = segment.key;
-        if (!key || [key.method isEqualToString:@"NONE"] || !key.uri.length) continue;
-        if ([key.method isEqualToString:@"SAMPLE-AES"]) {
-            job.task.phase = nil;
-            [self failJob:job message:[MVLang t:@"This stream is protected and can't be downloaded"]];
-            return;
-        }
-        MVHLSKey *existing = byURI[key.uri];
-        if (existing) { segment.key = existing; continue; }
+        if (!key || [key.method isEqualToString:@"NONE"]) continue;
+        NSData *existing = byURI[key.uri];
+        if (existing) { key.data = existing; continue; }
         NSError *keyError = nil;
         NSData *keyData = [self syncGet:key.uri
-                                headers:[MVMediaProbe headersForURL:key.uri referer:job.task.referer]
+                                headers:[MVMediaProbe headersForURL:key.uri referer:job.task.resourceContextURL]
                                   error:&keyError];
-        if (!keyData.length) {
-            job.task.phase = nil;
+        if (keyData.length != 16) {
             [self failJob:job message:[MVLang t:@"Could not open the stream"]];
             return;
         }
         key.data = keyData;
-        byURI[key.uri] = key;
+        byURI[key.uri] = keyData;
     }
 }
 
 #pragma mark - Segments
 
 - (void)pumpJob:(MVHLSJob *)job {
-    if (job.paused || job.cancelled || job.finishing) return;
+    if (![self isCurrentJob:job] || job.failureRequested || job.finishing) return;
     while (job.inFlight < (NSUInteger)kMaxParallelSegments) {
         MVHLSSegment *next = nil;
         for (MVHLSSegment *segment in job.segments) {
-            if (!segment.done && segment.retries < kMaxSegmentRetries) { next = segment; break; }
+            if (!segment.done && !segment.inFlight && segment.retries < kMaxSegmentRetries) { next = segment; break; }
         }
         if (!next) break;
         [self fetchSegment:next job:job];
@@ -358,10 +462,14 @@ static const NSInteger kMaxSegmentRetries = 3;
 }
 
 - (void)fetchSegment:(MVHLSSegment *)segment job:(MVHLSJob *)job {
+    segment.inFlight = YES;
     job.inFlight++;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        if (job.paused || job.cancelled) { dispatch_async(dispatch_get_main_queue(), ^{ job.inFlight--; }); return; }
-        NSDictionary *headers = [MVMediaProbe headersForURL:segment.url referer:job.task.referer];
+        if (job.paused || job.cancelled) {
+            dispatch_async(dispatch_get_main_queue(), ^{ segment.inFlight = NO; job.inFlight--; });
+            return;
+        }
+        NSDictionary *headers = [MVMediaProbe headersForURL:segment.url referer:job.task.resourceContextURL];
         if (segment.byteStart >= 0) {
             NSMutableDictionary *mutable = [headers mutableCopy];
             mutable[@"Range"] = [NSString stringWithFormat:@"bytes=%lld-%lld",
@@ -375,9 +483,13 @@ static const NSInteger kMaxSegmentRetries = 3;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             job.inFlight--;
-            if (job.paused || job.cancelled) return;
+            segment.inFlight = NO;
+            if (![self isCurrentJob:job] || job.failureRequested || job.finishing) return;
             if (data.length) {
-                [self writeSegment:data index:segment.index job:job];
+                if (![self writeSegment:data index:segment.index job:job]) {
+                    [self failJob:job message:[MVLang t:@"Could not save the file"]];
+                    return;
+                }
                 segment.done = YES;
                 job.doneBytes += (long long)data.length;
                 job.task.doneBytes = job.doneBytes;
@@ -392,103 +504,104 @@ static const NSInteger kMaxSegmentRetries = 3;
     });
 }
 
-- (void)writeSegment:(NSData *)data index:(NSInteger)index job:(MVHLSJob *)job {
+- (BOOL)writeSegment:(NSData *)data index:(NSInteger)index job:(MVHLSJob *)job {
     NSString *path = [self segmentPathForJob:job index:index];
-    [[NSFileManager defaultManager] createDirectoryAtPath:path.stringByDeletingLastPathComponent
-                              withIntermediateDirectories:YES attributes:nil error:nil];
-    [data writeToFile:path atomically:NO];
+    if (![MVFileProtection isSafePartialItemAtPath:path] ||
+        [MVFileProtection path:path conflictsWithPaths:[MVFileProtection pathsExcludingTask:job.task record:nil]]) return NO;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:path.stringByDeletingLastPathComponent
+                                   withIntermediateDirectories:YES attributes:nil error:nil]) return NO;
+    return [data writeToFile:path atomically:YES];
 }
 
 #pragma mark - Finish
 
-- (void)finishJob:(MVHLSJob *)job {
-    if (job.finishing) return;
-    job.finishing = YES;
-    MVDownloadTask *task = job.task;
-    task.phase = [MVLang t:@"Joining segments"];
+- (NSString *)runPathForJob:(MVHLSJob *)job kind:(NSString *)kind extension:(NSString *)extension {
+    return [NSString stringWithFormat:@"%@.%@-%@.%@", job.tempPath, kind, job.runToken, extension];
+}
 
+- (void)removeRunOutputsForJob:(MVHLSJob *)job {
+    NSArray *protected = [MVFileProtection pathsExcludingTask:job.task record:nil];
+    [MVFileProtection removePartialItemAtPath:[self runPathForJob:job kind:@"joining" extension:(job.isFMP4 ? @"mp4" : @"ts")]
+                                  protecting:protected];
+    [MVFileProtection removePartialItemAtPath:[self runPathForJob:job kind:@"remux" extension:@"mp4"]
+                                  protecting:protected];
+}
+
+- (void)finishJob:(MVHLSJob *)job {
+    if (job.finishing || ![self isCurrentJob:job]) return;
+    job.finishing = YES;
+    job.task.phase = [MVLang t:@"Joining segments"];
+    if (job.progressBlock) job.progressBlock(job.task);
     NSArray<MVHLSSegment *> *segments = [job.segments copy];
     MVHLSSegment *mapSegment = job.mapSegment;
-    BOOL isFMP4 = job.isFMP4;
+    NSString *joined = [self runPathForJob:job kind:@"joining" extension:(job.isFMP4 ? @"mp4" : @"ts")];
+    NSString *mp4 = [self runPathForJob:job kind:@"remux" extension:@"mp4"];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSFileManager *fm = NSFileManager.defaultManager;
-        NSString *joined = [self joinedPathForJob:job];
         [fm removeItemAtPath:joined error:nil];
-        [fm createFileAtPath:joined contents:nil attributes:nil];
-        NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:joined];
-        BOOL ok = (out != nil);
-        if (mapSegment) {
-            NSData *initData = [NSData dataWithContentsOfFile:[self segmentPathForJob:job index:-1]];
-            if (initData.length) [out writeData:initData];
-        }
-        for (MVHLSSegment *segment in segments) {
-            if (!segment.done) { ok = NO; break; }
-            NSData *chunk = [NSData dataWithContentsOfFile:[self segmentPathForJob:job index:segment.index]
-                                                   options:NSDataReadingMappedIfSafe error:nil];
-            if (!chunk.length) { ok = NO; break; }
-            @try { [out writeData:chunk]; } @catch (NSException *e) { ok = NO; }
+        BOOL ok = [fm createFileAtPath:joined contents:nil attributes:nil];
+        NSFileHandle *out = ok ? [NSFileHandle fileHandleForWritingAtPath:joined] : nil;
+        ok = out != nil && segments.count > 0;
+        NSMutableArray<MVHLSSegment *> *ordered = [NSMutableArray array];
+        if (mapSegment) [ordered addObject:mapSegment];
+        [ordered addObjectsFromArray:segments];
+        for (MVHLSSegment *segment in ordered) {
+            if (!ok) break;
+            if (segment != mapSegment && !segment.done) { ok = NO; break; }
+            NSString *path = [self segmentPathForJob:job index:segment.index];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+            if (!attrs || [attrs[NSFileSize] longLongValue] <= 0) { ok = NO; break; }
+            NSFileHandle *in = [NSFileHandle fileHandleForReadingAtPath:path];
+            if (!in) { ok = NO; break; }
+            @try {
+                while (YES) {
+                    @autoreleasepool {
+                        NSData *chunk = [in readDataOfLength:1024 * 1024];
+                        if (!chunk.length) break;
+                        [out writeData:chunk];
+                    }
+                }
+                [in closeFile];
+            } @catch (NSException *exception) { ok = NO; }
             if (!ok) break;
         }
-        @try { [out synchronizeFile]; [out closeFile]; } @catch (NSException *e) {}
-        if (!ok) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self failJob:job message:[MVLang t:@"Could not open the stream"]];
-            });
-            return;
-        }
+        @try { [out synchronizeFile]; [out closeFile]; } @catch (NSException *exception) { ok = NO; }
 
-        // An fMP4 stream is already MP4. An MPEG-TS stream must be remuxed, and
-        // AVFoundation does that without re-encoding the tracks.
-        NSString *finalPath = joined;
-        if (!isFMP4) {
-            NSString *mp4 = [joined.stringByDeletingPathExtension stringByAppendingPathExtension:@"mp4"];
-            BOOL remuxed = [self remuxTS:joined to:mp4];
-            if (remuxed) {
-                [fm removeItemAtPath:joined error:nil];
-                finalPath = mp4;
-            } else {
-                // Keep the joined .ts so the bytes are not lost; playback may
-                // still work through the share sheet or an external player.
-                MVLogWarn(@"hls: remux failed, keeping .ts");
-                NSString *ts = [joined.stringByDeletingPathExtension stringByAppendingPathExtension:@"ts"];
-                [fm moveItemAtPath:joined toPath:ts error:nil];
-                finalPath = ts;
-            }
-        } else {
-            NSString *mp4 = [joined.stringByDeletingPathExtension stringByAppendingPathExtension:@"mp4"];
-            [fm removeItemAtPath:mp4 error:nil];
-            if ([fm moveItemAtPath:joined toPath:mp4 error:nil]) finalPath = mp4;
+        NSString *result = joined;
+        NSString *extension = job.isFMP4 ? @"mp4" : @"ts";
+        if (ok && job.isFMP4) {
+            BOOL video = [MVMediaConverter hasVideoTrack:joined];
+            BOOL audio = [MVMediaConverter hasAudioTrack:joined];
+            ok = video || audio;
+            if (!video && audio) extension = @"m4a";
         }
-
-        // Clean up the segment files now that the joined file exists.
-        for (MVHLSSegment *segment in segments) {
-            [fm removeItemAtPath:[self segmentPathForJob:job index:segment.index] error:nil];
+        if (ok && !job.isFMP4 && !job.paused && !job.cancelled) {
+            if ([self remuxTS:joined to:mp4]) { result = mp4; extension = @"mp4"; }
+            else MVLogWarn(@"hls: remux failed, keeping .ts");
         }
-        [fm removeItemAtPath:[self segmentPathForJob:job index:-1] error:nil];
-
-        // Move into the category folder with a collision-free name.
-        NSString *directory = [MVPaths directoryForCategory:task.category];
-        NSString *name = task.suggestedFilename.length ? task.suggestedFilename : finalPath.lastPathComponent;
-        NSString *dest = [MVPaths uniquePathInDirectory:directory filename:name];
-        NSError *moveError = nil;
-        if ([fm moveItemAtPath:finalPath toPath:dest error:&moveError]) {
-            finalPath = dest;
-        } else {
-            MVLogError(@"hls: move failed %@", moveError.localizedDescription);
-        }
-
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSDictionary *attrs = [fm attributesOfItemAtPath:finalPath error:nil];
-            long long size = [attrs[NSFileSize] longLongValue];
-            task.path = finalPath;
+            if (![self isCurrentJob:job]) { [self removeRunOutputsForJob:job]; return; }
+            if (!ok) { [self failJob:job message:[MVLang t:@"Could not open the stream"]]; return; }
+            MVDownloadTask *task = job.task;
+            NSString *directory = [MVPaths directoryForCategory:task.category];
+            NSString *base = task.suggestedFilename.length ? task.suggestedFilename.stringByDeletingPathExtension : @"stream";
+            NSString *dest = [MVPaths uniquePathInDirectory:directory filename:[base stringByAppendingPathExtension:extension]];
+            if (![fm moveItemAtPath:result toPath:dest error:nil]) {
+                [self failJob:job message:[MVLang t:@"Could not save the file"]];
+                return;
+            }
+            [self removeRunOutputsForJob:job];
+            [MVHLSDownloader removePartFilesForTask:task];
+            long long size = [[fm attributesOfItemAtPath:dest error:nil][NSFileSize] longLongValue];
+            task.path = dest;
             task.tempPath = nil;
             task.phase = nil;
             task.speed = 0;
             task.eta = 0;
-            if (size > 0) task.totalBytes = size;
-            task.doneBytes = task.totalBytes;
-            @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
-            MVLogInfo(@"hls: finished %@ (%lld bytes) -> %@", task.title, task.totalBytes, finalPath);
+            task.totalBytes = size;
+            task.doneBytes = size;
+            @synchronized (self) { if (_jobs[task.identifier] == job) [_jobs removeObjectForKey:task.identifier]; }
+            MVLogInfo(@"hls: finished %@ (%lld bytes) -> %@", task.title, size, dest);
             if (job.finishedBlock) job.finishedBlock(task);
         });
     });
@@ -512,19 +625,31 @@ static const NSInteger kMaxSegmentRetries = 3;
         if (!ok) MVLogError(@"hls: remux error %@", export.error.localizedDescription);
         dispatch_semaphore_signal(sem);
     }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600 * NSEC_PER_SEC)));
+    long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600LL * NSEC_PER_SEC)));
+    if (timedOut) {
+        [export cancelExport];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            [fm removeItemAtPath:output error:nil];
+        });
+        return NO;
+    }
     return ok && [fm fileExistsAtPath:output];
 }
 
 #pragma mark - Failure
 
 - (void)failJob:(MVHLSJob *)job message:(NSString *)message {
-    MVDownloadTask *task = job.task;
-    @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
-    MVLogError(@"hls: failed %@: %@", task.title, message);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (job.failedBlock) job.failedBlock(task, message);
-    });
+    job.failureRequested = YES;
+    void (^finishFailure)(void) = ^{
+        if (![self isCurrentJob:job]) return;
+        @synchronized (self) { if (_jobs[job.task.identifier] == job) [_jobs removeObjectForKey:job.task.identifier]; }
+        [self removeRunOutputsForJob:job];
+        MVLogError(@"hls: failed %@: %@", job.task.title, message);
+        if (job.failedBlock) job.failedBlock(job.task, message);
+    };
+    if (NSThread.isMainThread) finishFailure();
+    else dispatch_async(dispatch_get_main_queue(), finishFailure);
 }
 
 #pragma mark - Networking
@@ -533,29 +658,64 @@ static const NSInteger kMaxSegmentRetries = 3;
 /// so the simpler synchronous form keeps the playlist/segment logic readable;
 /// the parallelism lives in the segment pump, not in each request.
 - (NSData *)syncGet:(NSString *)url headers:(NSDictionary<NSString *, NSString *> *)headers error:(NSError **)error {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]
+    NSURL *target = [NSURL URLWithString:url];
+    if (!target || ![@[@"http", @"https"] containsObject:target.scheme.lowercaseString]) {
+        if (error) *error = [NSError errorWithDomain:@"MVHLS" code:-1
+                                            userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Could not open the stream"]}];
+        return nil;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:target
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:60];
+    request.HTTPShouldHandleCookies = NO;
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
+    [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+    NSString *rangeHeader = [request valueForHTTPHeaderField:@"Range"];
+    long long requestedStart = -1, requestedEnd = -1;
+    if (rangeHeader.length) {
+        NSScanner *scanner = [NSScanner scannerWithString:rangeHeader];
+        if (![scanner scanString:@"bytes=" intoString:nil] || ![scanner scanLongLong:&requestedStart] ||
+            ![scanner scanString:@"-" intoString:nil] || ![scanner scanLongLong:&requestedEnd] || !scanner.isAtEnd ||
+            requestedStart < 0 || requestedEnd < requestedStart || requestedEnd == LLONG_MAX) {
+            if (error) *error = [NSError errorWithDomain:@"MVHLS" code:-1
+                userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Server did not honor the requested byte range"]}];
+            return nil;
+        }
+    }
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSData *result = nil;
     __block NSError *resultError = nil;
-    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request
+    NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
                                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
         NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
         if (err) resultError = err;
-        else if (http && http.statusCode >= 400) resultError = [NSError errorWithDomain:@"MVHLS"
-                                                                                 code:http.statusCode
-                                                                             userInfo:@{NSLocalizedDescriptionKey:
-                                                                                            [NSString stringWithFormat:@"HTTP %ld", (long)http.statusCode]}];
-        else result = data;
+        else if (!http || http.statusCode < 200 || http.statusCode >= 300) {
+            resultError = [NSError errorWithDomain:@"MVHLS" code:http.statusCode
+                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"HTTP %ld", (long)http.statusCode]}];
+        } else if (rangeHeader.length) {
+            NSString *contentRange = [http valueForHTTPHeaderField:@"Content-Range"];
+            NSString *encoding = [http valueForHTTPHeaderField:@"Content-Encoding"];
+            MVContentRange parsed;
+            if (http.statusCode != 206 ||
+                (encoding.length && [encoding caseInsensitiveCompare:@"identity"] != NSOrderedSame) ||
+                !MVParseContentRange(contentRange.UTF8String, &parsed) ||
+                !MVContentRangeMatches(&parsed, requestedStart, requestedEnd, -1) ||
+                (long long)data.length != requestedEnd - requestedStart + 1) {
+                resultError = [NSError errorWithDomain:@"MVHLS" code:-1
+                    userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Server did not honor the requested byte range"]}];
+            } else result = data;
+        } else if (http.statusCode == 200) result = data;
+        else resultError = [NSError errorWithDomain:@"MVHLS" code:http.statusCode
+            userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Download incomplete"]}];
         dispatch_semaphore_signal(sem);
     }];
     [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)));
-    if (!result && !resultError) {
-        resultError = [NSError errorWithDomain:@"MVHLS" code:-1
-                                     userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Connection timed out"]}];
+    long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)));
+    if (timedOut) {
+        [task cancel];
+        if (error) *error = [NSError errorWithDomain:@"MVHLS" code:-1
+                                           userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Connection timed out"]}];
+        return nil; // do not race the completion handler after a timeout
     }
     if (error) *error = resultError;
     return result;
@@ -566,7 +726,7 @@ static const NSInteger kMaxSegmentRetries = 3;
 /// AES-128-CBC, which is what `#EXT-X-KEY:METHOD=AES-128` specifies. The IV is
 /// the tag's IV or, when absent, the segment's media sequence number.
 - (NSData *)decrypt:(NSData *)data key:(NSData *)key iv:(NSData *)iv sequence:(NSInteger)sequence {
-    if (!key.length || !data.length) return data;
+    if (key.length != 16 || !data.length || (iv.length && iv.length != 16)) return nil;
     NSMutableData *useIV = iv.length ? [iv mutableCopy] : [NSMutableData dataWithLength:16];
     if (!iv.length) {
         // Big-endian sequence number in the last 8 bytes.
@@ -585,7 +745,7 @@ static const NSInteger kMaxSegmentRetries = 3;
                                      out.mutableBytes, outLength, &moved);
     if (status != kCCSuccess) {
         MVLogError(@"hls: AES decrypt failed (%d)", (int)status);
-        return data;   // keep the ciphertext rather than dropping the segment
+        return nil;   // ciphertext must never be reported as playable media
     }
     out.length = moved;
     return out;
@@ -594,30 +754,36 @@ static const NSInteger kMaxSegmentRetries = 3;
 #pragma mark - Helpers
 
 - (NSString *)segmentPathForJob:(MVHLSJob *)job index:(NSInteger)index {
-    NSString *base = job.task.tempPath;
+    NSString *base = job.tempPath;
     if (!base.length) {
-        NSString *directory = [MVPaths directoryForCategory:job.task.category];
-        NSString *name = [MVPaths sanitizeFilename:job.task.suggestedFilename ?: job.task.url.lastPathComponent];
-        if (!name.length) name = @"stream";
-        base = [directory stringByAppendingPathComponent:
-                [NSString stringWithFormat:@".%@.%@.hls", job.task.identifier, name]];
-        job.task.tempPath = base;
+        base = job.task.tempPath;
+        if (!base.length) {
+            NSString *directory = [MVPaths directoryForCategory:job.task.category];
+            NSString *name = [MVPaths sanitizeFilename:job.task.suggestedFilename ?: job.task.url.lastPathComponent];
+            if (!name.length) name = @"stream";
+            base = [directory stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@".%@.%@.hls", job.task.identifier, name]];
+            job.task.tempPath = base;
+        }
+        job.tempPath = base;
     }
     return [NSString stringWithFormat:@"%@.seg%ld", base, (long)index];
 }
 
-- (NSString *)joinedPathForJob:(MVHLSJob *)job {
-    return [NSString stringWithFormat:@"%@.joined", job.task.tempPath];
-}
-
-/// A quoted `ATTR=value` from an HLS tag, without its surrounding quotes.
+/// An exact HLS attribute name/value (not a suffix such as X-URI).
 - (NSString *)attribute:(NSString *)name in:(NSString *)line {
-    NSString *pattern = [NSString stringWithFormat:@"%@=(\"[^\"]*\"|[^,]*)", name];
+    NSString *pattern = [NSString stringWithFormat:@"(?:^|[:,])[ \\t]*%@[ \\t]*=(\"[^\"]*\"|[^,]*)",
+                         [NSRegularExpression escapedPatternForString:name]];
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
     NSTextCheckingResult *match = [regex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
     if (!match || match.numberOfRanges < 2) return nil;
-    NSString *value = [line substringWithRange:[match rangeAtIndex:1]];
-    return [value stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\""]];
+    NSString *value = [[line substringWithRange:[match rangeAtIndex:1]]
+                       stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if ([value hasPrefix:@"\""]) {
+        if (value.length < 2 || ![value hasSuffix:@"\""]) return nil;
+        value = [value substringWithRange:NSMakeRange(1, value.length - 2)];
+    }
+    return value;
 }
 
 - (NSString *)absoluteURL:(NSString *)url base:(NSString *)base {
@@ -626,29 +792,35 @@ static const NSInteger kMaxSegmentRetries = 3;
     return [[NSURL URLWithString:url relativeToURL:[NSURL URLWithString:base]] absoluteString];
 }
 
-/// "0x1234…" or "1234…" (16 bytes) into an NSData IV.
+/// A hexadecimal IV is a 128-bit big-endian number, left-padded with zeroes.
 - (NSData *)dataFromHexIV:(NSString *)hex {
-    NSString *clean = [hex lowercaseString];
+    NSString *clean = hex.lowercaseString;
     if ([clean hasPrefix:@"0x"]) clean = [clean substringFromIndex:2];
-    if (clean.length % 2 != 0) clean = [@"0" stringByAppendingString:clean];
-    NSMutableData *data = [NSMutableData dataWithCapacity:clean.length / 2];
-    for (NSUInteger i = 0; i + 1 < clean.length; i += 2) {
-        unsigned int byte = 0;
-        [[NSScanner scannerWithString:[clean substringWithRange:NSMakeRange(i, 2)]] scanHexInt:&byte];
-        uint8_t b = (uint8_t)byte;
-        [data appendBytes:&b length:1];
+    if (!clean.length || clean.length > 32) return nil;
+    NSMutableData *data = [NSMutableData dataWithLength:16];
+    uint8_t *bytes = data.mutableBytes;
+    for (NSUInteger i = 0; i < clean.length; i++) {
+        unichar c = [clean characterAtIndex:clean.length - i - 1];
+        int digit = c >= '0' && c <= '9' ? c - '0' : (c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1);
+        if (digit < 0) return nil;
+        bytes[15 - i / 2] |= (uint8_t)(digit << ((i % 2) * 4));
     }
     return data;
 }
 
 + (void)removePartFilesForTask:(MVDownloadTask *)task {
-    if (!task.tempPath.length) return;
+    if (![MVFileProtection isSafePartialBase:task.tempPath]) return;
     NSFileManager *fm = NSFileManager.defaultManager;
-    [fm removeItemAtPath:[NSString stringWithFormat:@"%@.joined", task.tempPath] error:nil];
-    for (NSInteger i = -1; i < 4096; i++) {
-        NSString *path = [NSString stringWithFormat:@"%@.seg%ld", task.tempPath, (long)i];
-        if (![fm fileExistsAtPath:path]) continue;
-        [fm removeItemAtPath:path error:nil];
+    NSArray<NSString *> *protected = [MVFileProtection pathsExcludingTask:task record:nil];
+    NSString *directory = task.tempPath.stringByDeletingLastPathComponent;
+    NSString *prefix = [task.tempPath.lastPathComponent stringByAppendingString:@"."];
+    for (NSString *name in [fm contentsOfDirectoryAtPath:directory error:nil]) {
+        if (![name hasPrefix:prefix]) continue;
+        NSString *suffix = [name substringFromIndex:prefix.length];
+        if ([suffix hasPrefix:@"seg"] || [suffix hasPrefix:@"joining-"] || [suffix hasPrefix:@"remux-"] ||
+            [suffix isEqualToString:@"joined"] || [suffix isEqualToString:@"mp4"] || [suffix isEqualToString:@"ts"]) {
+            [MVFileProtection removePartialItemAtPath:[directory stringByAppendingPathComponent:name] protecting:protected];
+        }
     }
 }
 

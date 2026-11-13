@@ -1,14 +1,38 @@
 #import "MVDownloadTask.h"
+#import "MVCookiePolicy.h"
 #import "MVPaths.h"
+#include <math.h>
+
+static NSNumber *MVTaskNumber(id value) {
+    return [value isKindOfClass:NSNumber.class] ? value : @0;
+}
 
 @implementation MVDownloadTask
+
+@synthesize headers = _headers;
+
+- (void)setHeaders:(NSDictionary<NSString *, NSString *> *)headers {
+    // Legacy/raw Cookie headers have no reliable scope or expiry, and could
+    // survive a browser-data clear. Never retain or replay them.
+    _headers = [[MVCookiePolicy headersWithoutCookies:headers] copy];
+}
+
+- (NSString *)resourceContextURL {
+    return self.referer.length ? self.referer : self.url;
+}
 
 + (instancetype)taskFromDictionary:(NSDictionary *)dict {
     MVDownloadTask *task = [MVDownloadTask new];
     task.segments = @[];
-    task.identifier = [dict[@"id"] isKindOfClass:NSString.class] ? dict[@"id"] : NSUUID.UUID.UUIDString;
-    task.source = (MVTaskSource)[dict[@"source"] integerValue];
-    task.state = (MVTaskState)[dict[@"state"] integerValue];
+    NSString *identifier = [dict[@"id"] isKindOfClass:NSString.class] ? dict[@"id"] : nil;
+    task.identifier = identifier.length ? identifier : NSUUID.UUID.UUIDString;
+    task.source = (MVTaskSource)MVTaskNumber(dict[@"source"]).integerValue;
+    // Invalid, fractional or missing states must not turn into Queued when
+    // narrowed during recovery and unexpectedly start a download.
+    id rawState = dict[@"state"];
+    double value = [rawState isKindOfClass:NSNumber.class] ? [rawState doubleValue] : NAN;
+    task.state = isfinite(value) && floor(value) == value && value >= MVNativeQueued && value <= MVNativeCancelled ?
+                 (MVTaskState)(NSInteger)value : MVTaskStateFailed;
     task.url = [dict[@"url"] isKindOfClass:NSString.class] ? dict[@"url"] : @"";
     task.headers = [dict[@"headers"] isKindOfClass:NSDictionary.class] ? dict[@"headers"] : @{};
     task.referer = [dict[@"referer"] isKindOfClass:NSString.class] ? dict[@"referer"] : nil;
@@ -17,12 +41,12 @@
     task.category = [dict[@"category"] isKindOfClass:NSString.class] ? dict[@"category"] : @"Other";
     task.path = [dict[@"path"] isKindOfClass:NSString.class] ? dict[@"path"] : nil;
     task.tempPath = [dict[@"tempPath"] isKindOfClass:NSString.class] ? dict[@"tempPath"] : nil;
-    task.totalBytes = [dict[@"total"] longLongValue];
-    task.doneBytes = [dict[@"done"] longLongValue];
+    task.totalBytes = MAX(0LL, MVTaskNumber(dict[@"total"]).longLongValue);
+    task.doneBytes = MAX(0LL, MVTaskNumber(dict[@"done"]).longLongValue);
     task.error = [dict[@"error"] isKindOfClass:NSString.class] ? dict[@"error"] : nil;
     task.phase = [dict[@"phase"] isKindOfClass:NSString.class] ? dict[@"phase"] : nil;
-    task.acceptsRanges = [dict[@"ranges"] boolValue];
-    task.connections = (NSUInteger)MAX(1, [dict[@"connections"] integerValue]);
+    task.acceptsRanges = MVTaskNumber(dict[@"ranges"]).boolValue;
+    task.connections = (NSUInteger)MAX(1, MIN(16, MVTaskNumber(dict[@"connections"]).integerValue));
     NSMutableArray<NSArray<NSNumber *> *> *segments = [NSMutableArray array];
     if ([dict[@"segments"] isKindOfClass:NSArray.class]) {
         for (id pair in dict[@"segments"]) {
@@ -34,9 +58,9 @@
     task.segments = segments;
     task.etag = [dict[@"etag"] isKindOfClass:NSString.class] ? dict[@"etag"] : nil;
     task.lastModified = [dict[@"lastModified"] isKindOfClass:NSString.class] ? dict[@"lastModified"] : nil;
-    task.createdAt = [dict[@"createdAt"] doubleValue];
-    task.updatedAt = [dict[@"updatedAt"] doubleValue];
-    task.priority = [dict[@"priority"] integerValue];
+    task.createdAt = MVTaskNumber(dict[@"createdAt"]).doubleValue;
+    task.updatedAt = MVTaskNumber(dict[@"updatedAt"]).doubleValue;
+    task.priority = MVTaskNumber(dict[@"priority"]).integerValue;
     if (!task.createdAt) task.createdAt = NSDate.date.timeIntervalSince1970;
     return task;
 }

@@ -9,11 +9,14 @@ simply never moved.
 
 Run with: python3 -m pytest tests/ -q   (or: python3 tests/test_downloader.py)
 """
+import hashlib
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 
@@ -268,6 +271,138 @@ class FragmentFormatTests(unittest.TestCase):
         for kind in ["video", "audio"]:
             with self.subTest(kind=kind):
                 self.assertIn("/", self.downloader._fragment_format(kind, "best"))
+
+
+class OutputOwnershipTests(unittest.TestCase):
+    """Different records must never share yt-dlp final or partial paths."""
+
+    def setUp(self):
+        import downloader
+        self.downloader = downloader
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.env = mock.patch.dict(os.environ, {"MV_DOCUMENTS": self.directory.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_workspaces_are_stable_distinct_and_path_safe(self):
+        task = "../../arbitrary/معرّف"
+        work = self.downloader._task_output_dir(task)
+        expected = hashlib.sha256(task.encode("utf-8")).hexdigest()
+        self.assertEqual(work, os.path.join(self.directory.name, "MoodyVid", ".moodyvid-work", expected))
+        self.assertEqual(work, self.downloader._task_output_dir(task))
+        self.assertNotEqual(work, self.downloader._task_output_dir(task + "2"))
+        self.assertEqual(self.downloader._task_output_dir(""), self.downloader._output_dir())
+
+    def test_resolved_same_title_and_id_stay_owned_by_their_record(self):
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def extract_info(self, url, download):
+                self.assert_download = download
+                path = (self.opts["outtmpl"].replace("%(title).100B", "Same title")
+                        .replace("%(id).64B", "same-id").replace("%(ext)s", "mp4"))
+                with open(path, "wb") as f:
+                    f.write(url.encode("utf-8"))
+                return {"title": "Same title", "ext": "mp4", "requested_downloads": [{"filepath": path}]}
+
+        fake = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        with mock.patch.dict(sys.modules, {"yt_dlp": fake}), \
+             mock.patch.object(self.downloader, "_native", return_value=None), \
+             mock.patch.object(self.downloader, "_client_order", return_value=[None]):
+            a = json.loads(self.downloader.download("https://one.example/a", "audio", _task="record-a"))
+            b = json.loads(self.downloader.download("https://two.example/b", "audio", _task="record-b"))
+            video = json.loads(self.downloader.download_fragment("https://one.example/a", "video", _task="record-a"))
+            audio = json.loads(self.downloader.download_fragment("https://one.example/a", "audio", _task="record-a"))
+            resumed = json.loads(self.downloader.download("https://one.example/a", "audio", _task="record-a"))
+        self.assertNotEqual(a["path"], b["path"])
+        self.assertEqual(a["path"], resumed["path"])
+        self.assertEqual(os.path.dirname(a["path"]), self.downloader._task_output_dir("record-a"))
+        self.assertNotEqual(video["path"], audio["path"])
+        self.assertEqual(os.path.dirname(video["path"]), os.path.dirname(a["path"]))
+        with open(a["path"], "rb") as f:
+            self.assertEqual(f.read(), b"https://one.example/a")
+        with open(b["path"], "rb") as f:
+            self.assertEqual(f.read(), b"https://two.example/b")
+
+    def test_unknown_fragment_kind_cannot_insert_a_path(self):
+        result = json.loads(self.downloader.download_fragment("https://example.test", "../../other", _task="id"))
+        self.assertIn("error", result)
+        self.assertFalse(os.path.exists(self.downloader._task_output_dir("id")))
+
+    def test_redirected_workspace_root_or_owner_is_rejected(self):
+        output = self.downloader._output_dir()
+        os.makedirs(output)
+        outside = os.path.join(self.directory.name, "outside")
+        os.mkdir(outside)
+        sentinel = os.path.join(outside, "keep")
+        with open(sentinel, "wb") as f:
+            f.write(b"untouched")
+        root = os.path.join(output, ".moodyvid-work")
+        os.symlink(outside, root)
+        with self.assertRaises(OSError):
+            self.downloader._prepare_output_dir("record")
+        os.unlink(root)
+        os.mkdir(root)
+        os.symlink(outside, self.downloader._task_output_dir("record"))
+        with self.assertRaises(OSError):
+            self.downloader._prepare_output_dir("record")
+        with open(sentinel, "rb") as f:
+            self.assertEqual(f.read(), b"untouched")
+
+    def test_cooperative_pause_preserves_task_partial_for_resume(self):
+        class Native:
+            stopped = False
+            def cancelled(self, task):
+                return False
+            def paused(self, task):
+                return self.stopped
+            def set_progress(self, task, progress):
+                pass
+
+        native = Native()
+        runs = []
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def extract_info(self, url, download):
+                path = (self.opts["outtmpl"].replace("%(title).100B", "clip")
+                        .replace("%(id).64B", "id").replace("%(ext)s", "mp4"))
+                partial = path + ".part"
+                runs.append(partial)
+                if len(runs) == 1:
+                    with open(partial, "wb") as f:
+                        f.write(b"first")
+                    native.stopped = True
+                    self.opts["progress_hooks"][0]({"status": "downloading"})
+                with open(partial, "ab") as f:
+                    f.write(b"second")
+                os.rename(partial, path)
+                return {"title": "clip", "requested_downloads": [{"filepath": path}]}
+
+        fake = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        with mock.patch.dict(sys.modules, {"yt_dlp": fake}), \
+             mock.patch.object(self.downloader, "_native", return_value=native), \
+             mock.patch.object(self.downloader, "_client_order", return_value=[None]):
+            paused = json.loads(self.downloader.download("https://example.test/a", "audio", _task="record"))
+            self.assertIn("paused", paused["error"])
+            self.assertTrue(os.path.isfile(runs[0]))
+            native.stopped = False
+            resumed = json.loads(self.downloader.download("https://example.test/a", "audio", _task="record"))
+        self.assertEqual(runs[0], runs[1])
+        with open(resumed["path"], "rb") as f:
+            self.assertEqual(f.read(), b"firstsecond")
 
 
 if __name__ == "__main__":

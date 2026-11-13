@@ -1,10 +1,14 @@
 #import "MVDownloadEngine.h"
 #import "MVPython.h"
 #import "MVPaths.h"
+#import "MVFileProtection.h"
+#import "MVTaskStore.h"
 #import "MVLang.h"
 #import "MVMediaConverter.h"
 #import "MVBackgroundKeeper.h"
 #import "MVLog.h"
+#import "MVHTTPSession.h"
+#import "MVNetworkPolicy.h"
 #import <Photos/Photos.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -13,15 +17,22 @@
 /// Two at a time keeps the CPU and the network busy without starving the UI
 /// thread, which the Python bridge shares during the extractor phase.
 static const NSUInteger kMaxConcurrent = 2;
+// A delete requested while Python is unwinding must survive a process restart.
+static NSString *const kPendingPythonDeletions = @"MVPendingPythonWorkDeletions";
 
 @interface MVDownloadJob : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *url;
 @property (nonatomic, copy) NSString *quality;
+@property (nonatomic, copy) NSString *runToken;
 @property (nonatomic, copy, nullable) void (^completion)(NSString *, NSString *);
 @end
 
 @implementation MVDownloadJob
+- (instancetype)init {
+    if ((self = [super init])) _runToken = NSUUID.UUID.UUIDString;
+    return self;
+}
 @end
 
 @implementation MVDownloadEngine {
@@ -29,6 +40,7 @@ static const NSUInteger kMaxConcurrent = 2;
     NSMutableArray<MVDownloadJob *> *_queue;
     NSMutableDictionary<NSString *, MVDownloadJob *> *_running;
     NSMutableSet<NSString *> *_cancelled;
+    NSMutableSet<NSString *> *_deleteAfterStop;
     /// Fragment files a merged job has written so far, keyed by job id, so a
     /// cancel that lands between the two streams does not leave them orphaned.
     NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *_fragments;
@@ -49,8 +61,24 @@ static const NSUInteger kMaxConcurrent = 2;
         _queue = [NSMutableArray array];
         _running = [NSMutableDictionary dictionary];
         _cancelled = [NSMutableSet set];
+        _deleteAfterStop = [NSMutableSet set];
+        NSArray *pending = [NSUserDefaults.standardUserDefaults arrayForKey:kPendingPythonDeletions];
+        for (id identifier in pending) {
+            if ([identifier isKindOfClass:NSString.class] && [identifier length]) [_deleteAfterStop addObject:identifier];
+        }
         _fragments = [NSMutableDictionary dictionary];
         _backgroundTask = UIBackgroundTaskInvalid;
+        // No Python worker from the previous process is alive. A still-present
+        // row means the app stopped before the delete committed; keep its data.
+        for (NSString *identifier in [_deleteAfterStop copy]) {
+            if ([self recordFor:identifier] || [self removePythonWorkspace:identifier]) {
+                [_deleteAfterStop removeObject:identifier];
+            }
+        }
+        [self savePendingPythonDeletions];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(pump)
+                                                   name:MVNetworkPolicyDidChangeNotification object:nil];
+        (void)MVNetworkPolicy.shared;
     }
     return self;
 }
@@ -63,8 +91,9 @@ static const NSUInteger kMaxConcurrent = 2;
     if (!thumbURL.length || !url.length) return;
     NSURL *source = [NSURL URLWithString:thumbURL];
     if (!source) return;
-    NSURLRequest *request = [NSURLRequest requestWithURL:source cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:source cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
+    request.HTTPShouldHandleCookies = NO;
+    [[MVHTTPSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
         if (err || !data.length) return;
         UIImage *image = [UIImage imageWithData:data];
         if (!image) return;
@@ -104,29 +133,49 @@ static const NSUInteger kMaxConcurrent = 2;
 }
 
 - (void)resumeInterrupted {
-    // Records in Waiting/Active with no process behind them came from an
-    // interrupted session (a crash or the system killing us in the background).
-    // Put them back in the queue; yt-dlp continues any .part files it finds.
-    // Paused records are deliberately left alone: the user stopped them and the
-    // .part file waits for an explicit Resume.
+    // The store loads synchronously and changes only interrupted Active records
+    // to Waiting. Do not touch Paused records or a run already in this process.
     for (MVDownloadRecord *r in MVDownloadStore.shared.records) {
-        if (r.state == MVDownloadStateWaiting || r.state == MVDownloadStateActive) {
-            MVDownloadJob *job = [MVDownloadJob new];
-            job.identifier = r.identifier;
-            job.url = r.url;
-            job.quality = r.quality ?: @"best";
-            [_queue addObject:job];
-            r.state = MVDownloadStateWaiting;
+        if (r.state != MVDownloadStateWaiting || _running[r.identifier]) continue;
+        BOOL queued = NO;
+        for (MVDownloadJob *existing in _queue) {
+            if ([existing.identifier isEqualToString:r.identifier]) { queued = YES; break; }
         }
+        if (queued) continue;
+        MVDownloadJob *job = [MVDownloadJob new];
+        job.identifier = r.identifier;
+        job.url = r.url;
+        job.quality = r.quality ?: @"best";
+        [_queue addObject:job];
     }
     [self pump];
 }
 
-/// Starts queued jobs while there is room. Called on the main queue.
+/// A resumed job must wait for its previous Python call to unwind. Jobs for the
+/// same URL also wait for each other, since yt-dlp's filenames can coincide.
+/// Called on the main queue, including after a network-path update.
 - (void)pump {
-    while (_running.count < kMaxConcurrent && _queue.count) {
-        MVDownloadJob *job = _queue.firstObject;
-        [_queue removeObjectAtIndex:0];
+    // A removed row must not leave an unstartable job in memory forever.
+    for (MVDownloadJob *queued in [_queue copy]) {
+        MVDownloadRecord *record = [self recordFor:queued.identifier];
+        if (!record || record.state != MVDownloadStateWaiting) [_queue removeObject:queued];
+    }
+    while (MVNetworkPolicy.shared.allowsNewDownloads && _running.count < kMaxConcurrent && _queue.count) {
+        NSUInteger eligible = NSNotFound;
+        for (NSUInteger i = 0; i < _queue.count; i++) {
+            MVDownloadJob *candidate = _queue[i];
+            MVDownloadRecord *record = [self recordFor:candidate.identifier];
+            if (!record || record.state != MVDownloadStateWaiting) continue;
+            if (_running[candidate.identifier]) continue;
+            BOOL sameURLRunning = NO;
+            for (MVDownloadJob *running in _running.allValues) {
+                if ([running.url isEqualToString:candidate.url]) { sameURLRunning = YES; break; }
+            }
+            if (!sameURLRunning) { eligible = i; break; }
+        }
+        if (eligible == NSNotFound) break;
+        MVDownloadJob *job = _queue[eligible];
+        [_queue removeObjectAtIndex:eligible];
         [self startJob:job];
     }
     [self updateBackgroundTask];
@@ -151,6 +200,9 @@ static const NSUInteger kMaxConcurrent = 2;
 - (void)startJob:(MVDownloadJob *)job {
     MVLogInfo(@"engine: start %@ (%@)", job.url, job.quality);
     MVDownloadRecord *record = [self recordFor:job.identifier];
+    if (!record || record.state != MVDownloadStateWaiting || _running[job.identifier]) return;
+    // Clear the pause only when the previous invocation has released its slot.
+    [[MVPython shared] resumePausedTask:job.identifier];
     record.state = MVDownloadStateActive;
     [MVDownloadStore.shared update:record];
 
@@ -178,6 +230,66 @@ static const NSUInteger kMaxConcurrent = 2;
     }];
 }
 
+/// Work directories are per record, not per URL or media title. Refuse a
+/// redirected workspace root or an owner directory replaced with a symlink.
+- (BOOL)isSafePythonWorkspace:(NSString *)workspace {
+    if (!workspace.length) return NO;
+    NSString *downloads = [MVPaths.downloads stringByResolvingSymlinksInPath];
+    NSString *expectedParent = [downloads stringByAppendingPathComponent:@".moodyvid-work"];
+    NSString *actualParent = [workspace.stringByDeletingLastPathComponent stringByResolvingSymlinksInPath];
+    if (![actualParent isEqualToString:expectedParent]) return NO;
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:workspace error:nil];
+    return ![attrs[NSFileType] isEqual:NSFileTypeSymbolicLink];
+}
+
+- (void)savePendingPythonDeletions {
+    [NSUserDefaults.standardUserDefaults setObject:_deleteAfterStop.allObjects forKey:kPendingPythonDeletions];
+}
+
+/// This is called only once the associated worker has unwound (or after launch,
+/// when no prior worker exists). Never delete a workspace referenced by another
+/// saved record, including records written by older versions of the app.
+- (BOOL)removePythonWorkspace:(NSString *)identifier {
+    NSString *workspace = [MVPaths pythonWorkDirectoryForIdentifier:identifier];
+    if (![self isSafePythonWorkspace:workspace]) return NO;
+    NSArray *protected = [MVFileProtection pathsExcludingTask:nil record:nil];
+    return [MVFileProtection removeItemAtPath:workspace protecting:protected];
+}
+
+/// Check paths before using them as converter inputs as well as at publication.
+- (BOOL)isOwnedPythonFile:(id)path identifier:(NSString *)identifier {
+    if (![path isKindOfClass:NSString.class] || ![path length]) return NO;
+    NSString *workspace = [MVPaths pythonWorkDirectoryForIdentifier:identifier];
+    if (![self isSafePythonWorkspace:workspace] ||
+        ![[path stringByDeletingLastPathComponent].stringByStandardizingPath isEqualToString:workspace.stringByStandardizingPath]) return NO;
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    return [attrs[NSFileType] isEqual:NSFileTypeRegular];
+}
+
+/// Publish only this record's own regular file, after all post-processing. The
+/// public name remains readable while yt-dlp's partials stay isolated on disk.
+- (NSString *)publishPythonOutput:(NSString *)path forJob:(MVDownloadJob *)job {
+    if (![self isOwnedPythonFile:path identifier:job.identifier]) return nil;
+    NSString *name = path.lastPathComponent;
+    NSString *stem = name.stringByDeletingPathExtension;
+    NSString *tokenSuffix = [@"." stringByAppendingString:job.runToken];
+    if ([stem hasSuffix:tokenSuffix]) {
+        stem = [stem substringToIndex:stem.length - tokenSuffix.length];
+        name = name.pathExtension.length ? [stem stringByAppendingPathExtension:name.pathExtension] : stem;
+    }
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *destination = [MVPaths uniquePathInDirectory:MVPaths.downloads filename:name];
+    return [fm moveItemAtPath:path toPath:destination error:nil] ? destination : nil;
+}
+
+/// Converter callbacks can arrive after a timeout/cancellation. Never let an old
+/// exporter delete or overwrite a later run's temporary output.
+- (NSString *)intermediatePath:(NSString *)proposed forJob:(MVDownloadJob *)job {
+    NSString *stem = proposed.stringByDeletingPathExtension;
+    NSString *unique = [stem stringByAppendingFormat:@".%@", job.runToken];
+    return proposed.pathExtension.length ? [unique stringByAppendingPathExtension:proposed.pathExtension] : unique;
+}
+
 /// The path a post-download step (mux, encode) writes to. It must differ from
 /// the downloaded fragment: the mux deletes its target before writing, and the
 /// video fragment already ends in `.mp4`, so reusing that name destroyed the
@@ -195,16 +307,15 @@ static const NSUInteger kMaxConcurrent = 2;
     return [[base stringByAppendingString:suffix] stringByAppendingPathExtension:ext];
 }
 
-/// Removes leftover fragments once a merged result exists, or once a run has
-/// failed or been cancelled and the fragments are of no use any more.
+/// Removes an unsuccessful generated output unless another record owns it.
 - (void)discardFragments:(NSArray<NSString *> *)paths {
+    NSArray *protected = [MVFileProtection pathsExcludingTask:nil record:nil];
     for (NSString *path in paths) {
-        if (!path.length) continue;
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        [MVFileProtection removePartialItemAtPath:path protecting:protected];
     }
 }
 
-/// Remembers a fragment while a merged job runs, so a cancel can clean it up.
+/// Remembers a fragment during this process so a retry can reuse it.
 - (void)trackFragment:(NSString *)path forJob:(NSString *)identifier {
     if (!path.length || !identifier.length) return;
     NSMutableArray<NSString *> *list = _fragments[identifier];
@@ -215,11 +326,18 @@ static const NSUInteger kMaxConcurrent = 2;
     [list addObject:path];
 }
 
-/// Deletes every fragment still tracked for a job and forgets the job.
-- (void)discardTrackedFragmentsFor:(NSString *)identifier {
-    NSArray<NSString *> *paths = _fragments[identifier];
-    if (paths) [self discardFragments:paths];
-    [_fragments removeObjectForKey:identifier];
+/// All intermediate callbacks run on the main queue. A pause or cancel can
+/// arrive between Python's last progress hook and a subsequent mux/encode.
+- (BOOL)jobShouldStop:(MVDownloadJob *)job {
+    if (_running[job.identifier] != job || [_cancelled containsObject:job.identifier]) return YES;
+    MVDownloadRecord *record = [self recordFor:job.identifier];
+    return !record || record.state == MVDownloadStatePaused || record.state == MVDownloadStateCancelled ||
+           [[MVPython shared] isTaskPaused:job.identifier];
+}
+
+- (void)finishStoppedJob:(MVDownloadJob *)job {
+    NSString *error = [_cancelled containsObject:job.identifier] ? @"cancelled" : @"paused";
+    [self finishJob:job result:nil error:error];
 }
 
 /// A fragment already downloaded for this job that is still on disk, found by
@@ -228,15 +346,9 @@ static const NSUInteger kMaxConcurrent = 2;
 - (NSString *)existingFragmentFor:(NSString *)identifier marker:(NSString *)marker {
     for (NSString *path in _fragments[identifier]) {
         if (![path.lastPathComponent containsString:marker]) continue;
-        if ([NSFileManager.defaultManager fileExistsAtPath:path]) return path;
+        if ([self isOwnedPythonFile:path identifier:identifier]) return path;
     }
     return nil;
-}
-
-/// True when a job ended because the user paused it rather than because it
-/// failed. A pause keeps the partial files; a failure throws them away.
-- (BOOL)isPauseError:(NSString *)error {
-    return [error isEqualToString:@"paused"];
 }
 
 /// Two fragments then a native mux. Keeps a single record and a single progress
@@ -259,14 +371,14 @@ static const NSUInteger kMaxConcurrent = 2;
                  completion:^(NSDictionary *videoResult, NSString *vErr) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
-        NSString *videoPath = videoResult[@"path"];
-        if (!videoPath.length) {
-            // A pause keeps whatever is on disk; a real failure cleans up.
-            if (![self_ isPauseError:vErr]) [self_ discardTrackedFragmentsFor:job.identifier];
-            [self_ finishJob:job result:nil error:vErr ?: [MVLang t:@"Unknown error"]];
+        NSString *videoPath = [videoResult[@"path"] isKindOfClass:NSString.class] ? videoResult[@"path"] : nil;
+        BOOL owned = [self_ isOwnedPythonFile:videoPath identifier:job.identifier];
+        if (owned) [self_ trackFragment:videoPath forJob:job.identifier];
+        if ([self_ jobShouldStop:job]) { [self_ finishStoppedJob:job]; return; }
+        if (!owned) {
+            [self_ finishJob:job result:nil error:vErr ?: [MVLang t:@"Could not read this file"]];
             return;
         }
-        [self_ trackFragment:videoPath forJob:job.identifier];
         [self_ continueMergedJob:job videoPath:videoPath videoResult:videoResult];
     }];
 }
@@ -277,19 +389,23 @@ static const NSUInteger kMaxConcurrent = 2;
                 videoPath:(NSString *)videoPath
               videoResult:(NSDictionary *)videoResult {
     __weak typeof(self) weakSelf = self;
+    if ([self jobShouldStop:job]) { [self finishStoppedJob:job]; return; }
     // Some sites only offer one combined file. When the picture already carries
     // its sound, the second download would fetch the same bytes again, so finish
     // here — under a clean name, without the `.video` mark.
     if ([MVMediaConverter hasAudioTrack:videoPath]) {
-        NSString *clean = [self derivedPathFor:videoPath suffix:@"" ext:@"mp4"];
-        if (![clean isEqualToString:videoPath]) {
-            [[NSFileManager defaultManager] removeItemAtPath:clean error:nil];
-            [[NSFileManager defaultManager] moveItemAtPath:videoPath toPath:clean error:nil];
+        NSString *ext = videoPath.pathExtension.length ? videoPath.pathExtension : @"mp4";
+        NSString *proposed = [self derivedPathFor:videoPath suffix:@"" ext:ext];
+        NSString *clean = [MVPaths uniquePathInDirectory:proposed.stringByDeletingLastPathComponent
+                                                filename:proposed.lastPathComponent];
+        if (![NSFileManager.defaultManager moveItemAtPath:videoPath toPath:clean error:nil]) {
+            // A failed rename must not turn a valid combined file into a lost one.
+            clean = videoPath;
+            [_fragments[job.identifier] removeObject:videoPath];
         }
-        [self discardTrackedFragmentsFor:job.identifier];
         NSDictionary *done = @{@"path": clean, @"title": videoResult[@"title"] ?: @"",
                                @"thumbnail": videoResult[@"thumbnail"] ?: @"",
-                               @"ext": @"mp4"};
+                               @"ext": ext};
         [self finishJob:job result:done error:nil];
         return;
     }
@@ -307,15 +423,15 @@ static const NSUInteger kMaxConcurrent = 2;
                  completion:^(NSDictionary *audioResult, NSString *aErr) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
-        NSString *audioPath = audioResult[@"path"];
-        if (!audioPath.length) {
-            // Keep the finished video fragment when the pause is what stopped
-            // us, so resuming only has to fetch the audio.
-            if (![self_ isPauseError:aErr]) [self_ discardTrackedFragmentsFor:job.identifier];
-            [self_ finishJob:job result:nil error:aErr ?: [MVLang t:@"Unknown error"]];
+        NSString *audioPath = [audioResult[@"path"] isKindOfClass:NSString.class] ? audioResult[@"path"] : nil;
+        BOOL owned = [self_ isOwnedPythonFile:audioPath identifier:job.identifier];
+        if (owned) [self_ trackFragment:audioPath forJob:job.identifier];
+        if ([self_ jobShouldStop:job]) { [self_ finishStoppedJob:job]; return; }
+        if (!owned) {
+            // Keep the completed video for a later retry or resume.
+            [self_ finishJob:job result:nil error:aErr ?: [MVLang t:@"Could not read this file"]];
             return;
         }
-        [self_ trackFragment:audioPath forJob:job.identifier];
         [self_ muxMergedJob:job videoPath:videoPath audioPath:audioPath videoResult:videoResult];
     }];
 }
@@ -328,20 +444,24 @@ static const NSUInteger kMaxConcurrent = 2;
          videoResult:(NSDictionary *)videoResult {
     __weak typeof(self) weakSelf = self;
     [self setTransient:[self recordFor:job.identifier] message:[MVLang t:@"Merging…"]];
-    NSString *outPath = [self derivedPathFor:videoPath suffix:@"-merged" ext:@"mp4"];
+    NSString *proposed = [self derivedPathFor:videoPath suffix:@"-merged" ext:@"mp4"];
+    NSString *outPath = [self intermediatePath:proposed forJob:job];
     [MVMediaConverter muxVideo:videoPath audio:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
+        if ([self_ jobShouldStop:job]) {
+            [self_ discardFragments:@[outPath]];
+            [self_ finishStoppedJob:job];
+            return;
+        }
         if (ok) {
-            [self_ discardTrackedFragmentsFor:job.identifier];
             NSDictionary *merged = @{@"path": outPath, @"title": videoResult[@"title"] ?: @"",
                                      @"thumbnail": videoResult[@"thumbnail"] ?: @"",
                                      @"ext": @"mp4"};
             [self_ finishJob:job result:merged error:nil];
         } else {
-            // A half-written merged file would show up as a broken entry.
+            // Drop the failed output but retain source fragments for a retry.
             [self_ discardFragments:@[outPath]];
-            [self_ discardTrackedFragmentsFor:job.identifier];
             [self_ finishJob:job result:nil error:err ?: [MVLang t:@"Merge failed"]];
         }
     }];
@@ -356,21 +476,28 @@ static const NSUInteger kMaxConcurrent = 2;
                  completion:^(NSDictionary *result, NSString *error) {
         typeof(self) self_ = weakSelf;
         if (!self_) return;
-        NSString *audioPath = result[@"path"];
-        if (!audioPath.length) {
-            [self_ finishJob:job result:nil error:error ?: [MVLang t:@"Unknown error"]];
+        NSString *audioPath = [result[@"path"] isKindOfClass:NSString.class] ? result[@"path"] : nil;
+        BOOL owned = [self_ isOwnedPythonFile:audioPath identifier:job.identifier];
+        if (owned) [self_ trackFragment:audioPath forJob:job.identifier];
+        if ([self_ jobShouldStop:job]) { [self_ finishStoppedJob:job]; return; }
+        if (!owned) {
+            [self_ finishJob:job result:nil error:error ?: [MVLang t:@"Could not read this file"]];
             return;
         }
-        [self_ trackFragment:audioPath forJob:job.identifier];
         // A separate name: the encoder opens the target for writing while the
         // source is still on disk.
-        NSString *outPath = [self_ derivedPathFor:audioPath suffix:@"-mp3" ext:@"mp3"];
+        NSString *proposed = [self_ derivedPathFor:audioPath suffix:@"-mp3" ext:@"mp3"];
+        NSString *outPath = [self_ intermediatePath:proposed forJob:job];
         [self_ setTransient:[self_ recordFor:job.identifier] message:[MVLang t:@"Converting…"]];
         [MVMediaConverter convertToMP3:audioPath to:outPath completion:^(BOOL ok, NSString *err) {
             typeof(self) self_ = weakSelf;
             if (!self_) return;
+            if ([self_ jobShouldStop:job]) {
+                [self_ discardFragments:@[outPath]];
+                [self_ finishStoppedJob:job];
+                return;
+            }
             if (ok) {
-                [self_ discardTrackedFragmentsFor:job.identifier];
                 NSDictionary *audio = @{@"path": outPath, @"title": result[@"title"] ?: @"",
                                         @"thumbnail": result[@"thumbnail"] ?: @"",
                                         @"ext": @"mp3"};
@@ -379,7 +506,8 @@ static const NSUInteger kMaxConcurrent = 2;
                 // No encoder in this build: keep the original audio, drop the
                 // empty target the encoder may have created.
                 [self_ discardFragments:@[outPath]];
-                [self_ discardTrackedFragmentsFor:job.identifier];
+                // The original is the fallback output: forget it without deleting it.
+                [self_->_fragments removeObjectForKey:job.identifier];
                 NSDictionary *audio = @{@"path": audioPath, @"title": result[@"title"] ?: @"",
                                         @"thumbnail": result[@"thumbnail"] ?: @"",
                                         @"ext": audioPath.pathExtension.lowercaseString ?: @"m4a"};
@@ -403,7 +531,7 @@ static const NSUInteger kMaxConcurrent = 2;
     // belongs to a job nobody is waiting on: touching the record or the running
     // map here would clobber the live download.
     MVDownloadJob *current = _running[job.identifier];
-    if (current && current != job) return;
+    if (current != job) return;
 
     [self stopPolling:job.identifier];
     [_running removeObjectForKey:job.identifier];
@@ -411,12 +539,31 @@ static const NSUInteger kMaxConcurrent = 2;
     MVDownloadRecord *record = [self recordFor:job.identifier];
     void (^completion)(NSString *, NSString *) = job.completion;
 
-    if ([_cancelled containsObject:job.identifier]) {
+    // A row may have been removed while Python or a converter was unwinding.
+    // Only deletion removes its isolated workspace; never recreate the row.
+    if (!record) {
+        if ([_deleteAfterStop containsObject:job.identifier]) {
+            if ([self removePythonWorkspace:job.identifier]) {
+                [_deleteAfterStop removeObject:job.identifier];
+                [self savePendingPythonDeletions];
+            }
+        } else if ([result[@"path"] isKindOfClass:NSString.class]) {
+            // Removing history without deleting a file must not strand a late
+            // completed simple download in a hidden workspace.
+            [self publishPythonOutput:result[@"path"] forJob:job];
+        }
         [_cancelled removeObject:job.identifier];
-        // A cancel can land after the mux produced a file; drop every artefact.
-        NSString *produced = result[@"path"];
-        if (produced.length) [self discardFragments:@[produced]];
-        [self discardTrackedFragmentsFor:job.identifier];
+        [_fragments removeObjectForKey:job.identifier];
+        [[MVPython shared] forgetTask:job.identifier];
+        [self pump];
+        return;
+    }
+
+    if ([_cancelled containsObject:job.identifier] || record.state == MVDownloadStateCancelled) {
+        [_cancelled removeObject:job.identifier];
+        // Cancellation alone does not mean the user asked to delete files.
+        // The explicit delete action removes the workspace after the worker stops.
+        [_fragments removeObjectForKey:job.identifier];
         record.state = MVDownloadStateCancelled;
         record.progress = 0;
         record.speed = 0;
@@ -431,7 +578,8 @@ static const NSUInteger kMaxConcurrent = 2;
     // A pause unwinds the yt-dlp call (there is no way to suspend it in place),
     // so it arrives here as an error. Keep the .part file — and any fragment a
     // merged job already finished — so a resume continues instead of restarting.
-    if ([error isEqualToString:@"paused"] || [[MVPython shared] isTaskPaused:job.identifier]) {
+    if ([error isEqualToString:@"paused"] || record.state == MVDownloadStatePaused ||
+        [[MVPython shared] isTaskPaused:job.identifier]) {
         [self stopPolling:job.identifier];
         [[MVPython shared] forgetTask:job.identifier];
         // A resume can land while the aborted call is still unwinding. If the
@@ -451,7 +599,7 @@ static const NSUInteger kMaxConcurrent = 2;
 
     if (error) {
         MVLogError(@"engine: failed %@: %@", job.url, error);
-        [self discardTrackedFragmentsFor:job.identifier];
+        // A retry can reuse this record's isolated fragments and partials.
         record.state = MVDownloadStateFailed;
         record.error = error;
         [MVDownloadStore.shared update:record];
@@ -461,11 +609,13 @@ static const NSUInteger kMaxConcurrent = 2;
         return;
     }
 
-    NSString *path = result[@"path"];
+    NSString *produced = [result[@"path"] isKindOfClass:NSString.class] ? result[@"path"] : nil;
+    NSString *path = produced.length ? [self publishPythonOutput:produced forJob:job] : nil;
     if (!path.length) {
-        [self discardTrackedFragmentsFor:job.identifier];
+        // Do not delete the workspace on publication failure: the user can retry
+        // and a valid download must not be lost because its rename failed.
         record.state = MVDownloadStateFailed;
-        record.error = [MVLang t:@"Unknown error"];
+        record.error = produced.length ? [MVLang t:@"Could not save the file"] : [MVLang t:@"Unknown error"];
         [MVDownloadStore.shared update:record];
         [[MVPython shared] forgetTask:job.identifier];
         if (completion) completion(nil, record.error);
@@ -492,6 +642,8 @@ static const NSUInteger kMaxConcurrent = 2;
     record.state = MVDownloadStateCompleted;
     MVLogInfo(@"engine: done %@ -> %@", job.url, path);
     [MVDownloadStore.shared update:record];
+    [_fragments removeObjectForKey:job.identifier];
+    [self removePythonWorkspace:job.identifier];
     [[MVPython shared] forgetTask:job.identifier];
     [self notifyFinished:record];
 
@@ -502,61 +654,83 @@ static const NSUInteger kMaxConcurrent = 2;
 
 - (void)cancelDownload:(NSString *)identifier {
     if (!identifier.length) return;
-    [_cancelled addObject:identifier];
-    [[MVPython shared] cancelTask:identifier];
+    MVDownloadRecord *record = [self recordFor:identifier];
+    if (!record || record.state == MVDownloadStateCompleted || record.state == MVDownloadStateCancelled) return;
 
-    // Still queued: drop it now, there is nothing running to abort.
+    MVDownloadJob *queued = nil;
     for (MVDownloadJob *job in [_queue copy]) {
-        if ([job.identifier isEqualToString:identifier]) {
-            [_queue removeObject:job];
-            MVDownloadRecord *record = [self recordFor:identifier];
-            record.state = MVDownloadStateCancelled;
-            [MVDownloadStore.shared update:record];
-            [_cancelled removeObject:identifier];
-            if (job.completion) job.completion(nil, [MVLang t:@"Cancel"]);
-            [self updateBackgroundTask];
-            break;
-        }
+        if ([job.identifier isEqualToString:identifier]) { queued = job; [_queue removeObject:job]; }
     }
+    record.state = MVDownloadStateCancelled;
+    record.speed = 0;
+    record.eta = 0;
+    record.error = nil;
+    [MVDownloadStore.shared update:record];
     [self stopPolling:identifier];
+
+    if (_running[identifier]) {
+        // A queued replacement and an older unwinding call can coexist. Keep
+        // the cancellation flag until that older call actually finishes.
+        [_cancelled addObject:identifier];
+        [[MVPython shared] cancelTask:identifier];
+    } else {
+        [_fragments removeObjectForKey:identifier];
+        [[MVPython shared] forgetTask:identifier];
+    }
+    if (queued.completion) queued.completion(nil, [MVLang t:@"Cancel"]);
+    [self pump];
 }
 
-/// Stops a running download and keeps its .part file, so a resume continues
-/// where it left off. A queued job is simply taken out of the queue.
+- (void)removeDownload:(NSString *)identifier deleteFile:(BOOL)deleteFile {
+    MVDownloadRecord *record = [self recordFor:identifier];
+    if (!record) return;
+    if (deleteFile) {
+        [_deleteAfterStop addObject:identifier];
+        [self savePendingPythonDeletions];
+    }
+    if (record.state != MVDownloadStateCompleted && record.state != MVDownloadStateCancelled) {
+        [self cancelDownload:identifier];
+    }
+    if (deleteFile && record.path.length) {
+        NSArray *protected = [MVFileProtection pathsExcludingTask:nil record:record];
+        [MVFileProtection removeItemAtPath:record.path protecting:protected];
+    }
+    [MVDownloadStore.shared remove:record];
+    if (deleteFile && !_running[identifier] && [self removePythonWorkspace:identifier]) {
+        [_deleteAfterStop removeObject:identifier];
+        [self savePendingPythonDeletions];
+    }
+    [self pump];
+}
+
+/// Pausing Python is cooperative: its progress hook unwinds the current call.
+/// A rapid Resume can queue a replacement but cannot clear that flag early.
 - (void)pauseDownload:(NSString *)identifier {
     if (!identifier.length) return;
     MVDownloadRecord *record = [self recordFor:identifier];
+    if (!record || (record.state != MVDownloadStateWaiting && record.state != MVDownloadStateActive)) return;
 
-    // Still queued: nothing is running, so drop it from the queue right away.
+    MVDownloadJob *queued = nil;
     for (MVDownloadJob *job in [_queue copy]) {
-        if (![job.identifier isEqualToString:identifier]) continue;
-        [_queue removeObject:job];
-        record.state = MVDownloadStatePaused;
-        record.speed = 0;
-        record.eta = 0;
-        [MVDownloadStore.shared update:record];
-        [self updateBackgroundTask];
-        return;
+        if ([job.identifier isEqualToString:identifier]) { queued = job; [_queue removeObject:job]; }
     }
-
-    // Running: flag it, then let the Python progress hook unwind the download.
-    if (_running[identifier]) {
-        [[MVPython shared] pauseTask:identifier];
-        record.state = MVDownloadStatePaused;
-        record.speed = 0;
-        record.eta = 0;
-        [MVDownloadStore.shared update:record];
-        [self updateBackgroundTask];
-    }
+    if (_running[identifier]) [[MVPython shared] pauseTask:identifier];
+    record.state = MVDownloadStatePaused;
+    record.speed = 0;
+    record.eta = 0;
+    record.error = nil;
+    [MVDownloadStore.shared update:record];
+    [self stopPolling:identifier];
+    if (queued.completion) queued.completion(nil, [MVLang t:@"Paused"]);
+    [self pump];
 }
 
-/// Puts a paused record back in the queue. yt-dlp continues the .part file.
+/// Puts a paused or failed record back in the queue; yt-dlp may continue .part files.
 - (void)resumeDownload:(NSString *)identifier {
     if (!identifier.length) return;
     MVDownloadRecord *record = [self recordFor:identifier];
-    if (!record || record.state != MVDownloadStatePaused) return;
+    if (!record || (record.state != MVDownloadStatePaused && record.state != MVDownloadStateFailed)) return;
 
-    [[MVPython shared] resumePausedTask:identifier];
     record.state = MVDownloadStateWaiting;
     record.error = nil;
     [MVDownloadStore.shared update:record];
@@ -585,7 +759,8 @@ static const NSUInteger kMaxConcurrent = 2;
 /// The task assertion is only good for a few minutes, so it is paired with a
 /// silent-audio keep-alive that holds the process for as long as the queue runs.
 - (void)updateBackgroundTask {
-    BOOL busy = _running.count > 0 || _queue.count > 0;
+    // A queue held for Wi-Fi (or a paused row) should not keep audio alive.
+    BOOL busy = _running.count > 0;
     if (busy) {
         if (!_awake) {
             _awake = YES;
@@ -624,6 +799,7 @@ static const NSUInteger kMaxConcurrent = 2;
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
         MVDownloadRecord *r = weakRecord;
         if (!r) { [t invalidate]; return; }
+        if (r.state != MVDownloadStateActive) return;
         NSDictionary *p = [[MVPython shared] progressForTask:r.identifier];
         if (!p.count) return;
 

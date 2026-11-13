@@ -1,4 +1,5 @@
 #import "MVPaths.h"
+#import <CommonCrypto/CommonDigest.h>
 #include <math.h>
 
 NSString *const MVPathsThumbsDir = @"moodyvid-thumbs";
@@ -43,7 +44,26 @@ static NSDictionary<NSString *, NSString *> *MVCategoryMap(void) {
     return map;
 }
 
+static BOOL MVPathContains(NSString *parent, NSString *child) {
+    if ([parent isEqualToString:child]) return YES;
+    return [child hasPrefix:[parent isEqualToString:@"/"] ? parent : [parent stringByAppendingString:@"/"]];
+}
+
 @implementation MVPaths
+
++ (BOOL)path:(NSString *)path overlapsPath:(NSString *)other {
+    if (!path.length || !other.length) return NO;
+    // Case-fold and normalize conservatively: the usual iOS filesystem aliases
+    // these even when the saved strings differ. False positives only keep data.
+    NSString *(^canonical)(NSString *) = ^NSString *(NSString *value) {
+        return value.stringByStandardizingPath.precomposedStringWithCanonicalMapping.lowercaseString;
+    };
+    NSString *a = canonical(path), *b = canonical(other);
+    if (MVPathContains(a, b) || MVPathContains(b, a)) return YES;
+    a = canonical(path.stringByResolvingSymlinksInPath);
+    b = canonical(other.stringByResolvingSymlinksInPath);
+    return MVPathContains(a, b) || MVPathContains(b, a);
+}
 
 + (NSString *)documents {
     return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -88,7 +108,8 @@ static NSDictionary<NSString *, NSString *> *MVCategoryMap(void) {
     // leading dot (a hidden file). Keep the last path component and strip the
     // characters iOS refuses to write.
     NSString *name = filename.lastPathComponent;
-    NSCharacterSet *illegal = [NSCharacterSet characterSetWithCharactersInString:@"/\\:*?\"<>|\n\r\t"];
+    NSMutableCharacterSet *illegal = [NSCharacterSet.controlCharacterSet mutableCopy];
+    [illegal addCharactersInString:@"/\\:*?\"<>|"];
     name = [[name componentsSeparatedByCharactersInSet:illegal] componentsJoinedByString:@"_"];
     name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     while ([name hasPrefix:@"."]) name = [name substringFromIndex:1];
@@ -124,6 +145,17 @@ static NSDictionary<NSString *, NSString *> *MVCategoryMap(void) {
     NSString *dir = [[self documents] stringByAppendingPathComponent:@"MoodyVid"];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     return dir;
+}
+
++ (NSString *)pythonWorkDirectoryForIdentifier:(NSString *)identifier {
+    if (!identifier.length) return nil;
+    NSData *bytes = [identifier dataUsingEncoding:NSUTF8StringEncoding];
+    if (!bytes || bytes.length > UINT32_MAX) return nil;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes.bytes, (CC_LONG)bytes.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger i = 0; i < sizeof(digest); i++) [hex appendFormat:@"%02x", digest[i]];
+    return [[[self downloads] stringByAppendingPathComponent:@".moodyvid-work"] stringByAppendingPathComponent:hex];
 }
 
 + (NSString *)cache {

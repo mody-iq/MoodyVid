@@ -6,6 +6,8 @@
 #import "MVAdBlocker.h"
 #import "MVLog.h"
 #import "MVDownloadManager.h"
+#import "MVMediaProbe.h"
+#import "MVBrowserHistory.h"
 #import "MVSnifferStore.h"
 #import "MVSectionHeader.h"
 #import <WebKit/WebKit.h>
@@ -456,6 +458,8 @@ static NSArray<NSDictionary *> *MVContactAccounts(void) {
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UIView *footerBar;
 @property (nonatomic, strong) UILabel *footerLabel;
+@property (nonatomic) BOOL clearingBrowserData;
+@property (nonatomic) BOOL preparingLogs;
 @end
 
 @implementation MVSettingsViewController
@@ -665,13 +669,14 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
                 [cell setHasChevron:YES];
             } else if (indexPath.row == 1) {
                 cell.titleLabel.text = [MVLang t:@"Clear browser data"];
-                cell.subtitleLabel.text = [MVLang t:@"Tap to clear"];
+                cell.subtitleLabel.text = self.clearingBrowserData ? [MVLang t:@"Clearing…"] : [MVLang t:@"Tap to clear"];
                 [cell configureIcon:@"safari.fill" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else {
-                cell.titleLabel.text = [MVLang t:@"Wi-Fi only"];
-                cell.subtitleLabel.text = manager.wifiOnly ? [MVLang t:@"On"] : [MVLang t:@"Off"];
+                cell.titleLabel.text = [MVLang t:@"Start downloads on Wi-Fi"];
+                cell.subtitleLabel.text = manager.wifiOnly ? [MVLang t:@"On · Starting only"] : [MVLang t:@"Off"];
                 [cell configureIcon:@"wifi" tint:[MVTheme iconTint]];
+                [cell setHasChevron:YES];
             }
             break;
         }
@@ -689,7 +694,7 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
                 [cell setHasChevron:YES];
             } else {
                 cell.titleLabel.text = [MVLang t:@"Speed limit"];
-                cell.subtitleLabel.text = [self speedLimitLabel];
+                cell.subtitleLabel.text = [NSString stringWithFormat:@"%@ · %@", [self speedLimitLabel], [MVLang t:@"Direct files only"]];
                 [cell configureIcon:@"speedometer" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             }
@@ -781,8 +786,17 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 }
 
 - (void)toggleWifiOnly {
-    MVDownloadManager.shared.wifiOnly = !MVDownloadManager.shared.wifiOnly;
-    [self.tableView reloadData];
+    BOOL enabled = MVDownloadManager.shared.wifiOnly;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Start downloads on Wi-Fi"]
+        message:[MVLang t:@"This checks the default network before starting downloads. It does not block cellular data: transfers and other requests may use cellular, including after a network change."]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:(enabled ? @"Turn off" : @"Turn on")]
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            MVDownloadManager.shared.wifiOnly = !enabled;
+            [self.tableView reloadData];
+        }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)showConnectionsMenu {
@@ -826,8 +840,8 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
         [@[[NSString stringWithFormat:@"5 MB/s"], @(5 * 1024 * 1024)] mutableCopy],
     ];
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[MVLang t:@"Speed limit"]
-                                                                  message:nil
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+        message:[MVLang t:@"An approximate limit per direct HTTP download. HLS, DASH, torrents and yt-dlp are not limited. Restart a direct download after enabling the limit."]
+        preferredStyle:UIAlertControllerStyleActionSheet];
     for (NSArray *option in options) {
         long long value = [option[1] longLongValue];
         NSString *title = [NSString stringWithFormat:@"%@%@", option[0], (value == MVDownloadManager.shared.speedLimit) ? @" ✓" : @""];
@@ -847,49 +861,87 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-/// Clears cookies, caches and local storage for the in-app browser, plus the
-/// sniffer's per-tab lists. The download history and files are untouched.
+/// Website data, detected links and history are cleared; favorites (including
+/// their saved URLs), downloads, open tabs and diagnostic logs are retained.
 - (void)confirmClearBrowserData {
+    if (self.clearingBrowserData) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Clear browser data"]
-                                                                  message:[MVLang t:@"This cannot be undone."]
+                                                                  message:[MVLang t:@"This removes website cookies, cache and storage, detected links, and browsing history except favorites. Favorites and downloads, including their links, open tabs and diagnostic logs remain. Active tabs or downloads may create new data."]
                                                            preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Clear browser data"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        self.clearingBrowserData = YES;
+        [self.tableView reloadData];
+        [MVMediaProbe beginClearingBrowserCookies];
+        [MVSnifferStore.shared clearAll];
+        [MVBrowserHistory.shared clearHistory];
+        // Older versions used Foundation's shared session as well as WebKit;
+        // clear its cookies and HTTP cache too. New downloader sessions do not
+        // read/write those shared stores.
+        NSHTTPCookieStorage *sharedCookies = NSHTTPCookieStorage.sharedHTTPCookieStorage;
+        for (NSHTTPCookie *cookie in sharedCookies.cookies) [sharedCookies deleteCookie:cookie];
+        [NSURLCache.sharedURLCache removeAllCachedResponses];
         WKWebsiteDataStore *store = WKWebsiteDataStore.defaultDataStore;
         NSSet *types = [WKWebsiteDataStore allWebsiteDataTypes];
         NSDate *epoch = [NSDate dateWithTimeIntervalSince1970:0];
         [store removeDataOfTypes:types modifiedSince:epoch completionHandler:^{
-            MVLogInfo(@"settings: browser data cleared");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [MVMediaProbe finishClearingBrowserCookies];
+                self.clearingBrowserData = NO;
+                [self.tableView reloadData];
+                MVLogInfo(@"settings: browser data cleared");
+                if (!self.view.window) return;
+                UIAlertController *done = [UIAlertController alertControllerWithTitle:[MVLang t:@"Browser data cleared"]
+                                                                             message:nil
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+                [done addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:done animated:YES completion:nil];
+            });
         }];
-        [MVSnifferStore.shared clearAll];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *done = [UIAlertController alertControllerWithTitle:[MVLang t:@"Browser data cleared"]
-                                                                         message:nil
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-            [done addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
-            [self presentViewController:done animated:YES completion:nil];
-        });
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-/// Shares the rotating log file, so a failure on the device can be reported
-/// without a computer.
+/// Warn that pattern-based redaction cannot recognize every personal detail.
 - (void)shareLogs {
-    NSArray<NSURL *> *urls = [MVLog logFileURLs];
-    if (!urls.count) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Share logs"]
-                                                                      message:[MVLang t:@"No files"]
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:urls applicationActivities:nil];
-    share.popoverPresentationController.sourceView = self.view;
-    share.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2,
-                                                                self.view.bounds.size.height / 2, 1, 1);
-    [self presentViewController:share animated:YES completion:nil];
+    if (self.preparingLogs) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Share logs"]
+                                                                  message:[MVLang t:@"Links and common credentials are redacted where recognized, but logs may still contain sensitive information and file names. Share only with someone you trust."]
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Share"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self prepareAndShareLogs];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)prepareAndShareLogs {
+    self.preparingLogs = YES;
+    [MVLog prepareRedactedLogsWithCompletion:^(NSArray<NSURL *> *urls, NSError *error) {
+        self.preparingLogs = NO;
+        if (!self.view.window) {
+            if (urls.count) [NSFileManager.defaultManager removeItemAtURL:urls.firstObject.URLByDeletingLastPathComponent error:nil];
+            return;
+        }
+        if (error || !urls.count) {
+            NSString *message = error ? [MVLang t:@"Could not prepare logs"] : [MVLang t:@"No files"];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Share logs"]
+                                                                          message:message
+                                                                   preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Close"] style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        NSURL *directory = urls.firstObject.URLByDeletingLastPathComponent;
+        UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:urls applicationActivities:nil];
+        share.completionWithItemsHandler = ^(UIActivityType type, BOOL completed, NSArray *items, NSError *activityError) {
+            [NSFileManager.defaultManager removeItemAtURL:directory error:nil];
+        };
+        share.popoverPresentationController.sourceView = self.view;
+        share.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2,
+                                                                    self.view.bounds.size.height / 2, 1, 1);
+        [self presentViewController:share animated:YES completion:nil];
+    }];
 }
 
 - (void)showContactSheet {

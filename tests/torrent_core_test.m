@@ -7,11 +7,97 @@
 #import "MVSHA1.h"
 #import "MVMagnet.h"
 #import "MVTorrentMetadata.h"
+#import "MVTorrentStorage.h"
 #import "MVTorrentTracker.h"
+#import "MVPaths.h"
+#include <limits.h>
+#include <unistd.h>
 
 static int failures = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } } while (0)
 static NSData *B(NSString *s) { return [s dataUsingEncoding:NSUTF8StringEncoding]; }
+
+static NSDictionary *File(NSArray<NSString *> *names, long long length, BOOL padding) {
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *name in names) [parts addObject:B(name)];
+    NSMutableDictionary *file = [@{@"path": parts, @"length": @(length)} mutableCopy];
+    if (padding) file[@"attr"] = B(@"p");
+    return file;
+}
+
+static MVTorrentMetadata *Metadata(NSArray *files, NSData *contents, NSInteger pieceLength) {
+    NSMutableData *hashes = [NSMutableData data];
+    for (NSUInteger offset = 0; offset < contents.length; offset += (NSUInteger)pieceLength) {
+        NSUInteger size = MIN((NSUInteger)pieceLength, contents.length - offset);
+        [hashes appendData:[MVSHA1 digest:[contents subdataWithRange:NSMakeRange(offset, size)]]];
+    }
+    NSDictionary *info = @{@"name": B(@"root"), @"piece length": @(pieceLength),
+                           @"pieces": hashes, @"files": files};
+    return [MVTorrentMetadata metadataWithInfoDict:info infoHash:[MVSHA1 digest:B(@"torrent")] trackers:@[] error:nil];
+}
+
+static void testStorage(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    CHECK([fm createDirectoryAtPath:temp withIntermediateDirectories:YES attributes:nil error:nil], "create temporary test folder");
+    const unsigned char raw[] = {'a', 'b', 'c', 0, 0, 'd', 'e', 0, 0};
+    NSData *bytes = [NSData dataWithBytes:raw length:sizeof(raw)];
+    NSArray *files = @[File(@[@"dir", @"a"], 3, NO), File(@[@"pad"], 2, YES),
+                       File(@[@"b"], 2, NO), File(@[@"tail"], 2, YES), File(@[@"empty"], 0, NO)];
+    MVTorrentMetadata *meta = Metadata(files, bytes, 4);
+    CHECK(meta != nil, "storage fixture metadata");
+    NSString *root = [temp stringByAppendingPathComponent:@"torrent"];
+    MVTorrentStorage *storage = [[MVTorrentStorage alloc] initWithMetadata:meta root:root];
+    CHECK([storage prepare:nil], "prepare multi-file storage");
+    CHECK([fm fileExistsAtPath:[root stringByAppendingPathComponent:@"empty"]], "zero-length files are created");
+    CHECK([storage writeData:bytes atOffset:0 error:nil], "write across files and trailing padding");
+    CHECK([[storage readAtOffset:0 length:9 error:nil] isEqualToData:bytes], "read across files and padding");
+    CHECK([[storage readAtOffset:3 length:1 error:nil] isEqualToData:[NSData dataWithBytes:raw + 3 length:1]],
+          "a read wholly inside padding stops at the requested length");
+    CHECK([[storage readAtOffset:7 length:2 error:nil] isEqualToData:[NSData dataWithBytes:raw + 7 length:2]],
+          "trailing padding is readable");
+    CHECK([storage verifyPiece:0] && [storage verifyPiece:1] && [storage verifyPiece:2], "every written piece verifies");
+    CHECK(![storage writeData:B(@"x") atOffset:3 error:nil], "nonzero padding is refused");
+    CHECK(![storage writeData:B(@"x") atOffset:9 error:nil] && ![storage readAtOffset:-1 length:1 error:nil] &&
+          ![storage readAtOffset:8 length:2 error:nil] && ![storage readPiece:-1 error:nil], "storage rejects invalid ranges");
+
+    NSArray *collision = @[File(@[@".same"], 1, NO), File(@[@"same"], 1, NO)];
+    MVTorrentStorage *badLayout = [[MVTorrentStorage alloc] initWithMetadata:Metadata(collision, B(@"ab"), 2)
+                                                                       root:[temp stringByAppendingPathComponent:@"collision"]];
+    CHECK(![badLayout prepare:nil], "sanitized filename collision is rejected");
+    NSArray *parentCollision = @[File(@[@"a"], 1, NO), File(@[@"A", @"b"], 1, NO)];
+    badLayout = [[MVTorrentStorage alloc] initWithMetadata:Metadata(parentCollision, B(@"ab"), 2)
+                                                      root:[temp stringByAppendingPathComponent:@"parent"]];
+    CHECK(![badLayout prepare:nil], "case-folded file and directory collision is rejected");
+
+    NSString *outside = [temp stringByAppendingPathComponent:@"outside"];
+    NSString *symlinkRoot = [temp stringByAppendingPathComponent:@"links"];
+    [fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:symlinkRoot withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *sentinel = [outside stringByAppendingPathComponent:@"victim"];
+    [B(@"keep") writeToFile:sentinel atomically:YES];
+    NSString *dirLink = [symlinkRoot stringByAppendingPathComponent:@"dir"];
+    CHECK(symlink(outside.fileSystemRepresentation, dirLink.fileSystemRepresentation) == 0, "create directory symlink");
+    NSArray *links = @[File(@[@"dir", @"victim"], 1, NO)];
+    MVTorrentStorage *unsafe = [[MVTorrentStorage alloc] initWithMetadata:Metadata(links, B(@"x"), 1) root:symlinkRoot];
+    CHECK(![unsafe prepare:nil] && [[NSData dataWithContentsOfFile:sentinel] isEqualToData:B(@"keep")],
+          "symlinked directory does not redirect torrent writes");
+    CHECK([MVPaths path:dirLink overlapsPath:sentinel], "ownership checks resolve symlink descendants");
+    CHECK([MVPaths path:outside overlapsPath:sentinel] && [MVPaths path:sentinel overlapsPath:outside],
+          "ownership checks protect parent and child in both directions");
+    CHECK(![MVPaths path:outside overlapsPath:[temp stringByAppendingPathComponent:@"outside-other"]],
+          "ownership uses path boundaries");
+
+    NSString *hardRoot = [temp stringByAppendingPathComponent:@"hard"];
+    [fm createDirectoryAtPath:hardRoot withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *hardTarget = [hardRoot stringByAppendingPathComponent:@"victim"];
+    CHECK(link(sentinel.fileSystemRepresentation, hardTarget.fileSystemRepresentation) == 0, "create hard link");
+    NSArray *hardFiles = @[File(@[@"victim"], 1, NO)];
+    unsafe = [[MVTorrentStorage alloc] initWithMetadata:Metadata(hardFiles, B(@"x"), 1) root:hardRoot];
+    CHECK(![unsafe prepare:nil] && [[NSData dataWithContentsOfFile:sentinel] isEqualToData:B(@"keep")],
+          "hard-linked target is not truncated or overwritten");
+    [fm removeItemAtPath:temp error:nil];
+}
 
 int main(void) {
     @autoreleasepool {
@@ -77,6 +163,22 @@ int main(void) {
         CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"not bencode") error:&err] == nil, "garbage refused");
         CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"d4:infod6:lengthi1eee") error:&err] == nil, "no piece length refused");
         CHECK([MVTorrentMetadata metadataWithTorrentData:B(@"d4:infod6:lengthi5e4:name1:a12:piece lengthi4e6:pieces20:aaaaaaaaaaaaaaaaaaaaee") error:&err] == nil, "piece count mismatch refused");
+        CHECK([MVTorrentMetadata metadataWithTorrentData:B([torrent stringByAppendingString:@"junk"]) error:&err] == nil,
+              "trailing torrent data refused");
+        NSData *validHash = [MVSHA1 digest:B(@"hash")];
+        NSMutableDictionary *badInfo = [@{@"name": B(@"root"), @"piece length": @4, @"pieces": B(@"01234567890123456789")} mutableCopy];
+        badInfo[@"files"] = @[@{@"length": @1, @"path": B(@"not a list")}];
+        CHECK(![MVTorrentMetadata metadataWithInfoDict:badInfo infoHash:validHash trackers:@[] error:&err], "non-list path refused");
+        badInfo[@"files"] = @[File(@[@"..", @"outside"], 1, NO)];
+        CHECK(![MVTorrentMetadata metadataWithInfoDict:badInfo infoHash:validHash trackers:@[] error:&err], "parent traversal refused");
+        badInfo[@"files"] = @[File(@[@"a/b"], 1, NO)];
+        CHECK(![MVTorrentMetadata metadataWithInfoDict:badInfo infoHash:validHash trackers:@[] error:&err], "embedded slash refused");
+        badInfo[@"files"] = @[File(@[@"first"], LLONG_MAX, NO), File(@[@"second"], 1, NO)];
+        CHECK(![MVTorrentMetadata metadataWithInfoDict:badInfo infoHash:validHash trackers:@[] error:&err], "file offset overflow refused");
+        badInfo[@"files"] = @[File(@[@"a"], -1, NO)];
+        CHECK(![MVTorrentMetadata metadataWithInfoDict:badInfo infoHash:validHash trackers:@[] error:&err], "negative file length refused");
+        MVTorrentMetadata *empty = Metadata(@[File(@[@"empty"], 0, NO)], [NSData data], 4);
+        CHECK(empty && empty.totalLength == 0 && empty.pieceCount == 0, "empty-file torrent geometry retained");
 
         // --- bencode round-trip and edge cases ---
         CHECK([[MVBencode decode:B(@"i42e") error:&err] longLongValue] == 42, "integer decode");
@@ -85,6 +187,16 @@ int main(void) {
         CHECK([MVBencode decode:B(@"i03e") error:&err] == nil, "leading-zero integer refused");
         CHECK([MVBencode decode:B(@"5:ab") error:&err] == nil, "truncated string refused");
         CHECK([MVBencode decode:[NSData data] error:&err] == nil, "empty data refused");
+        CHECK(![MVBencode decode:B(@"i9223372036854775808e") error:&err], "integer overflow refused");
+        CHECK(![MVBencode decode:B(@"18446744073709551616:") error:&err], "string length overflow refused");
+        CHECK([MVBencode byteLengthOfValueIn:B(@"i999999999999999999999999999999999999999e")] == -1,
+              "unbounded integer header refused");
+        NSMutableString *deep = [NSMutableString stringWithString:@"d4:info"];
+        for (NSInteger i = 0; i < 129; i++) [deep appendString:@"l"];
+        [deep appendString:@"i0e"];
+        for (NSInteger i = 0; i < 130; i++) [deep appendString:@"e"];
+        CHECK(![MVBencode decode:B(deep) error:&err] && ![MVBencode rawValueForTopLevelKey:@"info" inData:B(deep)],
+              "deeply nested data refused by decoder and raw scanner");
         // Dictionary keys are byte strings and must sort as bytes on re-encode.
         NSData *encoded = [MVBencode encode:@{@"b": @1, @"a": @2}];
         CHECK([encoded isEqualToData:B(@"d1:ai2e1:bi1ee")], "dictionary re-encode sorts keys");
@@ -174,6 +286,7 @@ int main(void) {
         NSInteger twoPieces = (NSInteger)((40000 + 16384 - 1) / 16384);
         CHECK(twoPieces == 3, "larger metadata piece count");
 
+        testStorage();
         printf(failures ? "\n%d FAILURE(S)\n" : "ALL TORRENT CORE TESTS PASSED\n", failures);
     }
     return failures ? 1 : 0;

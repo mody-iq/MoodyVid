@@ -1,22 +1,34 @@
 #import "MVDownloadStore.h"
 #import "MVPaths.h"
+#include <math.h>
 
 NSString *const MVDownloadStoreDidChangeNotification = @"MVDownloadStoreDidChangeNotification";
+
+static NSString *MVRecordString(id value) {
+    return [value isKindOfClass:NSString.class] ? value : nil;
+}
+static NSNumber *MVRecordNumber(id value) {
+    return [value isKindOfClass:NSNumber.class] ? value : @0;
+}
 
 @implementation MVDownloadRecord
 
 + (instancetype)fromDictionary:(NSDictionary *)dict {
     MVDownloadRecord *r = [MVDownloadRecord new];
-    r.identifier = dict[@"id"] ?: NSUUID.UUID.UUIDString;
-    r.url = dict[@"url"] ?: @"";
-    r.title = dict[@"title"] ?: @"";
-    r.path = dict[@"path"];
-    r.quality = dict[@"quality"] ?: @"best";
-    r.error = dict[@"error"];
-    r.state = (MVDownloadState)[dict[@"state"] integerValue];
-    r.progress = [dict[@"progress"] doubleValue];
-    r.totalBytes = [dict[@"total"] longLongValue];
-    r.createdAt = [dict[@"createdAt"] doubleValue];
+    NSString *identifier = MVRecordString(dict[@"id"]);
+    r.identifier = identifier.length ? identifier : NSUUID.UUID.UUIDString;
+    r.url = MVRecordString(dict[@"url"]) ?: @"";
+    r.title = MVRecordString(dict[@"title"]) ?: @"";
+    r.path = MVRecordString(dict[@"path"]);
+    r.quality = MVRecordString(dict[@"quality"]) ?: @"best";
+    r.error = MVRecordString(dict[@"error"]);
+    id rawState = dict[@"state"];
+    double state = [rawState isKindOfClass:NSNumber.class] ? [rawState doubleValue] : NAN;
+    r.state = isfinite(state) && floor(state) == state && state >= MVPythonWaiting && state <= MVPythonPaused ?
+              (MVDownloadState)(NSInteger)state : MVDownloadStateFailed;
+    r.progress = MAX(0.0, MIN(1.0, MVRecordNumber(dict[@"progress"]).doubleValue));
+    r.totalBytes = MAX(0LL, MVRecordNumber(dict[@"total"]).longLongValue);
+    r.createdAt = MVRecordNumber(dict[@"createdAt"]).doubleValue;
     return r;
 }
 
@@ -70,16 +82,30 @@ NSString *const MVDownloadStoreDidChangeNotification = @"MVDownloadStoreDidChang
     if (!data) return;
     NSArray *raw = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if (![raw isKindOfClass:NSArray.class]) return;
+    BOOL recoveredInterruptedRecords = NO;
+    BOOL normalizedIdentifiers = NO;
+    NSMutableSet<NSString *> *identifiers = [NSMutableSet set];
     for (NSDictionary *d in raw) {
         if (![d isKindOfClass:NSDictionary.class]) continue;
         MVDownloadRecord *r = [MVDownloadRecord fromDictionary:d];
-        // A record that was mid-download when the app died can never resume, so
-        // show it as cancelled rather than leaving a permanently "active" row.
-        // A Paused record is left alone: the user stopped it on purpose and its
-        // .part file is still there to continue from.
-        if (r.state == MVDownloadStateActive || r.state == MVDownloadStateWaiting) {
-            r.state = MVDownloadStateCancelled;
+        if (!r.url.length) continue;
+        id rawIdentifier = d[@"id"];
+        if (![rawIdentifier isKindOfClass:NSString.class] || ![rawIdentifier isEqualToString:r.identifier])
+            normalizedIdentifiers = YES;
+        if ([identifiers containsObject:r.identifier]) {
+            do { r.identifier = NSUUID.UUID.UUIDString; } while ([identifiers containsObject:r.identifier]);
+            normalizedIdentifiers = YES;
+        }
+        [identifiers addObject:r.identifier];
+        // A process cannot still be downloading after relaunch. Requeue only
+        // interrupted work; a manual pause or cancellation remains intentional.
+        MVDownloadState recovered = (MVDownloadState)MVPythonStateAfterRestart((int)r.state);
+        if (recovered != r.state) {
+            r.state = recovered;
             r.error = nil;
+            r.speed = 0;
+            r.eta = 0;
+            recoveredInterruptedRecords = YES;
         }
         // Drop finished records whose file has since been deleted.
         if (r.state == MVDownloadStateCompleted && r.path.length &&
@@ -88,6 +114,7 @@ NSString *const MVDownloadStoreDidChangeNotification = @"MVDownloadStoreDidChang
         }
         [_records addObject:r];
     }
+    if (recoveredInterruptedRecords || normalizedIdentifiers) [self save];
 }
 
 - (NSArray<MVDownloadRecord *> *)records {

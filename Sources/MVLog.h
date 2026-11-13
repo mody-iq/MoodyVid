@@ -19,8 +19,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// Appends one line. `level` is a short tag such as I / W / E.
 + (void)log:(NSString *)level format:(NSString *)format, ... NS_FORMAT_FUNCTION(2, 3);
 
-/// Every log file that exists, newest first (the live file and its one backup).
-+ (NSArray<NSURL *> *)logFileURLs;
+/// Removes URLs and common credential fields from diagnostic text. File names
+/// and other contextual details can remain, so the user should still choose
+/// whom to share it with.
++ (NSString *)redactedText:(NSString *)text;
+
+/// Makes redacted temporary copies of the current and rotated logs. Work is
+/// serialized behind log writes; completion runs on the main queue. An empty
+/// array with no error means no log exists. The caller removes the temporary
+/// directory when the share sheet finishes.
++ (void)prepareRedactedLogsWithCompletion:(void (^)(NSArray<NSURL *> *files, NSError *_Nullable error))completion;
 
 /// Absolute path of the live log file.
 + (NSString *)logFilePath;

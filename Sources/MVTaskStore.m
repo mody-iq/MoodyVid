@@ -1,5 +1,7 @@
 #import "MVTaskStore.h"
+#import "MVDownloadManager.h"
 #import "MVPaths.h"
+#import "MVCookiePolicy.h"
 #import "MVLog.h"
 
 NSString *const MVTaskStoreDidChangeNotification = @"MVTaskStoreDidChangeNotification";
@@ -51,14 +53,39 @@ NSString *const MVTaskStoreDidChangeNotification = @"MVTaskStoreDidChangeNotific
         return;
     }
 
+    BOOL removedUnsafeHeaders = NO;
+    BOOL recoveredInterruptedTasks = NO;
+    BOOL normalizedIdentifiers = NO;
+    NSMutableSet<NSString *> *identifiers = [NSMutableSet set];
     for (NSDictionary *dict in (NSArray *)json) {
         if (![dict isKindOfClass:NSDictionary.class]) continue;
+        id rawHeaders = dict[@"headers"];
+        if ([rawHeaders isKindOfClass:NSDictionary.class] &&
+            [MVCookiePolicy headersWithoutCookies:rawHeaders].count != [rawHeaders count]) {
+            removedUnsafeHeaders = YES;
+        }
         MVDownloadTask *task = [MVDownloadTask taskFromDictionary:dict];
         if (!task.url.length) continue;
+        id rawIdentifier = dict[@"id"];
+        if (![rawIdentifier isKindOfClass:NSString.class] || ![rawIdentifier isEqualToString:task.identifier])
+            normalizedIdentifiers = YES;
+        if ([identifiers containsObject:task.identifier]) {
+            do { task.identifier = NSUUID.UUID.UUIDString; } while ([identifiers containsObject:task.identifier]);
+            normalizedIdentifiers = YES;
+        }
+        [identifiers addObject:task.identifier];
 
-        // A task that was mid-flight when the process died cannot still be
-        // running; show it as paused so the user can resume it deliberately.
-        if (task.state == MVTaskStateRunning) task.state = MVTaskStatePaused;
+        // Only work interrupted while running is requeued. An explicit user
+        // pause/cancel must remain in force across a process restart.
+        MVTaskState recovered = (MVTaskState)MVNativeStateAfterRestart((int)task.state);
+        if (recovered != task.state) {
+            task.state = recovered;
+            task.phase = nil;
+            task.error = nil;
+            task.speed = 0;
+            task.eta = 0;
+            recoveredInterruptedTasks = YES;
+        }
         // A completed task whose file vanished is stale, so drop it.
         if (task.state == MVTaskStateCompleted && task.path.length &&
             ![[NSFileManager defaultManager] fileExistsAtPath:task.path]) {
@@ -66,6 +93,9 @@ NSString *const MVTaskStoreDidChangeNotification = @"MVTaskStoreDidChangeNotific
         }
         [_tasks addObject:task];
     }
+    // Rewrite a legacy store once so a stale raw Cookie cannot survive a
+    // browser-data clear or be replayed after a relaunch.
+    if (removedUnsafeHeaders || recoveredInterruptedTasks || normalizedIdentifiers) [self save];
     MVLogInfo(@"tasks: loaded %lu record(s)", (unsigned long)_tasks.count);
 }
 
@@ -163,18 +193,11 @@ NSString *const MVTaskStoreDidChangeNotification = @"MVTaskStoreDidChangeNotific
 }
 
 - (void)removeFinishedTasksDeletingFiles:(BOOL)deleteFiles {
-    NSMutableArray<MVDownloadTask *> *keep = [NSMutableArray array];
-    for (MVDownloadTask *task in _tasks) {
-        if (task.isFinished) {
-            if (deleteFiles && task.path.length) {
-                [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
-            }
-            continue;
-        }
-        [keep addObject:task];
+    // Use the same cancellation, ownership and torrent-folder cleanup as the
+    // individual row action. Iterate a snapshot because the manager removes.
+    for (MVDownloadTask *task in [_tasks copy]) {
+        if (task.isFinished) [MVDownloadManager.shared removeTask:task deleteFile:deleteFiles];
     }
-    _tasks = keep;
-    [self changed];
 }
 
 - (void)changed {

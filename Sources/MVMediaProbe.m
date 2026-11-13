@@ -1,10 +1,28 @@
 #import "MVMediaProbe.h"
+#import "MVCookiePolicy.h"
+#import "MVHTTPSession.h"
 #import "MVLog.h"
 #import <WebKit/WebKit.h>
 
 /// A short timeout: a probe is an optimisation, and a stalled server must not
 /// leave the row spinning forever.
 static const NSTimeInterval kProbeTimeout = 12.0;
+
+// Cache the cookie *snapshot*, not an already-built header: path, scheme and
+// expiry must be checked independently for every request. All of this state is
+// protected by MVCookieLock, including late WebKit callbacks after a clear.
+static NSObject *MVCookieLock;
+static NSArray<NSHTTPCookie *> *MVCookieSnapshot;
+static NSDate *MVCookieSnapshotDate;
+static dispatch_group_t MVCookiePending;
+static NSDate *MVCookiePendingDate;
+static NSUInteger MVCookieGeneration;
+static BOOL MVCookiesSuspended;
+
+static void MVPrepareCookieCache(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ MVCookieLock = [NSObject new]; });
+}
 
 @implementation MVMediaProbe
 
@@ -21,60 +39,122 @@ static const NSTimeInterval kProbeTimeout = 12.0;
 }
 
 + (NSDictionary<NSString *, NSString *> *)headersForURL:(NSString *)url referer:(NSString *)referer {
-    NSMutableDictionary *headers = [NSMutableDictionary dictionary];
-    headers[@"User-Agent"] = [self userAgent];
-    headers[@"Accept"] = @"*/*";
-    headers[@"Accept-Language"] = @"en-US,en;q=0.9,ar;q=0.8";
-    if (referer.length) headers[@"Referer"] = referer;
+    return [self headersForURL:url referer:referer additionalHeaders:nil];
+}
 
++ (NSDictionary<NSString *, NSString *> *)headersForURL:(NSString *)url
+                                                 referer:(NSString *)referer
+                                       additionalHeaders:(NSDictionary<NSString *, NSString *> *)additionalHeaders {
+    NSMutableDictionary<NSString *, NSString *> *headers = [@{
+        @"User-Agent": [self userAgent], @"Accept": @"*/*",
+        @"Accept-Language": @"en-US,en;q=0.9,ar;q=0.8"
+    } mutableCopy];
+    NSDictionary *extra = [MVCookiePolicy headersWithoutCookies:additionalHeaders];
+    NSString *customReferer = nil;
+    for (NSString *key in extra) {
+        if ([key caseInsensitiveCompare:@"Referer"] == NSOrderedSame) {
+            customReferer = extra[key];
+            continue;
+        }
+        // HTTP field names are case-insensitive; make custom values replace
+        // defaults even when their spelling differs in capitalisation.
+        for (NSString *existing in [headers.allKeys copy]) {
+            if ([existing caseInsensitiveCompare:key] == NSOrderedSame) [headers removeObjectForKey:existing];
+        }
+        headers[key] = extra[key];
+    }
+    NSString *page = referer.length ? referer : customReferer;
     NSURL *target = [NSURL URLWithString:url];
     if (!target.host.length) return headers;
+    NSString *safeReferer = [MVCookiePolicy safeReferer:page forURL:target];
+    if (safeReferer.length) headers[@"Referer"] = safeReferer;
 
-    // Cookies come from the browser's store, which is slow to enumerate and is
-    // an *optimisation* only. A snapshot is cached for a few seconds so a page
-    // with twenty links does not pay for twenty cookie queries, and a store that
-    // never answers costs at most one short wait.
-    NSString *cookieHeader = [self cachedCookieHeaderForHost:target.host];
+    // No page means a user-requested URL, so it is its own context. A supplied
+    // but malformed page is *not* treated as first-party.
+    NSURL *context = page.length ? [NSURL URLWithString:page] : target;
+    NSString *cookieHeader = [MVCookiePolicy cookieHeaderForURL:target
+                                                        cookies:[self browserCookieSnapshot]
+                                                     contextURL:context];
     if (cookieHeader.length) headers[@"Cookie"] = cookieHeader;
     return headers;
 }
 
-/// The cookie snapshot, keyed by host. Read on the calling (background) queue.
-+ (NSString *)cachedCookieHeaderForHost:(NSString *)host {
-    static NSMutableDictionary<NSString *, NSString *> *cache;
-    static NSMutableDictionary<NSString *, NSDate *> *stamps;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        cache = [NSMutableDictionary dictionary];
-        stamps = [NSMutableDictionary dictionary];
-    });
-
-    @synchronized (cache) {
-        NSDate *stamp = stamps[host];
-        if (stamp && -stamp.timeIntervalSinceNow < 5.0) return cache[host] ?: @"";
++ (void)beginClearingBrowserCookies {
+    MVPrepareCookieCache();
+    @synchronized (MVCookieLock) {
+        MVCookiesSuspended = YES;
+        MVCookieGeneration++;
+        MVCookieSnapshot = nil;
+        MVCookieSnapshotDate = nil;
+        MVCookiePending = nil;
+        MVCookiePendingDate = nil;
     }
+}
 
-    __block NSString *header = @"";
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [WKWebsiteDataStore.defaultDataStore.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
-        NSMutableArray<NSString *> *pairs = [NSMutableArray array];
-        for (NSHTTPCookie *cookie in cookies) {
-            if ([cookie.domain hasSuffix:host] || [host hasSuffix:cookie.domain]) {
-                [pairs addObject:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
-            }
++ (void)finishClearingBrowserCookies {
+    MVPrepareCookieCache();
+    @synchronized (MVCookieLock) {
+        MVCookieGeneration++;
+        MVCookieSnapshot = nil;
+        MVCookieSnapshotDate = nil;
+        MVCookiePending = nil;
+        MVCookiePendingDate = nil;
+        MVCookiesSuspended = NO;
+    }
+}
+
+/// WebKit owns the cookies. A short-lived snapshot avoids querying it for every
+/// HLS segment; the policy filters that snapshot for each complete URL. Requests
+/// share one in-flight query, and a late result can never undo a browser clear.
++ (NSArray<NSHTTPCookie *> *)browserCookieSnapshot {
+    MVPrepareCookieCache();
+    dispatch_group_t pending;
+    NSUInteger generation = 0;
+    BOOL startFetch = NO;
+    @synchronized (MVCookieLock) {
+        if (MVCookiesSuspended) return @[];
+        if (MVCookieSnapshotDate && -MVCookieSnapshotDate.timeIntervalSinceNow < 5.0) return MVCookieSnapshot ?: @[];
+        // Do not let a WebKit callback that never arrives stall every future
+        // attempt. Its late result will be ignored if a new query replaced it.
+        if (MVCookiePendingDate && -MVCookiePendingDate.timeIntervalSinceNow > 2.0) {
+            MVCookiePending = nil;
+            MVCookiePendingDate = nil;
         }
-        if (pairs.count) header = [pairs componentsJoinedByString:@"; "];
-        dispatch_semaphore_signal(semaphore);
-    }];
-    // A short cap: the probe must not wait on the cookie store. If it does not
-    // answer in time we simply continue without cookies.
-    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)));
-
-    @synchronized (cache) {
-        cache[host] = header;
-        stamps[host] = NSDate.date;
+        if (!MVCookiePending) {
+            MVCookiePending = dispatch_group_create();
+            dispatch_group_enter(MVCookiePending);
+            MVCookiePendingDate = NSDate.date;
+            startFetch = YES;
+        }
+        pending = MVCookiePending;
+        generation = MVCookieGeneration;
     }
-    return header;
+
+    if (startFetch) {
+        // WebKit APIs are main-thread-bound; background downloaders wait only a
+        // short, bounded time for this asynchronous snapshot.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [WKWebsiteDataStore.defaultDataStore.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                @synchronized (MVCookieLock) {
+                    if (!MVCookiesSuspended && generation == MVCookieGeneration && MVCookiePending == pending) {
+                        MVCookieSnapshot = [cookies copy] ?: @[];
+                        MVCookieSnapshotDate = NSDate.date;
+                        MVCookiePending = nil;
+                        MVCookiePendingDate = nil;
+                    }
+                }
+                dispatch_group_leave(pending);
+            }];
+        });
+    }
+    // WebKit may deliver its callback on the main thread. Never block it.
+    if (!NSThread.isMainThread) {
+        dispatch_group_wait(pending, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)));
+    }
+    @synchronized (MVCookieLock) {
+        if (MVCookiesSuspended || !MVCookieSnapshotDate || -MVCookieSnapshotDate.timeIntervalSinceNow >= 5.0) return @[];
+        return MVCookieSnapshot ?: @[];
+    }
 }
 
 - (void)probe:(MVSnifferItem *)item completion:(void (^)(MVSnifferItem *))completion {
@@ -98,7 +178,8 @@ static const NSTimeInterval kProbeTimeout = 12.0;
             if (!info) {
                 // HEAD was refused: a one-byte ranged GET still reveals the size
                 // and the real Content-Type on most servers.
-                NSMutableDictionary *rangeHeaders = [headers mutableCopy];
+                // Rebuild rather than reusing a possibly pre-clear Cookie.
+                NSMutableDictionary *rangeHeaders = [[MVMediaProbe headersForURL:url referer:referer] mutableCopy];
                 rangeHeaders[@"Range"] = @"bytes=0-0";
                 [self rangeRequest:url headers:rangeHeaders completion:^(NSDictionary *rangeInfo) {
                     dispatch_async(dispatch_get_main_queue(), ^{
@@ -141,9 +222,10 @@ static const NSTimeInterval kProbeTimeout = 12.0;
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:kProbeTimeout];
     request.HTTPMethod = @"HEAD";
+    request.HTTPShouldHandleCookies = NO;
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
 
-    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request
+    NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || ![response isKindOfClass:NSHTTPURLResponse.class]) {
             completion(nil);
@@ -167,9 +249,10 @@ static const NSTimeInterval kProbeTimeout = 12.0;
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:kProbeTimeout];
     request.HTTPMethod = @"GET";
+    request.HTTPShouldHandleCookies = NO;
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
 
-    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request
+    NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || ![response isKindOfClass:NSHTTPURLResponse.class]) {
             completion(nil);

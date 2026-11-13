@@ -37,76 +37,84 @@ static const int kMaxFrames = 8192;
       completion:(void (^)(BOOL, NSString *_Nullable))completion {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         BOOL ok = NO;
-        NSString *error = @"Unknown error";
+        NSString *message = [MVLang t:@"Merge failed"];
+        NSFileManager *fm = NSFileManager.defaultManager;
         @autoreleasepool {
-            NSURL *videoURL = [NSURL fileURLWithPath:videoPath];
-            NSURL *audioURL = [NSURL fileURLWithPath:audioPath];
-            AVURLAsset *video = [AVURLAsset assetWithURL:videoURL];
-            AVURLAsset *audio = [AVURLAsset assetWithURL:audioURL];
-            AVMutableComposition *mix = [AVMutableComposition composition];
-
-            AVAssetTrack *vTrack = [video tracksWithMediaType:AVMediaTypeVideo].firstObject;
-            AVAssetTrack *aTrack = [audio tracksWithMediaType:AVMediaTypeAudio].firstObject;
-            if (!vTrack) {
-                error = @"No video track";
+            if (!videoPath.length || !audioPath.length || !outPath.length ||
+                [outPath isEqualToString:videoPath] || [outPath isEqualToString:audioPath]) {
+                message = [MVLang t:@"Could not read this file"];
             } else {
-                NSError *err = nil;
-                NSError *aerr = nil;
-                AVMutableCompositionTrack *vt = [mix addMutableTrackWithMediaType:AVMediaTypeVideo
-                                                                preferredTrackID:kCMPersistentTrackID_Invalid];
-                // Use the track's own time range: an asset's duration can exceed
-                // what the track actually holds, and an over-long range fails.
-                CMTime videoSpan = vTrack.timeRange.duration;
-                [vt insertTimeRange:CMTimeRangeMake(kCMTimeZero, videoSpan)
-                            ofTrack:vTrack atTime:kCMTimeZero error:&err];
-                // A progressive fallback already carries sound; adding the second
-                // stream then would leave the file with two audio tracks.
-                BOOL videoHasAudio = [video tracksWithMediaType:AVMediaTypeAudio].count > 0;
-                if (aTrack && !videoHasAudio) {
+                AVURLAsset *video = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:videoPath]];
+                AVURLAsset *audio = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:audioPath]];
+                AVAssetTrack *vTrack = [video tracksWithMediaType:AVMediaTypeVideo].firstObject;
+                // If the video is already multiplexed, insert its own audio.
+                // Merely observing it without inserting it would export silence.
+                AVAssetTrack *aTrack = [video tracksWithMediaType:AVMediaTypeAudio].firstObject ?:
+                    [audio tracksWithMediaType:AVMediaTypeAudio].firstObject;
+                if (!vTrack) {
+                    message = [MVLang t:@"No video track"];
+                } else if (!aTrack) {
+                    message = [MVLang t:@"No audio track"];
+                } else {
+                    AVMutableComposition *mix = [AVMutableComposition composition];
+                    AVMutableCompositionTrack *vt = [mix addMutableTrackWithMediaType:AVMediaTypeVideo
+                                                                    preferredTrackID:kCMPersistentTrackID_Invalid];
                     AVMutableCompositionTrack *at = [mix addMutableTrackWithMediaType:AVMediaTypeAudio
                                                                     preferredTrackID:kCMPersistentTrackID_Invalid];
-                    // Never insert more audio than the picture has: the mux must
-                    // not report success on a track that failed to land.
-                    CMTime audioSpan = aTrack.timeRange.duration;
-                    CMTime span = CMTIME_COMPARE_INLINE(audioSpan, <, videoSpan) ? audioSpan : videoSpan;
-                    [at insertTimeRange:CMTimeRangeMake(kCMTimeZero, span)
-                                ofTrack:aTrack atTime:kCMTimeZero error:&aerr];
-                }
-                if (err || aerr) {
-                    NSError *failure = err ?: aerr;
-                    error = failure.localizedDescription ?: @"Insert failed";
-                } else if ([NSFileManager.defaultManager fileExistsAtPath:outPath]) {
-                    [NSFileManager.defaultManager removeItemAtPath:outPath error:nil];
-                }
-                AVAssetExportSession *export = [AVAssetExportSession
-                    exportSessionWithAsset:mix presetName:AVAssetExportPresetPassthrough];
-                if (!export) {
-                    error = @"Export unavailable";
-                } else {
-                    export.outputURL = [NSURL fileURLWithPath:outPath];
-                    export.outputFileType = AVFileTypeMPEG4;
-                    export.shouldOptimizeForNetworkUse = NO;
-                    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-                    __block BOOL succeeded = NO;
-                    [export exportAsynchronouslyWithCompletionHandler:^{
-                        succeeded = (export.status == AVAssetExportSessionStatusCompleted);
-                        dispatch_semaphore_signal(sem);
-                    }];
-                    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600LL * NSEC_PER_SEC)));
-                    if (succeeded) {
-                        ok = YES;
-                        error = nil;
+                    CMTimeRange vrange = vTrack.timeRange;
+                    CMTimeRange arange = aTrack.timeRange;
+                    CMTime span = CMTIME_COMPARE_INLINE(arange.duration, <, vrange.duration) ? arange.duration : vrange.duration;
+                    NSError *insertError = nil;
+                    BOOL valid = vt && at && CMTIME_IS_NUMERIC(vrange.duration) && CMTIME_IS_NUMERIC(span) &&
+                        CMTIME_COMPARE_INLINE(vrange.duration, >, kCMTimeZero) && CMTIME_COMPARE_INLINE(span, >, kCMTimeZero);
+                    BOOL videoInserted = valid && [vt insertTimeRange:vrange ofTrack:vTrack atTime:kCMTimeZero error:&insertError];
+                    BOOL audioInserted = videoInserted && [at insertTimeRange:CMTimeRangeMake(arange.start, span)
+                                                                      ofTrack:aTrack atTime:kCMTimeZero error:&insertError];
+                    if (!videoInserted || !audioInserted) {
+                        message = insertError.localizedDescription ?: [MVLang t:@"Merge failed"];
                     } else {
-                        error = [NSString stringWithFormat:@"Mux failed (%ld)",
-                                 (long)export.status];
+                        vt.preferredTransform = vTrack.preferredTransform;
+                        [fm removeItemAtPath:outPath error:nil];
+                        AVAssetExportSession *export = [AVAssetExportSession exportSessionWithAsset:mix
+                                                                           presetName:AVAssetExportPresetPassthrough];
+                        if (export) {
+                            export.outputURL = [NSURL fileURLWithPath:outPath];
+                            export.outputFileType = AVFileTypeMPEG4;
+                            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                            [export exportAsynchronouslyWithCompletionHandler:^{ dispatch_semaphore_signal(sem); }];
+                            long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600LL * NSEC_PER_SEC)));
+                            if (timedOut) {
+                                [export cancelExport];
+                                // The exporter may still be closing the file. Remove it
+                                // after its callback, not while a new writer can reuse it.
+                                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                                    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+                                    [fm removeItemAtPath:outPath error:nil];
+                                });
+                            } else if (export.status == AVAssetExportSessionStatusCompleted) {
+                                AVURLAsset *result = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outPath]];
+                                long long size = [[fm attributesOfItemAtPath:outPath error:nil][NSFileSize] longLongValue];
+                                ok = size > 0 && [result tracksWithMediaType:AVMediaTypeVideo].count > 0 &&
+                                    [result tracksWithMediaType:AVMediaTypeAudio].count > 0;
+                                if (ok) message = nil;
+                                else [fm removeItemAtPath:outPath error:nil];
+                            } else {
+                                message = export.error.localizedDescription ?: message;
+                                [fm removeItemAtPath:outPath error:nil];
+                            }
+                        }
                     }
                 }
             }
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(ok, error);
-        });
+        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(ok, message); });
     });
+}
+
++ (BOOL)hasVideoTrack:(NSString *)path {
+    if (!path.length) return NO;
+    AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+    return [asset tracksWithMediaType:AVMediaTypeVideo].count > 0;
 }
 
 + (BOOL)hasAudioTrack:(NSString *)path {
@@ -306,6 +314,7 @@ static const int kMaxFrames = 8192;
 #endif
 }
 
+#if MV_HAS_LAME
 + (void)drainPending:(NSMutableData *)pending
               toLame:(lame_global_flags *)gfp
               output:(unsigned char *)mp3buf
@@ -331,4 +340,5 @@ static const int kMaxFrames = 8192;
         [pending replaceBytesInRange:NSMakeRange(0, consumed) withBytes:NULL length:0];
     }
 }
+#endif
 @end

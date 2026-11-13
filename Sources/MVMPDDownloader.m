@@ -1,8 +1,14 @@
 #import "MVMPDDownloader.h"
 #import "MVPaths.h"
+#import "MVFileProtection.h"
 #import "MVMediaProbe.h"
+#import "MVHTTPSession.h"
+#import "MVByteRange.h"
+#import "MVMediaConverter.h"
 #import "MVLang.h"
 #import "MVLog.h"
+#include <limits.h>
+#include <math.h>
 
 /// How many media segments are fetched at once, matching the HLS engine.
 static const NSInteger kMaxParallelSegments = 4;
@@ -21,6 +27,7 @@ static const NSInteger kMaxSegments = 100000;
 @property (nonatomic) long long byteLength;   ///< -1 when the whole resource
 @property (nonatomic) NSInteger retries;
 @property (nonatomic) BOOL done;
+@property (nonatomic) BOOL inFlight;
 @end
 @implementation MVMPDSegment
 @end
@@ -30,19 +37,25 @@ static const NSInteger kMaxSegments = 100000;
 @property (nonatomic, copy) NSString *repID;
 @property (nonatomic) double bandwidth;
 @property (nonatomic, copy, nullable) NSString *mimeType;
+@property (nonatomic, copy, nullable) NSString *contentType;
 @property (nonatomic, copy, nullable) NSString *codecs;
 /// The base URL this representation's relative URLs resolve against.
 @property (nonatomic, copy, nullable) NSString *base;
+/// Addressing explicitly declared at this representation, if any.
+@property (nonatomic, copy, nullable) NSString *addressingKind;
 /// SegmentTemplate addressing.
 @property (nonatomic, copy, nullable) NSString *mediaTemplate;
 @property (nonatomic, copy, nullable) NSString *mapTemplate;
 @property (nonatomic) NSInteger startNumber;
+@property (nonatomic) BOOL startNumberSpecified;
 @property (nonatomic) double timescale;
 @property (nonatomic) double duration;
 /// SegmentTimeline entries, each @{@"t": NSNumber, @"d": NSNumber, @"r": NSNumber}.
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *timeline;
 /// SegmentList addressing.
 @property (nonatomic, copy, nullable) NSString *listInit;
+@property (nonatomic, copy, nullable) NSString *listInitRange;
+@property (nonatomic) BOOL listHasInit;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *listURLs;   ///< @{url, range}
 /// SegmentBase addressing: the init byte range inside the single resource.
 @property (nonatomic) long long mapStart;
@@ -51,6 +64,7 @@ static const NSInteger kMaxSegments = 100000;
 /// AdaptationSet), so a single-resource download has a real media URL.
 @property (nonatomic) BOOL hasBase;
 @property (nonatomic) BOOL isVideo;
+@property (nonatomic) BOOL isAudio;
 @end
 @implementation MVMPDRepresentation
 - (instancetype)init {
@@ -70,8 +84,14 @@ static const NSInteger kMaxSegments = 100000;
 @property (nonatomic, strong) MVDownloadTask *task;
 @property (nonatomic, strong) NSMutableArray<MVMPDSegment *> *segments;
 @property (nonatomic, strong, nullable) MVMPDSegment *mapSegment;
-@property (nonatomic) BOOL paused;
-@property (nonatomic) BOOL cancelled;
+@property (nonatomic, strong, nullable) MVMPDSegment *audioMapSegment;
+@property (nonatomic) NSUInteger primarySegmentCount;
+@property (nonatomic) BOOL hasSeparateAudio;
+@property (nonatomic) BOOL audioOnly;
+@property (nonatomic, copy) NSString *runToken;
+@property (nonatomic, copy) NSString *tempPath;
+@property (atomic) BOOL paused;
+@property (atomic) BOOL cancelled;
 @property (nonatomic) BOOL finishing;
 @property (nonatomic) NSUInteger inFlight;
 @property (nonatomic) long long doneBytes;
@@ -100,25 +120,37 @@ static const NSInteger kMaxSegments = 100000;
 @property (nonatomic) double presentationDuration;
 /// The current Period duration in seconds, 0 when absent.
 @property (nonatomic) double periodDuration;
+@property (nonatomic) NSUInteger periodCount;
 - (instancetype)initWithURL:(NSString *)url;
 - (BOOL)parse:(NSData *)data;
 @end
 
 @implementation MVMPDParser {
     NSMutableArray<NSString *> *_baseStack;
+    NSMutableArray<NSNumber *> *_baseHasURL;
+    NSMutableArray<NSNumber *> *_baseDeclaredHere;
     NSMutableString *_textBuffer;
     MVMPDRepresentation *_currentRep;
-    // Segment addressing inherited from an enclosing AdaptationSet.
+    BOOL _inPeriod;
+    BOOL _inAdaptationSet;
+    // Segment addressing may be inherited from a Period or AdaptationSet.
+    NSMutableDictionary *_periodTemplate;
+    NSMutableDictionary *_periodList;
+    NSMutableDictionary *_periodBase;
+    NSString *_periodKind;
+    NSString *_setKind;
     NSMutableDictionary *_setTemplate;
     NSMutableDictionary *_setList;
     NSMutableDictionary *_setBase;
+    NSString *_setMimeType;
+    NSString *_setContentType;
+    NSString *_setCodecs;
     // The SegmentTemplate/SegmentList/SegmentBase currently open, so its
     // children (SegmentTimeline, SegmentURL) land in the right place.
     NSMutableDictionary *_openTemplate;
     NSMutableDictionary *_openList;
     NSMutableDictionary *_openBase;
     BOOL _inTimeline;
-    BOOL _setHasBase;
 }
 
 - (instancetype)initWithURL:(NSString *)url {
@@ -126,6 +158,8 @@ static const NSInteger kMaxSegments = 100000;
         _manifestURL = [url copy];
         _representations = [NSMutableArray array];
         _baseStack = [NSMutableArray arrayWithObject:url];
+        _baseHasURL = [NSMutableArray arrayWithObject:@NO];
+        _baseDeclaredHere = [NSMutableArray arrayWithObject:@NO];
         _textBuffer = [NSMutableString string];
     }
     return self;
@@ -137,6 +171,19 @@ static const NSInteger kMaxSegments = 100000;
     parser.shouldProcessNamespaces = NO;
     parser.shouldResolveExternalEntities = NO;
     return [parser parse];
+}
+
+- (void)pushBaseScope {
+    [_baseStack addObject:_baseStack.lastObject];
+    [_baseHasURL addObject:_baseHasURL.lastObject];
+    [_baseDeclaredHere addObject:@NO];
+}
+
+- (void)popBaseScope {
+    if (_baseStack.count <= 1) return;
+    [_baseStack removeLastObject];
+    [_baseHasURL removeLastObject];
+    [_baseDeclaredHere removeLastObject];
 }
 
 /// The element's local name without a namespace prefix, lower-cased.
@@ -158,27 +205,34 @@ didStartElement:(NSString *)elementName
     }
 
     if ([name isEqualToString:@"period"]) {
-        [_baseStack addObject:_baseStack.lastObject];
+        [self pushBaseScope];
+        _inPeriod = YES;
+        self.periodCount++;
         self.periodDuration = [self secondsFromISO8601Duration:attributes[@"duration"]];
-        _setTemplate = nil; _setList = nil; _setBase = nil;
+        _periodTemplate = nil; _periodList = nil; _periodBase = nil; _periodKind = nil;
+        _setTemplate = nil; _setList = nil; _setBase = nil; _setKind = nil;
         return;
     }
 
     if ([name isEqualToString:@"adaptationset"]) {
-        [_baseStack addObject:_baseStack.lastObject];
-        _setTemplate = nil; _setList = nil; _setBase = nil;
-        _setHasBase = NO;
+        [self pushBaseScope];
+        _inAdaptationSet = YES;
+        _setTemplate = nil; _setList = nil; _setBase = nil; _setKind = nil;
+        _setMimeType = attributes[@"mimeType"];
+        _setContentType = attributes[@"contentType"];
+        _setCodecs = attributes[@"codecs"];
         return;
     }
 
     if ([name isEqualToString:@"representation"]) {
-        [_baseStack addObject:_baseStack.lastObject];
+        [self pushBaseScope];
         MVMPDRepresentation *rep = [MVMPDRepresentation new];
         rep.repID = attributes[@"id"];
         rep.bandwidth = [attributes[@"bandwidth"] doubleValue];
-        rep.mimeType = attributes[@"mimeType"];
-        rep.codecs = attributes[@"codecs"];
-        rep.startNumber = attributes[@"startNumber"] ? attributes[@"startNumber"].integerValue : 1;
+        rep.mimeType = attributes[@"mimeType"] ?: _setMimeType;
+        rep.contentType = attributes[@"contentType"] ?: _setContentType;
+        rep.codecs = attributes[@"codecs"] ?: _setCodecs;
+        rep.startNumber = 1; // DASH default; SegmentTemplate may override it.
         _currentRep = rep;
         return;
     }
@@ -204,8 +258,10 @@ didStartElement:(NSString *)elementName
         t[@"timescale"] = attributes[@"timescale"];
         t[@"duration"] = attributes[@"duration"];
         t[@"timeline"] = [NSMutableArray array];
-        if (_currentRep) { _openTemplate = t; }
-        else { _setTemplate = t; }
+        _openTemplate = t;
+        if (_currentRep) _currentRep.addressingKind = @"template";
+        else if (_inAdaptationSet) { _setTemplate = t; _setKind = @"template"; }
+        else if (_inPeriod) { _periodTemplate = t; _periodKind = @"template"; }
         return;
     }
 
@@ -218,8 +274,7 @@ didStartElement:(NSString *)elementName
         NSDictionary *entry = @{@"t": @(attributes[@"t"] ? attributes[@"t"].longLongValue : -1),
                                 @"d": @(attributes[@"d"] ? attributes[@"d"].longLongValue : 0),
                                 @"r": @(attributes[@"r"] ? attributes[@"r"].integerValue : 0)};
-        NSMutableArray *timeline = _currentRep ? _currentRep.timeline
-                                               : (_openTemplate[@"timeline"] ?: _setTemplate[@"timeline"]);
+        NSMutableArray *timeline = _openTemplate[@"timeline"];
         if (timeline) [timeline addObject:entry];
         return;
     }
@@ -227,18 +282,33 @@ didStartElement:(NSString *)elementName
     if ([name isEqualToString:@"segmentlist"]) {
         NSMutableDictionary *l = [NSMutableDictionary dictionary];
         l[@"initialization"] = attributes[@"initialization"] ?: @"";
+        l[@"hasInit"] = @((attributes[@"initialization"].length > 0));
         l[@"urls"] = [NSMutableArray array];
-        if (_currentRep) { _openList = l; }
-        else { _setList = l; }
+        _openList = l;
+        if (_currentRep) _currentRep.addressingKind = @"list";
+        else if (_inAdaptationSet) { _setList = l; _setKind = @"list"; }
+        else if (_inPeriod) { _periodList = l; _periodKind = @"list"; }
+        return;
+    }
+
+    if ([name isEqualToString:@"initialization"]) {
+        NSMutableDictionary *list = _openList;
+        NSMutableDictionary *base = _openBase;
+        if (list) {
+            list[@"hasInit"] = @YES;
+            list[@"initialization"] = attributes[@"sourceURL"] ?: @"";
+            list[@"initRange"] = attributes[@"range"] ?: @"";
+        } else if (base && attributes[@"range"].length) {
+            base[@"initialization"] = attributes[@"range"];
+        }
         return;
     }
 
     if ([name isEqualToString:@"segmenturl"]) {
         NSString *media = attributes[@"media"];
-        if (media.length) {
-            NSDictionary *entry = @{@"url": media, @"range": attributes[@"mediaRange"] ?: @""};
-            NSMutableArray *urls = _currentRep ? _currentRep.listURLs
-                                               : (_openList[@"urls"] ?: _setList[@"urls"]);
+        if (media.length || [attributes[@"mediaRange"] length]) {
+            NSDictionary *entry = @{@"url": media ?: @"", @"range": attributes[@"mediaRange"] ?: @""};
+            NSMutableArray *urls = _openList[@"urls"];
             if (urls) [urls addObject:entry];
         }
         return;
@@ -247,8 +317,10 @@ didStartElement:(NSString *)elementName
     if ([name isEqualToString:@"segmentbase"]) {
         NSMutableDictionary *b = [NSMutableDictionary dictionary];
         b[@"initialization"] = attributes[@"initialization"] ?: @"";
-        if (_currentRep) { _openBase = b; }
-        else { _setBase = b; }
+        _openBase = b;
+        if (_currentRep) _currentRep.addressingKind = @"base";
+        else if (_inAdaptationSet) { _setBase = b; _setKind = @"base"; }
+        else if (_inPeriod) { _periodBase = b; _periodKind = @"base"; }
         return;
     }
 }
@@ -265,10 +337,14 @@ didStartElement:(NSString *)elementName
 
     if ([name isEqualToString:@"baseurl"]) {
         NSString *text = [_textBuffer stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (text.length && _baseStack.count) {
-            _baseStack[_baseStack.count - 1] = [self absoluteURL:text base:_baseStack.lastObject];
-            if (_currentRep) _currentRep.hasBase = YES;
-            else _setHasBase = YES;
+        if (text.length && _baseStack.count && ![_baseDeclaredHere.lastObject boolValue]) {
+            NSString *resolved = [self absoluteURL:text base:_baseStack.lastObject];
+            if (resolved.length) {
+                NSUInteger scope = _baseStack.count - 1;
+                _baseStack[scope] = resolved;
+                _baseHasURL[scope] = @YES;
+                _baseDeclaredHere[scope] = @YES; // alternatives are not nested paths
+            }
         }
         [_textBuffer setString:@""];
         return;
@@ -278,7 +354,10 @@ didStartElement:(NSString *)elementName
         if (_currentRep && _openTemplate) {
             _currentRep.mediaTemplate = _openTemplate[@"media"];
             _currentRep.mapTemplate = _openTemplate[@"initialization"];
-            if (_openTemplate[@"startNumber"]) _currentRep.startNumber = [_openTemplate[@"startNumber"] integerValue];
+            if (_openTemplate[@"startNumber"]) {
+                _currentRep.startNumber = [_openTemplate[@"startNumber"] integerValue];
+                _currentRep.startNumberSpecified = YES;
+            }
             if (_openTemplate[@"timescale"]) _currentRep.timescale = [_openTemplate[@"timescale"] doubleValue];
             if (_openTemplate[@"duration"]) _currentRep.duration = [_openTemplate[@"duration"] doubleValue];
             [_currentRep.timeline addObjectsFromArray:_openTemplate[@"timeline"]];
@@ -292,6 +371,8 @@ didStartElement:(NSString *)elementName
     if ([name isEqualToString:@"segmentlist"]) {
         if (_currentRep && _openList) {
             _currentRep.listInit = _openList[@"initialization"];
+            _currentRep.listInitRange = _openList[@"initRange"];
+            _currentRep.listHasInit = [_openList[@"hasInit"] boolValue];
             [_currentRep.listURLs addObjectsFromArray:_openList[@"urls"]];
         }
         _openList = nil;
@@ -307,31 +388,73 @@ didStartElement:(NSString *)elementName
     if ([name isEqualToString:@"representation"]) {
         if (_currentRep) {
             _currentRep.base = _baseStack.lastObject;
-            // A representation may inherit its addressing from the AdaptationSet.
-            if (!_currentRep.mediaTemplate.length && _setTemplate) {
-                _currentRep.mediaTemplate = _setTemplate[@"media"];
-                _currentRep.mapTemplate = _setTemplate[@"initialization"];
-                if (_setTemplate[@"startNumber"]) _currentRep.startNumber = [_setTemplate[@"startNumber"] integerValue];
-                if (_setTemplate[@"timescale"]) _currentRep.timescale = [_setTemplate[@"timescale"] doubleValue];
-                if (_setTemplate[@"duration"]) _currentRep.duration = [_setTemplate[@"duration"] doubleValue];
-                [_currentRep.timeline addObjectsFromArray:_setTemplate[@"timeline"]];
+            _currentRep.hasBase = [_baseHasURL.lastObject boolValue];
+            NSString *kind = _currentRep.addressingKind ?: _setKind ?: _periodKind;
+            BOOL sameSet = !_setKind || [_setKind isEqualToString:kind];
+            NSMutableArray<NSDictionary *> *parents = [NSMutableArray array];
+            if (sameSet && _setKind) {
+                NSDictionary *parent = [kind isEqualToString:@"template"] ? _setTemplate :
+                                       [kind isEqualToString:@"list"] ? _setList : _setBase;
+                if (parent) [parents addObject:parent];
             }
-            if (!_currentRep.listURLs.count && [_setList[@"urls"] count]) {
-                _currentRep.listInit = _setList[@"initialization"];
-                [_currentRep.listURLs addObjectsFromArray:_setList[@"urls"]];
+            // Switching addressing modes at an inner level terminates the old
+            // inheritance chain, rather than mixing a template with a list.
+            if (sameSet && [_periodKind isEqualToString:kind]) {
+                NSDictionary *parent = [kind isEqualToString:@"template"] ? _periodTemplate :
+                                       [kind isEqualToString:@"list"] ? _periodList : _periodBase;
+                if (parent) [parents addObject:parent];
             }
-            if (_currentRep.mapStart < 0 && _setBase) [self applySegmentBase:_setBase to:_currentRep];
-            if (_setHasBase) _currentRep.hasBase = YES;
+            if ([kind isEqualToString:@"template"]) {
+                [_currentRep.listURLs removeAllObjects];
+                _currentRep.listHasInit = NO;
+                _currentRep.mapStart = -1;
+                for (NSDictionary *parent in parents) {
+                    if (!_currentRep.mediaTemplate.length) _currentRep.mediaTemplate = parent[@"media"];
+                    if (!_currentRep.mapTemplate.length) _currentRep.mapTemplate = parent[@"initialization"];
+                    if (!_currentRep.startNumberSpecified && parent[@"startNumber"]) {
+                        _currentRep.startNumber = [parent[@"startNumber"] integerValue];
+                        _currentRep.startNumberSpecified = YES;
+                    }
+                    if (_currentRep.timescale <= 0 && parent[@"timescale"]) _currentRep.timescale = [parent[@"timescale"] doubleValue];
+                    if (_currentRep.duration <= 0 && parent[@"duration"]) _currentRep.duration = [parent[@"duration"] doubleValue];
+                    if (!_currentRep.timeline.count) [_currentRep.timeline addObjectsFromArray:parent[@"timeline"] ?: @[]];
+                }
+            } else if ([kind isEqualToString:@"list"]) {
+                _currentRep.mediaTemplate = nil;
+                _currentRep.mapTemplate = nil;
+                _currentRep.mapStart = -1;
+                for (NSDictionary *parent in parents) {
+                    if (!_currentRep.listHasInit && [parent[@"hasInit"] boolValue]) {
+                        _currentRep.listInit = parent[@"initialization"];
+                        _currentRep.listInitRange = parent[@"initRange"];
+                        _currentRep.listHasInit = YES;
+                    }
+                    if (!_currentRep.listURLs.count) [_currentRep.listURLs addObjectsFromArray:parent[@"urls"] ?: @[]];
+                }
+            } else if ([kind isEqualToString:@"base"]) {
+                _currentRep.mediaTemplate = nil;
+                [_currentRep.listURLs removeAllObjects];
+                for (NSDictionary *parent in parents) {
+                    if (_currentRep.mapStart < 0) [self applySegmentBase:parent to:_currentRep];
+                }
+            }
             _currentRep.isVideo = [self repLooksLikeVideo:_currentRep];
+            _currentRep.isAudio = !_currentRep.isVideo && [self repLooksLikeAudio:_currentRep];
             [self.representations addObject:_currentRep];
         }
         _currentRep = nil;
-        if (_baseStack.count > 1) [_baseStack removeLastObject];
+        [self popBaseScope];
         return;
     }
 
-    if ([name isEqualToString:@"adaptationset"] || [name isEqualToString:@"period"]) {
-        if (_baseStack.count > 1) [_baseStack removeLastObject];
+    if ([name isEqualToString:@"adaptationset"]) {
+        _inAdaptationSet = NO;
+        [self popBaseScope];
+        return;
+    }
+    if ([name isEqualToString:@"period"]) {
+        _inPeriod = NO;
+        [self popBaseScope];
         return;
     }
 }
@@ -339,20 +462,37 @@ didStartElement:(NSString *)elementName
 - (void)applySegmentBase:(NSDictionary *)b to:(MVMPDRepresentation *)rep {
     NSString *range = b[@"initialization"];
     if (![range isKindOfClass:NSString.class] || !range.length) return;
-    NSArray<NSString *> *parts = [range componentsSeparatedByString:@"-"];
-    if (parts.count != 2) return;
-    rep.mapStart = parts[0].longLongValue;
-    rep.mapLength = parts[1].longLongValue - parts[0].longLongValue + 1;
+    NSScanner *scanner = [NSScanner scannerWithString:range];
+    long long first = 0, last = 0;
+    if (![scanner scanLongLong:&first] || ![scanner scanString:@"-" intoString:nil] ||
+        ![scanner scanLongLong:&last] || !scanner.isAtEnd || first < 0 || last < first || last == LLONG_MAX) return;
+    rep.mapStart = first;
+    rep.mapLength = last - first + 1;
 }
 
-/// YES when the representation carries video, by mimeType or codec.
+/// AdaptationSet attributes are common in real MPDs; codecs may be a list.
 - (BOOL)repLooksLikeVideo:(MVMPDRepresentation *)rep {
+    NSString *kind = rep.contentType.lowercaseString;
     NSString *mime = rep.mimeType.lowercaseString;
-    if ([mime containsString:@"video"]) return YES;
-    if ([mime containsString:@"audio"]) return NO;
-    NSString *codecs = rep.codecs.lowercaseString;
-    if ([codecs hasPrefix:@"avc"] || [codecs hasPrefix:@"hvc"] || [codecs hasPrefix:@"hev"] ||
-        [codecs hasPrefix:@"vp0"] || [codecs hasPrefix:@"vp9"] || [codecs hasPrefix:@"av01"]) return YES;
+    if ([kind isEqualToString:@"video"] || [mime hasPrefix:@"video/"]) return YES;
+    if ([kind isEqualToString:@"audio"] || [mime hasPrefix:@"audio/"]) return NO;
+    for (NSString *entry in [rep.codecs.lowercaseString componentsSeparatedByString:@","]) {
+        NSString *codec = [entry stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if ([codec hasPrefix:@"avc"] || [codec hasPrefix:@"hvc"] || [codec hasPrefix:@"hev"] ||
+            [codec hasPrefix:@"vp0"] || [codec hasPrefix:@"vp9"] || [codec hasPrefix:@"av01"]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)repLooksLikeAudio:(MVMPDRepresentation *)rep {
+    NSString *kind = rep.contentType.lowercaseString;
+    NSString *mime = rep.mimeType.lowercaseString;
+    if ([kind isEqualToString:@"audio"] || [mime hasPrefix:@"audio/"]) return YES;
+    for (NSString *entry in [rep.codecs.lowercaseString componentsSeparatedByString:@","]) {
+        NSString *codec = [entry stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if ([codec hasPrefix:@"mp4a"] || [codec hasPrefix:@"ac-3"] || [codec hasPrefix:@"ec-3"] ||
+            [codec hasPrefix:@"opus"] || [codec hasPrefix:@"vorbis"]) return YES;
+    }
     return NO;
 }
 
@@ -433,25 +573,36 @@ didStartElement:(NSString *)elementName
     job.progressBlock = progress;
     job.finishedBlock = finished;
     job.failedBlock = failed;
+    job.runToken = NSUUID.UUID.UUIDString;
+    (void)[self segmentPathForJob:job index:-1]; // create a stable base before background work
+    task.doneBytes = 0; // DASH segments are fetched again after a restart
+    task.totalBytes = 0;
     @synchronized (self) { _jobs[task.identifier] = job; }
+    if (progress) progress(task); // persist the base path before the first request
     [self fetchManifestForJob:job];
 }
 
 - (void)pauseTask:(MVDownloadTask *)task {
     MVMPDJob *job = nil;
-    @synchronized (self) { job = _jobs[task.identifier]; }
+    @synchronized (self) {
+        job = _jobs[task.identifier];
+        if (job) { job.paused = YES; [_jobs removeObjectForKey:task.identifier]; }
+    }
     if (!job) return;
-    job.paused = YES;
-    @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
     MVLogInfo(@"dash: paused %@ at %lld bytes", task.title, job.doneBytes);
 }
 
 - (void)cancelTask:(MVDownloadTask *)task {
-    MVMPDJob *job = nil;
-    @synchronized (self) { job = _jobs[task.identifier]; }
-    if (!job) return;
-    job.cancelled = YES;
-    @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
+    @synchronized (self) {
+        MVMPDJob *job = _jobs[task.identifier];
+        if (job) { job.cancelled = YES; [_jobs removeObjectForKey:task.identifier]; }
+    }
+}
+
+- (BOOL)isCurrentJob:(MVMPDJob *)job {
+    @synchronized (self) {
+        return _jobs[job.task.identifier] == job && !job.paused && !job.cancelled;
+    }
 }
 
 #pragma mark - Manifest
@@ -481,51 +632,93 @@ didStartElement:(NSString *)elementName
             return;
         }
 
-        MVMPDRepresentation *rep = [self bestRepresentationIn:parser.representations];
-        if (!rep) {
+        if (parser.periodCount != 1) {
+            [self failJob:job message:[MVLang t:@"Multiple DASH periods are not supported"]];
+            return;
+        }
+        BOOL hasVideo = NO, hasAudio = NO;
+        for (MVMPDRepresentation *candidate in parser.representations) {
+            hasVideo |= candidate.isVideo;
+            hasAudio |= candidate.isAudio;
+        }
+        MVMPDRepresentation *video = [self bestRepresentationIn:parser.representations audio:NO];
+        MVMPDRepresentation *audio = [self bestRepresentationIn:parser.representations audio:YES];
+        if ((hasVideo && !video) || (hasAudio && !audio)) {
+            [self failJob:job message:[MVLang t:@"Unsupported DASH media format"]];
+            return;
+        }
+        MVMPDRepresentation *primary = video ?: audio;
+        if (!primary) {
             [self failJob:job message:[MVLang t:@"Could not open the stream"]];
             return;
         }
-
+        job.audioOnly = !video;
         double period = parser.periodDuration > 0 ? parser.periodDuration : parser.presentationDuration;
-        if (![self buildSegmentsFor:rep period:period into:job]) {
+        if (![self buildSegmentsFor:primary period:period into:job]) {
             [self failJob:job message:[MVLang t:@"Could not open the stream"]];
             return;
         }
-
-        if (job.mapSegment) {
-            NSMutableDictionary *initHeaders =
-                [[MVMediaProbe headersForURL:job.mapSegment.url referer:job.task.referer] mutableCopy];
-            if (job.mapSegment.byteStart >= 0) {
-                initHeaders[@"Range"] = [NSString stringWithFormat:@"bytes=%lld-%lld",
-                                         job.mapSegment.byteStart,
-                                         job.mapSegment.byteStart + job.mapSegment.byteLength - 1];
-            }
-            NSError *initError = nil;
-            NSData *initData = [self syncGet:job.mapSegment.url headers:initHeaders error:&initError];
-            if (!initData.length) {
+        job.primarySegmentCount = job.segments.count;
+        if (video && audio) {
+            MVMPDJob *sound = [MVMPDJob new];
+            sound.task = job.task;
+            if (![self buildSegmentsFor:audio period:period into:sound]) {
                 [self failJob:job message:[MVLang t:@"Could not open the stream"]];
                 return;
             }
-            [self writeSegment:initData index:-1 job:job];
+            job.hasSeparateAudio = YES;
+            job.audioMapSegment = sound.mapSegment;
+            job.audioMapSegment.index = -2;
+            for (MVMPDSegment *segment in sound.segments) {
+                segment.index += (NSInteger)job.primarySegmentCount;
+                [job.segments addObject:segment];
+            }
+        }
+
+        NSMutableArray<NSDictionary *> *initializations = [NSMutableArray array];
+        NSMutableArray<MVMPDSegment *> *maps = [NSMutableArray array];
+        if (job.mapSegment) [maps addObject:job.mapSegment];
+        if (job.audioMapSegment) [maps addObject:job.audioMapSegment];
+        for (MVMPDSegment *segment in maps) {
+            if (job.paused || job.cancelled) return;
+            NSMutableDictionary *initHeaders =
+                [[MVMediaProbe headersForURL:segment.url referer:job.task.resourceContextURL] mutableCopy];
+            if (segment.byteStart >= 0) {
+                initHeaders[@"Range"] = [NSString stringWithFormat:@"bytes=%lld-%lld", segment.byteStart,
+                                         segment.byteStart + segment.byteLength - 1];
+            }
+            NSError *initError = nil;
+            NSData *initData = [self syncGet:segment.url headers:initHeaders error:&initError];
+            if (!initData.length) {
+                [self failJob:job message:initError.localizedDescription ?: [MVLang t:@"Could not open the stream"]];
+                return;
+            }
+            [initializations addObject:@{@"segment": segment, @"data": initData}];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (job.paused || job.cancelled) return;
+            if (![self isCurrentJob:job]) return;
+            for (NSDictionary *item in initializations) {
+                MVMPDSegment *segment = item[@"segment"];
+                if (![self writeSegment:item[@"data"] index:segment.index job:job]) {
+                    [self failJob:job message:[MVLang t:@"Could not save the file"]];
+                    return;
+                }
+            }
             job.task.phase = [MVLang t:@"Downloading segments"];
             [self pumpJob:job];
         });
     });
 }
 
-/// The highest-bandwidth video representation, or the highest-bandwidth
-/// representation of any kind when the manifest carries no video.
-- (nullable MVMPDRepresentation *)bestRepresentationIn:(NSArray<MVMPDRepresentation *> *)reps {
+/// Prefer the highest-bandwidth MP4 representation of each kind. WebM/Matroska
+/// are not fMP4 and must not be presented as a successfully saved MP4.
+- (nullable MVMPDRepresentation *)bestRepresentationIn:(NSArray<MVMPDRepresentation *> *)reps audio:(BOOL)audio {
     MVMPDRepresentation *best = nil;
-    BOOL anyVideo = NO;
-    for (MVMPDRepresentation *rep in reps) if (rep.isVideo) { anyVideo = YES; break; }
     for (MVMPDRepresentation *rep in reps) {
-        if (anyVideo && !rep.isVideo) continue;
+        if (audio ? !rep.isAudio : !rep.isVideo) continue;
+        NSString *mime = rep.mimeType.lowercaseString;
+        if ([mime containsString:@"webm"] || [mime containsString:@"matroska"]) continue;
         if (!best || rep.bandwidth > best.bandwidth) best = rep;
     }
     return best;
@@ -537,20 +730,18 @@ didStartElement:(NSString *)elementName
 
     // SegmentList: an explicit list of media URLs.
     if (rep.listURLs.count) {
-        if (rep.listInit.length) {
-            job.mapSegment = [self segmentForURL:[self absoluteURL:rep.listInit base:base] index:-1 start:-1 length:-1];
+        if (rep.listURLs.count > (NSUInteger)kMaxSegments) return NO;
+        if (rep.listHasInit || rep.listInit.length) {
+            long long start = -1, length = -1;
+            if (rep.listInitRange.length && ![self parseRange:rep.listInitRange start:&start length:&length]) return NO;
+            job.mapSegment = [self segmentForURL:[self absoluteURL:rep.listInit ?: @"" base:base]
+                                           index:-1 start:start length:length];
         }
         NSInteger index = 0;
         for (NSDictionary *entry in rep.listURLs) {
             NSString *range = entry[@"range"];
             long long start = -1, length = -1;
-            if (range.length) {
-                NSArray<NSString *> *parts = [range componentsSeparatedByString:@"-"];
-                if (parts.count == 2) {
-                    start = parts[0].longLongValue;
-                    length = parts[1].longLongValue - start + 1;
-                }
-            }
+            if (range.length && ![self parseRange:range start:&start length:&length]) return NO;
             [job.segments addObject:[self segmentForURL:[self absoluteURL:entry[@"url"] base:base]
                                                   index:index++ start:start length:length]];
         }
@@ -559,9 +750,11 @@ didStartElement:(NSString *)elementName
 
     // SegmentTemplate: build the URLs from the template.
     if (rep.mediaTemplate.length) {
+        if (rep.startNumber < 0 || rep.startNumber == NSIntegerMax) return NO;
         if (rep.mapTemplate.length) {
-            job.mapSegment = [self segmentForURL:[self fillTemplate:rep.mapTemplate rep:rep number:rep.startNumber time:0]
-                                           index:-1 start:-1 length:-1];
+            NSString *initialization = [self fillTemplate:rep.mapTemplate rep:rep number:rep.startNumber time:0];
+            if (!initialization.length) return NO;
+            job.mapSegment = [self segmentForURL:initialization index:-1 start:-1 length:-1];
         }
         NSInteger number = rep.startNumber;
         long long time = 0;
@@ -570,26 +763,36 @@ didStartElement:(NSString *)elementName
                 long long t = [entry[@"t"] longLongValue];
                 long long d = [entry[@"d"] longLongValue];
                 NSInteger r = [entry[@"r"] integerValue];
+                // An unbounded repeat needs the next Period/timeline boundary;
+                // do not silently emit an incomplete stream.
+                if (r < 0 || d <= 0) return NO;
                 if (t >= 0) time = t;
                 for (NSInteger i = 0; i <= r; i++) {
-                    if ((NSInteger)job.segments.count >= kMaxSegments) return NO;
-                    [job.segments addObject:[self segmentForURL:[self fillTemplate:rep.mediaTemplate rep:rep number:number time:time]
-                                                          index:job.segments.count start:-1 length:-1]];
+                    if ((NSInteger)job.segments.count >= kMaxSegments || number == NSIntegerMax || time > LLONG_MAX - d) return NO;
+                    NSString *url = [self fillTemplate:rep.mediaTemplate rep:rep number:number time:time];
+                    if (!url.length) return NO;
+                    [job.segments addObject:[self segmentForURL:url index:job.segments.count start:-1 length:-1]];
                     number++;
                     time += d;
                 }
             }
             return job.segments.count > 0;
         }
-        if (rep.duration > 0 && rep.timescale > 0 && period > 0) {
-            NSInteger count = (NSInteger)ceil(period / (rep.duration / rep.timescale));
-            if (count <= 0) return NO;
+        if (rep.duration > 0 && period > 0) {
+            double timescale = rep.timescale > 0 ? rep.timescale : 1; // DASH default
+            if (!isfinite(period) || !isfinite(timescale) || !isfinite(rep.duration) ||
+                rep.duration >= (double)LLONG_MAX || floor(rep.duration) != rep.duration) return NO;
+            double countValue = ceil(period / (rep.duration / timescale));
+            if (!isfinite(countValue) || countValue < 1 || countValue > kMaxSegments) return NO;
+            NSInteger count = (NSInteger)countValue;
+            long long step = (long long)rep.duration;
             for (NSInteger i = 0; i < count; i++) {
-                if ((NSInteger)job.segments.count >= kMaxSegments) return NO;
-                [job.segments addObject:[self segmentForURL:[self fillTemplate:rep.mediaTemplate rep:rep number:number time:time]
-                                                      index:job.segments.count start:-1 length:-1]];
+                if (number == NSIntegerMax || time > LLONG_MAX - step) return NO;
+                NSString *url = [self fillTemplate:rep.mediaTemplate rep:rep number:number time:time];
+                if (!url.length) return NO;
+                [job.segments addObject:[self segmentForURL:url index:job.segments.count start:-1 length:-1]];
                 number++;
-                time += (long long)rep.duration;
+                time += step;
             }
             return job.segments.count > 0;
         }
@@ -600,14 +803,23 @@ didStartElement:(NSString *)elementName
     // base must have been declared, otherwise this is a manifest with no media
     // addressing and there is nothing to download.
     if (rep.hasBase) {
-        if (rep.mapStart >= 0) {
-            job.mapSegment = [self segmentForURL:base index:-1 start:rep.mapStart length:rep.mapLength];
-        }
+        // Fetching the entire resource already includes its initialization box;
+        // prepending SegmentBase's init range again would corrupt the file.
         [job.segments addObject:[self segmentForURL:base index:0 start:-1 length:-1]];
         return YES;
     }
 
     return NO;
+}
+
+- (BOOL)parseRange:(NSString *)range start:(long long *)start length:(long long *)length {
+    NSScanner *scanner = [NSScanner scannerWithString:range];
+    long long first = 0, last = 0;
+    if (![scanner scanLongLong:&first] || ![scanner scanString:@"-" intoString:nil] ||
+        ![scanner scanLongLong:&last] || !scanner.isAtEnd || first < 0 || last < first || last == LLONG_MAX) return NO;
+    *start = first;
+    *length = last - first + 1;
+    return YES;
 }
 
 - (MVMPDSegment *)segmentForURL:(NSString *)url index:(NSInteger)index start:(long long)start length:(long long)length {
@@ -623,28 +835,49 @@ didStartElement:(NSString *)elementName
 /// `%0Nd` width form; `$Time$`, `$Bandwidth$` and `$RepresentationID$` are the
 /// other placeholders a media template uses.
 - (NSString *)fillTemplate:(NSString *)template rep:(MVMPDRepresentation *)rep number:(NSInteger)number time:(long long)time {
-    NSMutableString *out = [template mutableCopy];
-    [out replaceOccurrencesOfString:@"$RepresentationID$" withString:rep.repID ?: @""
-                            options:0 range:NSMakeRange(0, out.length)];
-    [out replaceOccurrencesOfString:@"$Bandwidth$"
-                         withString:[NSString stringWithFormat:@"%ld", (long)rep.bandwidth]
-                            options:0 range:NSMakeRange(0, out.length)];
-    [out replaceOccurrencesOfString:@"$Time$"
-                         withString:[NSString stringWithFormat:@"%lld", time]
-                            options:0 range:NSMakeRange(0, out.length)];
-    NSRegularExpression *numberRegex =
-        [NSRegularExpression regularExpressionWithPattern:@"\\$Number(?:%0(\\d+)d)?\\$" options:0 error:nil];
-    NSArray<NSTextCheckingResult *> *matches =
-        [numberRegex matchesInString:out options:0 range:NSMakeRange(0, out.length)];
-    for (NSTextCheckingResult *match in matches.reverseObjectEnumerator) {
-        NSString *replacement;
-        if (match.numberOfRanges > 1 && [match rangeAtIndex:1].location != NSNotFound) {
-            NSInteger width = [[out substringWithRange:[match rangeAtIndex:1]] integerValue];
-            replacement = [NSString stringWithFormat:@"%0*ld", (int)width, (long)number];
-        } else {
-            replacement = [NSString stringWithFormat:@"%ld", (long)number];
+    if (template.length > 8192) return nil;
+    NSMutableString *out = [NSMutableString string];
+    NSUInteger i = 0;
+    while (i < template.length) {
+        if ([template characterAtIndex:i] != '$') {
+            NSRange remaining = NSMakeRange(i, template.length - i);
+            NSRange next = [template rangeOfString:@"$" options:0 range:remaining];
+            NSUInteger end = next.location == NSNotFound ? template.length : next.location;
+            [out appendString:[template substringWithRange:NSMakeRange(i, end - i)]];
+            i = end;
+            continue;
         }
-        [out replaceCharactersInRange:match.range withString:replacement];
+        if (i + 1 < template.length && [template characterAtIndex:i + 1] == '$') {
+            [out appendString:@"$"];
+            i += 2;
+            continue;
+        }
+        NSRange tail = NSMakeRange(i + 1, template.length - i - 1);
+        NSRange close = [template rangeOfString:@"$" options:0 range:tail];
+        if (close.location == NSNotFound) return nil;
+        NSString *token = [template substringWithRange:NSMakeRange(i + 1, close.location - i - 1)];
+        NSString *value = nil;
+        if ([token isEqualToString:@"RepresentationID"]) {
+            value = rep.repID.length ? rep.repID : nil;
+        } else if ([token isEqualToString:@"Bandwidth"]) {
+            if (!isfinite(rep.bandwidth) || rep.bandwidth < 0 || rep.bandwidth >= (double)LLONG_MAX) return nil;
+            value = [NSString stringWithFormat:@"%lld", (long long)rep.bandwidth];
+        } else if ([token isEqualToString:@"Time"]) {
+            value = [NSString stringWithFormat:@"%lld", time];
+        } else if ([token isEqualToString:@"Number"]) {
+            value = [NSString stringWithFormat:@"%ld", (long)number];
+        } else if ([token hasPrefix:@"Number%0"] && [token hasSuffix:@"d"] && token.length > 9) {
+            NSString *widthText = [token substringWithRange:NSMakeRange(8, token.length - 9)];
+            NSCharacterSet *nonDigits = NSCharacterSet.decimalDigitCharacterSet.invertedSet;
+            if ([widthText rangeOfCharacterFromSet:nonDigits].location != NSNotFound) return nil;
+            NSInteger width = widthText.integerValue;
+            if (width < 1 || width > 20) return nil;
+            value = [NSString stringWithFormat:@"%0*ld", (int)width, (long)number];
+        }
+        if (!value) return nil; // do not request an unsupported placeholder literally
+        [out appendString:value];
+        if (out.length > 8192) return nil;
+        i = NSMaxRange(close);
     }
     return [self absoluteURL:out base:rep.base ?: @""];
 }
@@ -658,11 +891,11 @@ didStartElement:(NSString *)elementName
 #pragma mark - Segments
 
 - (void)pumpJob:(MVMPDJob *)job {
-    if (job.paused || job.cancelled || job.finishing) return;
+    if (![self isCurrentJob:job] || job.finishing) return;
     while (job.inFlight < (NSUInteger)kMaxParallelSegments) {
         MVMPDSegment *next = nil;
         for (MVMPDSegment *segment in job.segments) {
-            if (!segment.done && segment.retries < kMaxSegmentRetries) { next = segment; break; }
+            if (!segment.done && !segment.inFlight && segment.retries < kMaxSegmentRetries) { next = segment; break; }
         }
         if (!next) break;
         [self fetchSegment:next job:job];
@@ -681,10 +914,14 @@ didStartElement:(NSString *)elementName
 }
 
 - (void)fetchSegment:(MVMPDSegment *)segment job:(MVMPDJob *)job {
+    segment.inFlight = YES;
     job.inFlight++;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        if (job.paused || job.cancelled) { dispatch_async(dispatch_get_main_queue(), ^{ job.inFlight--; }); return; }
-        NSDictionary *headers = [MVMediaProbe headersForURL:segment.url referer:job.task.referer];
+        if (job.paused || job.cancelled) {
+            dispatch_async(dispatch_get_main_queue(), ^{ segment.inFlight = NO; job.inFlight--; });
+            return;
+        }
+        NSDictionary *headers = [MVMediaProbe headersForURL:segment.url referer:job.task.resourceContextURL];
         if (segment.byteStart >= 0) {
             NSMutableDictionary *mutable = [headers mutableCopy];
             mutable[@"Range"] = [NSString stringWithFormat:@"bytes=%lld-%lld",
@@ -695,9 +932,13 @@ didStartElement:(NSString *)elementName
         NSData *data = [self syncGet:segment.url headers:headers error:&error];
         dispatch_async(dispatch_get_main_queue(), ^{
             job.inFlight--;
-            if (job.paused || job.cancelled) return;
+            segment.inFlight = NO;
+            if (![self isCurrentJob:job] || job.finishing) return;
             if (data.length) {
-                [self writeSegment:data index:segment.index job:job];
+                if (![self writeSegment:data index:segment.index job:job]) {
+                    [self failJob:job message:[MVLang t:@"Could not save the file"]];
+                    return;
+                }
                 segment.done = YES;
                 job.doneBytes += (long long)data.length;
                 job.task.doneBytes = job.doneBytes;
@@ -712,98 +953,152 @@ didStartElement:(NSString *)elementName
     });
 }
 
-- (void)writeSegment:(NSData *)data index:(NSInteger)index job:(MVMPDJob *)job {
+- (BOOL)writeSegment:(NSData *)data index:(NSInteger)index job:(MVMPDJob *)job {
     NSString *path = [self segmentPathForJob:job index:index];
-    [[NSFileManager defaultManager] createDirectoryAtPath:path.stringByDeletingLastPathComponent
-                              withIntermediateDirectories:YES attributes:nil error:nil];
-    [data writeToFile:path atomically:NO];
+    if (![MVFileProtection isSafePartialItemAtPath:path] ||
+        [MVFileProtection path:path conflictsWithPaths:[MVFileProtection pathsExcludingTask:job.task record:nil]]) return NO;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:path.stringByDeletingLastPathComponent
+                                   withIntermediateDirectories:YES attributes:nil error:nil]) return NO;
+    return [data writeToFile:path atomically:YES];
 }
 
 #pragma mark - Finish
 
+- (NSString *)runPathForJob:(MVMPDJob *)job kind:(NSString *)kind extension:(NSString *)extension {
+    return [NSString stringWithFormat:@"%@.%@-%@.%@", job.tempPath, kind, job.runToken, extension];
+}
+
+- (void)removeRunOutputsForJob:(MVMPDJob *)job {
+    NSArray *protected = [MVFileProtection pathsExcludingTask:job.task record:nil];
+    [MVFileProtection removePartialItemAtPath:[self runPathForJob:job kind:@"primary" extension:(job.audioOnly ? @"m4a" : @"mp4")]
+                                  protecting:protected];
+    [MVFileProtection removePartialItemAtPath:[self runPathForJob:job kind:@"audio" extension:@"m4a"] protecting:protected];
+    [MVFileProtection removePartialItemAtPath:[self runPathForJob:job kind:@"mux" extension:@"mp4"] protecting:protected];
+}
+
+/// Concatenate a single fMP4 track into a run-specific temporary file. Source
+/// parts remain intact until the current run has published successfully.
+- (BOOL)joinSegments:(NSArray<MVMPDSegment *> *)segments map:(MVMPDSegment *)map
+                job:(MVMPDJob *)job to:(NSString *)path {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm removeItemAtPath:path error:nil];
+    if (![fm createFileAtPath:path contents:nil attributes:nil]) return NO;
+    NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!out || !segments.count) {
+        [out closeFile];
+        [fm removeItemAtPath:path error:nil];
+        return NO;
+    }
+    NSMutableArray<MVMPDSegment *> *ordered = [NSMutableArray array];
+    if (map) [ordered addObject:map];
+    [ordered addObjectsFromArray:segments];
+    BOOL ok = YES;
+    for (MVMPDSegment *segment in ordered) {
+        if (segment != map && !segment.done) { ok = NO; break; }
+        NSString *source = [self segmentPathForJob:job index:segment.index];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:source error:nil];
+        if (!attrs || [attrs[NSFileSize] longLongValue] <= 0) { ok = NO; break; }
+        NSFileHandle *in = [NSFileHandle fileHandleForReadingAtPath:source];
+        if (!in) { ok = NO; break; }
+        @try {
+            while (YES) {
+                @autoreleasepool {
+                    NSData *chunk = [in readDataOfLength:1024 * 1024];
+                    if (!chunk.length) break;
+                    [out writeData:chunk];
+                }
+            }
+            [in closeFile];
+        } @catch (NSException *exception) { ok = NO; }
+        if (!ok) break;
+    }
+    @try { [out synchronizeFile]; [out closeFile]; } @catch (NSException *exception) { ok = NO; }
+    if (!ok) [fm removeItemAtPath:path error:nil];
+    return ok;
+}
+
 - (void)finishJob:(MVMPDJob *)job {
-    if (job.finishing) return;
+    if (job.finishing || ![self isCurrentJob:job]) return;
     job.finishing = YES;
-    MVDownloadTask *task = job.task;
-    task.phase = [MVLang t:@"Joining segments"];
+    job.task.phase = [MVLang t:@"Joining segments"];
+    if (job.progressBlock) job.progressBlock(job.task);
 
-    NSArray<MVMPDSegment *> *segments = [job.segments copy];
-    MVMPDSegment *mapSegment = job.mapSegment;
+    NSArray<MVMPDSegment *> *primary = [job.segments subarrayWithRange:NSMakeRange(0, job.primarySegmentCount)];
+    NSArray<MVMPDSegment *> *audio = [job.segments subarrayWithRange:NSMakeRange(job.primarySegmentCount,
+                                                      job.segments.count - job.primarySegmentCount)];
+    NSString *primaryPath = [self runPathForJob:job kind:@"primary" extension:(job.audioOnly ? @"m4a" : @"mp4")];
+    NSString *audioPath = [self runPathForJob:job kind:@"audio" extension:@"m4a"];
+    NSString *muxPath = [self runPathForJob:job kind:@"mux" extension:@"mp4"];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSFileManager *fm = NSFileManager.defaultManager;
-        NSString *joined = [self joinedPathForJob:job];
-        [fm removeItemAtPath:joined error:nil];
-        [fm createFileAtPath:joined contents:nil attributes:nil];
-        NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:joined];
-        BOOL ok = (out != nil);
-        if (mapSegment) {
-            NSData *initData = [NSData dataWithContentsOfFile:[self segmentPathForJob:job index:-1]];
-            if (initData.length) [out writeData:initData];
+        BOOL ok = [self joinSegments:primary map:job.mapSegment job:job to:primaryPath];
+        if (ok) ok = job.audioOnly ? [MVMediaConverter hasAudioTrack:primaryPath] : [MVMediaConverter hasVideoTrack:primaryPath];
+        if (ok && job.hasSeparateAudio) {
+            ok = [self joinSegments:audio map:job.audioMapSegment job:job to:audioPath] &&
+                 [MVMediaConverter hasAudioTrack:audioPath];
         }
-        for (MVMPDSegment *segment in segments) {
-            if (!segment.done) { ok = NO; break; }
-            NSData *chunk = [NSData dataWithContentsOfFile:[self segmentPathForJob:job index:segment.index]
-                                                   options:NSDataReadingMappedIfSafe error:nil];
-            if (!chunk.length) { ok = NO; break; }
-            @try { [out writeData:chunk]; } @catch (NSException *e) { ok = NO; }
-            if (!ok) break;
-        }
-        @try { [out synchronizeFile]; [out closeFile]; } @catch (NSException *e) {}
-        if (!ok) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self failJob:job message:[MVLang t:@"Could not open the stream"]];
-            });
-            return;
-        }
-
-        // A DASH stream is fragmented MP4, so the join is already an MP4 and
-        // only needs the .mp4 name.
-        NSString *mp4 = [joined.stringByDeletingPathExtension stringByAppendingPathExtension:@"mp4"];
-        NSString *finalPath = joined;
-        [fm removeItemAtPath:mp4 error:nil];
-        if ([fm moveItemAtPath:joined toPath:mp4 error:nil]) finalPath = mp4;
-
-        for (MVMPDSegment *segment in segments) {
-            [fm removeItemAtPath:[self segmentPathForJob:job index:segment.index] error:nil];
-        }
-        [fm removeItemAtPath:[self segmentPathForJob:job index:-1] error:nil];
-
-        NSString *directory = [MVPaths directoryForCategory:task.category];
-        NSString *name = task.suggestedFilename.length ? task.suggestedFilename : finalPath.lastPathComponent;
-        NSString *dest = [MVPaths uniquePathInDirectory:directory filename:name];
-        NSError *moveError = nil;
-        if ([fm moveItemAtPath:finalPath toPath:dest error:&moveError]) {
-            finalPath = dest;
-        } else {
-            MVLogError(@"dash: move failed %@", moveError.localizedDescription);
-        }
-
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSDictionary *attrs = [fm attributesOfItemAtPath:finalPath error:nil];
-            long long size = [attrs[NSFileSize] longLongValue];
-            task.path = finalPath;
-            task.tempPath = nil;
-            task.phase = nil;
-            task.speed = 0;
-            task.eta = 0;
-            if (size > 0) task.totalBytes = size;
-            task.doneBytes = task.totalBytes;
-            @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
-            MVLogInfo(@"dash: finished %@ (%lld bytes) -> %@", task.title, task.totalBytes, finalPath);
-            if (job.finishedBlock) job.finishedBlock(task);
+            if (![self isCurrentJob:job]) { [self removeRunOutputsForJob:job]; return; }
+            if (!ok) {
+                [self failJob:job message:[MVLang t:@"Could not open the stream"]];
+                return;
+            }
+            if (!job.hasSeparateAudio) {
+                [self publishJob:job path:primaryPath extension:(job.audioOnly ? @"m4a" : @"mp4")];
+                return;
+            }
+            job.task.phase = [MVLang t:@"Merging…"];
+            if (job.progressBlock) job.progressBlock(job.task);
+            [MVMediaConverter muxVideo:primaryPath audio:audioPath to:muxPath completion:^(BOOL merged, NSString *error) {
+                if (![self isCurrentJob:job]) { [self removeRunOutputsForJob:job]; return; }
+                if (!merged) {
+                    [self failJob:job message:error ?: [MVLang t:@"Merge failed"]];
+                    return;
+                }
+                [self publishJob:job path:muxPath extension:@"mp4"];
+            }];
         });
     });
+}
+
+- (void)publishJob:(MVMPDJob *)job path:(NSString *)path extension:(NSString *)extension {
+    if (![self isCurrentJob:job]) { [self removeRunOutputsForJob:job]; return; }
+    MVDownloadTask *task = job.task;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *directory = [MVPaths directoryForCategory:task.category];
+    NSString *base = task.suggestedFilename.length ? task.suggestedFilename.stringByDeletingPathExtension : @"stream";
+    NSString *name = [base stringByAppendingPathExtension:extension];
+    NSString *destination = [MVPaths uniquePathInDirectory:directory filename:name];
+    if (![fm moveItemAtPath:path toPath:destination error:nil]) {
+        [self failJob:job message:[MVLang t:@"Could not save the file"]];
+        return;
+    }
+    [self removeRunOutputsForJob:job];
+    [MVMPDDownloader removePartFilesForTask:task];
+    long long size = [[fm attributesOfItemAtPath:destination error:nil][NSFileSize] longLongValue];
+    task.path = destination;
+    task.tempPath = nil;
+    task.phase = nil;
+    task.speed = 0;
+    task.eta = 0;
+    task.totalBytes = size;
+    task.doneBytes = size;
+    @synchronized (self) { if (_jobs[task.identifier] == job) [_jobs removeObjectForKey:task.identifier]; }
+    MVLogInfo(@"dash: finished %@ (%lld bytes) -> %@", task.title, size, destination);
+    if (job.finishedBlock) job.finishedBlock(task);
 }
 
 #pragma mark - Failure
 
 - (void)failJob:(MVMPDJob *)job message:(NSString *)message {
-    MVDownloadTask *task = job.task;
-    @synchronized (self) { [_jobs removeObjectForKey:task.identifier]; }
-    MVLogError(@"dash: failed %@: %@", task.title, message);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (job.failedBlock) job.failedBlock(task, message);
-    });
+    void (^finishFailure)(void) = ^{
+        if (![self isCurrentJob:job]) return;
+        @synchronized (self) { if (_jobs[job.task.identifier] == job) [_jobs removeObjectForKey:job.task.identifier]; }
+        [self removeRunOutputsForJob:job];
+        MVLogError(@"dash: failed %@: %@", job.task.title, message);
+        if (job.failedBlock) job.failedBlock(job.task, message);
+    };
+    if (NSThread.isMainThread) finishFailure();
+    else dispatch_async(dispatch_get_main_queue(), finishFailure);
 }
 
 #pragma mark - Networking
@@ -811,29 +1106,60 @@ didStartElement:(NSString *)elementName
 /// A blocking GET on a background thread, matching the HLS engine: DASH is a
 /// sequence of small requests and the parallelism lives in the segment pump.
 - (NSData *)syncGet:(NSString *)url headers:(NSDictionary<NSString *, NSString *> *)headers error:(NSError **)error {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]
+    NSURL *target = [NSURL URLWithString:url];
+    if (!target || ![@[@"http", @"https"] containsObject:target.scheme.lowercaseString]) {
+        if (error) *error = [NSError errorWithDomain:@"MVMPD" code:-1
+                                            userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Could not open the stream"]}];
+        return nil;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:target
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:60];
+    request.HTTPShouldHandleCookies = NO;
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
+    [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+    NSString *rangeHeader = [request valueForHTTPHeaderField:@"Range"];
+    long long requestedStart = -1, requestedLength = -1;
+    if (rangeHeader.length && (![rangeHeader hasPrefix:@"bytes="] ||
+        ![self parseRange:[rangeHeader substringFromIndex:6] start:&requestedStart length:&requestedLength])) {
+        if (error) *error = [NSError errorWithDomain:@"MVMPD" code:-1
+                                            userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Server did not honor the requested byte range"]}];
+        return nil;
+    }
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSData *result = nil;
     __block NSError *resultError = nil;
-    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request
+    NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
                                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
         NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
         if (err) resultError = err;
-        else if (http && http.statusCode >= 400) resultError = [NSError errorWithDomain:@"MVMPD"
-                                                                                 code:http.statusCode
-                                                                             userInfo:@{NSLocalizedDescriptionKey:
-                                                                                            [NSString stringWithFormat:@"HTTP %ld", (long)http.statusCode]}];
-        else result = data;
+        else if (!http || http.statusCode < 200 || http.statusCode >= 300) {
+            resultError = [NSError errorWithDomain:@"MVMPD" code:http.statusCode
+                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"HTTP %ld", (long)http.statusCode]}];
+        } else if (rangeHeader.length) {
+            NSString *contentRange = [http valueForHTTPHeaderField:@"Content-Range"];
+            NSString *encoding = [http valueForHTTPHeaderField:@"Content-Encoding"];
+            MVContentRange parsed;
+            if (http.statusCode != 206 ||
+                (encoding.length && [encoding caseInsensitiveCompare:@"identity"] != NSOrderedSame) ||
+                !MVParseContentRange(contentRange.UTF8String, &parsed) ||
+                !MVContentRangeMatches(&parsed, requestedStart, requestedStart + requestedLength - 1, -1) ||
+                (long long)data.length != requestedLength) {
+                resultError = [NSError errorWithDomain:@"MVMPD" code:-1
+                    userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Server did not honor the requested byte range"]}];
+            } else result = data;
+        } else if (http.statusCode == 200) result = data;
+        else resultError = [NSError errorWithDomain:@"MVMPD" code:http.statusCode
+            userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Download incomplete"]}];
         dispatch_semaphore_signal(sem);
     }];
     [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)));
-    if (!result && !resultError) {
-        resultError = [NSError errorWithDomain:@"MVMPD" code:-1
-                                     userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Connection timed out"]}];
+    long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)));
+    if (timedOut) {
+        [task cancel];
+        if (error) *error = [NSError errorWithDomain:@"MVMPD" code:-1
+                                           userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Connection timed out"]}];
+        return nil; // completion may still run after cancel
     }
     if (error) *error = resultError;
     return result;
@@ -842,30 +1168,35 @@ didStartElement:(NSString *)elementName
 #pragma mark - Paths
 
 - (NSString *)segmentPathForJob:(MVMPDJob *)job index:(NSInteger)index {
-    NSString *base = job.task.tempPath;
+    NSString *base = job.tempPath;
     if (!base.length) {
-        NSString *directory = [MVPaths directoryForCategory:job.task.category];
-        NSString *name = [MVPaths sanitizeFilename:job.task.suggestedFilename ?: job.task.url.lastPathComponent];
-        if (!name.length) name = @"stream";
-        base = [directory stringByAppendingPathComponent:
-                [NSString stringWithFormat:@".%@.%@.dash", job.task.identifier, name]];
-        job.task.tempPath = base;
+        base = job.task.tempPath;
+        if (!base.length) {
+            NSString *directory = [MVPaths directoryForCategory:job.task.category];
+            NSString *name = [MVPaths sanitizeFilename:job.task.suggestedFilename ?: job.task.url.lastPathComponent];
+            if (!name.length) name = @"stream";
+            base = [directory stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@".%@.%@.dash", job.task.identifier, name]];
+            job.task.tempPath = base;
+        }
+        job.tempPath = base;
     }
     return [NSString stringWithFormat:@"%@.seg%ld", base, (long)index];
 }
 
-- (NSString *)joinedPathForJob:(MVMPDJob *)job {
-    return [NSString stringWithFormat:@"%@.joined", job.task.tempPath];
-}
-
 + (void)removePartFilesForTask:(MVDownloadTask *)task {
-    if (!task.tempPath.length) return;
+    if (![MVFileProtection isSafePartialBase:task.tempPath]) return;
     NSFileManager *fm = NSFileManager.defaultManager;
-    [fm removeItemAtPath:[NSString stringWithFormat:@"%@.joined", task.tempPath] error:nil];
-    for (NSInteger i = -1; i < 4096; i++) {
-        NSString *path = [NSString stringWithFormat:@"%@.seg%ld", task.tempPath, (long)i];
-        if (![fm fileExistsAtPath:path]) continue;
-        [fm removeItemAtPath:path error:nil];
+    NSArray<NSString *> *protected = [MVFileProtection pathsExcludingTask:task record:nil];
+    NSString *directory = task.tempPath.stringByDeletingLastPathComponent;
+    NSString *prefix = [task.tempPath.lastPathComponent stringByAppendingString:@"."];
+    for (NSString *name in [fm contentsOfDirectoryAtPath:directory error:nil]) {
+        if (![name hasPrefix:prefix]) continue;
+        NSString *suffix = [name substringFromIndex:prefix.length];
+        if ([suffix hasPrefix:@"seg"] || [suffix hasPrefix:@"primary-"] || [suffix hasPrefix:@"audio-"] ||
+            [suffix hasPrefix:@"mux-"] || [suffix isEqualToString:@"joined"] || [suffix isEqualToString:@"mp4"]) {
+            [MVFileProtection removePartialItemAtPath:[directory stringByAppendingPathComponent:name] protecting:protected];
+        }
     }
 }
 

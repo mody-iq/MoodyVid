@@ -29,7 +29,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)cancelTask:(MVDownloadTask *)task;
 - (BOOL)isRunningTask:(MVDownloadTask *)task;
 
-/// A global cap in bytes/second, applied to every transfer. 0 disables it.
+/// Reserved for a future stream throttle; currently not enforced by HLS.
 @property (nonatomic) long long speedLimit;
 
 /// Deletes the partial files an HLS task left behind.

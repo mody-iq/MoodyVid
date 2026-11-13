@@ -53,7 +53,7 @@ static const char kProtocol[] = "BitTorrent protocol";
 @property (nonatomic, strong) NSMutableDictionary<NSString *, MVTorrentBlock *> *outstanding;
 /// When each outstanding block was requested, so a lost block is retried even
 /// while the peer keeps sending other data.
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *outstandingSince;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *outstandingSince;
 @end
 
 @implementation MVTorrentPeer {
@@ -67,6 +67,7 @@ static const char kProtocol[] = "BitTorrent protocol";
     dispatch_queue_t _engineQueue;
     NSDictionary *_extendedHandshake;
     BOOL _extendedHandshakeReceived;
+    BOOL _unchoked; // protected by @synchronized(self)
 }
 
 - (instancetype)initWithHost:(NSString *)host
@@ -111,7 +112,11 @@ static const char kProtocol[] = "BitTorrent protocol";
 }
 
 - (BOOL)connected {
-    @synchronized (self) { return _handshakeReceived && _socket >= 0; }
+    @synchronized (self) { return _handshakeReceived && _socket >= 0 && !_stopping; }
+}
+
+- (BOOL)unchoked {
+    @synchronized (self) { return _unchoked; }
 }
 
 - (void)setCallbackQueue:(dispatch_queue_t)queue {
@@ -154,15 +159,21 @@ static const char kProtocol[] = "BitTorrent protocol";
 
     int fd = -1;
     for (struct addrinfo *candidate = result; candidate; candidate = candidate->ai_next) {
+        @synchronized (self) { if (_stopping) break; }
         fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
         if (fd < 0) continue;
         // Short socket timeouts so a dead peer is noticed quickly: the read loop
         // wakes on these and the engine's idle/block timeouts drop the peer.
-        struct timeval tv = {.tv_sec = 15, .tv_usec = 0};
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        struct timeval sendTimeout = {.tv_sec = 15, .tv_usec = 0};
+        // Engine requests are queued from another thread; wake regularly to
+        // flush them instead of waiting 15 seconds for the next incoming byte.
+        struct timeval receiveTimeout = {.tv_sec = 1, .tv_usec = 0};
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, sizeof(receiveTimeout));
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        // A remote close during send must be an error, not SIGPIPE to the app.
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
         if (connect(fd, candidate->ai_addr, candidate->ai_addrlen) == 0) break;
         close(fd);
         fd = -1;
@@ -172,8 +183,13 @@ static const char kProtocol[] = "BitTorrent protocol";
         self.failureReason = @"connection refused";
         return NO;
     }
-    @synchronized (self) { _socket = fd; }
-    self.lastActivity = NSDate.date.timeIntervalSinceNow;
+    @synchronized (self) {
+        // stop may have arrived while DNS/connect was blocking, before there
+        // was a socket for it to shut down. Do not revive a cancelled peer.
+        if (_stopping) { close(fd); return NO; }
+        _socket = fd;
+    }
+    self.lastActivity = NSProcessInfo.processInfo.systemUptime;
     return YES;
 }
 
@@ -206,16 +222,17 @@ static const char kProtocol[] = "BitTorrent protocol";
     while (YES) {
         @synchronized (self) { if (_stopping) break; }
         [self flushSendQueue];
-        // Read the fd under the lock: -stop may close it on another thread, and
-        // recv on a closed (possibly reused) descriptor would be a real bug.
+        // Only this socket thread closes the descriptor. -stop uses shutdown
+        // to wake recv, preventing a concurrent close/reuse of the fd.
         int fd;
         @synchronized (self) { fd = _socket; }
         if (fd < 0) break;
         ssize_t got = recv(fd, buffer, sizeof(buffer), 0);
         if (got > 0) {
             [_receiveBuffer appendBytes:buffer length:(NSUInteger)got];
-            self.lastActivity = NSDate.date.timeIntervalSinceNow;
+            self.lastActivity = NSProcessInfo.processInfo.systemUptime;
             [self processBuffer];
+            [self checkOutstandingTimeouts]; // active peers can still lose individual blocks
             continue;
         }
         if (got == 0) {
@@ -223,11 +240,11 @@ static const char kProtocol[] = "BitTorrent protocol";
             break;
         }
         // EAGAIN / EWOULDBLOCK from the receive timeout: keep waiting until the
-        // peer has been quiet for too long. `lastActivity` holds a
-        // timeIntervalSinceNow value, so elapsed time is lastActivity minus the
-        // current one.
+        // peer has been quiet for too long. Use monotonic uptime so a wall-clock
+        // adjustment does not disconnect an active peer or hide an idle one.
+        if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (self.lastActivity - NSDate.date.timeIntervalSinceNow > kIdleTimeout) {
+            if (NSProcessInfo.processInfo.systemUptime - self.lastActivity > kIdleTimeout) {
                 self.failureReason = @"peer timed out";
                 break;
             }
@@ -247,11 +264,12 @@ static const NSTimeInterval kBlockTimeout = 30;
     NSArray<MVTorrentBlock *> *lost = nil;
     @synchronized (self) {
         NSMutableArray *expired = [NSMutableArray array];
+        NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
         for (NSString *key in _outstanding.allKeys) {
-            NSDate *requested = _outstandingSince[key];
-            // A missing timestamp would mean the bookkeeping slipped; treat it
-            // as expired so the block is not stranded.
-            if (!requested || -[requested timeIntervalSinceNow] > kBlockTimeout) {
+            NSNumber *requested = _outstandingSince[key];
+            // Use a monotonic clock; wall-clock corrections must not hide a
+            // lost request or expire it immediately.
+            if (!requested || now - requested.doubleValue > kBlockTimeout) {
                 [expired addObject:_outstanding[key]];
             }
         }
@@ -290,11 +308,18 @@ static const NSTimeInterval kBlockTimeout = 30;
     size_t sent = 0;
     while (sent < total) {
         ssize_t n = send(fd, bytes + sent, total - sent, 0);
-        if (n <= 0) {
-            // Put the rest back; the next pass retries.
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // Preserve wire ordering: a partially sent frame must precede any
+            // new frames enqueued while send() was blocked.
             @synchronized (self) {
-                [_sendQueue appendBytes:bytes + sent length:total - sent];
+                [_sendQueue replaceBytesInRange:NSMakeRange(0, 0) withBytes:bytes + sent length:total - sent];
             }
+            return;
+        }
+        if (n <= 0) {
+            self.failureReason = @"the connection was lost";
+            @synchronized (self) { _stopping = YES; }
             return;
         }
         sent += (size_t)n;
@@ -349,7 +374,7 @@ static const NSTimeInterval kBlockTimeout = 30;
     NSDictionary *handshake = self.extendedHandshake;
     NSDictionary *m = [handshake[@"m"] isKindOfClass:NSDictionary.class] ? handshake[@"m"] : nil;
     NSNumber *metadataID = m[@"ut_metadata"];
-    if (![metadataID isKindOfClass:NSNumber.class]) return;
+    if (![metadataID isKindOfClass:NSNumber.class] || metadataID.longLongValue < 1 || metadataID.longLongValue > 255) return;
     NSData *payload = [MVBencode encode:@{@"msg_type": @0, @"piece": @(piece)}];
     [self sendExtendedMessage:metadataID.integerValue payload:payload];
 }
@@ -403,8 +428,15 @@ static const NSTimeInterval kBlockTimeout = 30;
     if (_receiveBuffer.length < 1) return NO;
     const uint8_t *bytes = _receiveBuffer.bytes;
     NSUInteger protocolLength = bytes[0];
-    if (protocolLength != strlen(kProtocol) ||
-        memcmp(bytes + 1, kProtocol, protocolLength) != 0) {
+    if (protocolLength != strlen(kProtocol)) {
+        self.failureReason = @"peer is not speaking BitTorrent";
+        @synchronized (self) { _stopping = YES; }
+        return NO;
+    }
+    // TCP may split the protocol string at any byte. Never memcmp past the
+    // received buffer while waiting for the rest of the handshake.
+    if (_receiveBuffer.length < 1 + protocolLength) return NO;
+    if (memcmp(bytes + 1, kProtocol, protocolLength) != 0) {
         self.failureReason = @"peer is not speaking BitTorrent";
         @synchronized (self) { _stopping = YES; }
         return NO;
@@ -464,13 +496,24 @@ static const NSTimeInterval kBlockTimeout = 30;
 }
 
 - (void)setUnchoked:(BOOL)unchoked {
-    BOOL changed = (_unchoked != unchoked);
-    _unchoked = unchoked;
+    BOOL changed;
+    NSArray<MVTorrentBlock *> *lost = nil;
+    @synchronized (self) {
+        changed = (_unchoked != unchoked);
+        _unchoked = unchoked;
+        if (changed && !unchoked) {
+            lost = _outstanding.allValues;
+            [_outstanding removeAllObjects];
+            [_outstandingSince removeAllObjects];
+        }
+    }
     if (changed) {
-        // Both directions matter: on unchoke the engine can send requests, and
-        // on choke it must take back the blocks this peer still owes.
+        // Report each lost request even if an unchoke arrives before this block
+        // reaches the engine queue. A late piece must not own someone else's work.
         [self onEngineQueue:^{
-            [_delegate peerDidChangeAvailability:self];
+            id<MVTorrentPeerDelegate> delegate = _delegate;
+            for (MVTorrentBlock *block in lost) [delegate peer:self didLoseBlock:block];
+            [delegate peerDidChangeAvailability:self];
         }];
     }
 }
@@ -480,6 +523,7 @@ static const NSTimeInterval kBlockTimeout = 30;
     uint32_t big = 0;
     memcpy(&big, payload.bytes, 4);
     NSInteger index = (NSInteger)ntohl(big);
+    if (index < 0 || index >= _pieceCount) return;
     @synchronized (self) { [_pieces addIndex:(NSUInteger)index]; }
     [self onEngineQueue:^{
         [_delegate peerDidChangeAvailability:self];
@@ -512,12 +556,17 @@ static const NSTimeInterval kBlockTimeout = 30;
     NSData *data = payload.length > 8 ? [payload subdataWithRange:NSMakeRange(8, payload.length - 8)] : [NSData data];
 
     NSString *key = [NSString stringWithFormat:@"%ld:%ld", (long)index, (long)begin];
+    MVTorrentBlock *block;
     @synchronized (self) {
+        block = _outstanding[key];
+        if (!block) return; // unsolicited, timed out or already returned on choke
         [_outstanding removeObjectForKey:key];
         [_outstandingSince removeObjectForKey:key];
     }
-
-    MVTorrentBlock *block = [MVTorrentBlock blockWithIndex:index begin:begin length:(NSInteger)data.length];
+    if (data.length != (NSUInteger)block.length) {
+        [self onEngineQueue:^{ [_delegate peer:self didLoseBlock:block]; }];
+        return;
+    }
     [self onEngineQueue:^{
         [_delegate peer:self didReceiveBlock:block data:data];
     }];
@@ -559,27 +608,26 @@ static const NSTimeInterval kBlockTimeout = 30;
 #pragma mark - Engine-facing
 
 - (void)requestBlock:(MVTorrentBlock *)block {
-    if (!_unchoked) return;
     NSString *key = [self keyForBlock:block];
     @synchronized (self) {
-        if (_stopping) return;
+        if (_stopping || !_unchoked) {
+            [self onEngineQueue:^{ [_delegate peer:self didLoseBlock:block]; }];
+            return;
+        }
         _outstanding[key] = block;
-        _outstandingSince[key] = NSDate.date;
+        _outstandingSince[key] = @(NSProcessInfo.processInfo.systemUptime);
     }
     [self sendRequest:block];
 }
 
 - (void)stop {
-    int fd;
     @synchronized (self) {
         if (_stopping) return;
         _stopping = YES;
-        fd = _socket;
+        // Wake recv/send, but leave close to the socket thread. Closing here
+        // could let the descriptor be reused before that thread calls recv.
+        if (_socket >= 0) shutdown(_socket, SHUT_RDWR);
     }
-    // shutdown unblocks a recv already in progress; closing alone can leave the
-    // read loop parked until the socket timeout.
-    if (fd >= 0) shutdown(fd, SHUT_RDWR);
-    [self closeSocket];
 }
 
 - (NSString *)keyForBlock:(MVTorrentBlock *)block {

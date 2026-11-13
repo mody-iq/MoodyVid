@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "MVSnifferItem.h"
+#import "MVQueuePolicy.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -13,22 +14,22 @@ typedef NS_ENUM(NSInteger, MVTaskSource) {
     MVTaskSourceDASH = 4,     ///< an .mpd manifest
 };
 
-/// The lifecycle of a task. Matches MVDownloadState's ordering where they
-/// overlap so the Downloads list can render either with one switch.
+/// The native lifecycle. Its persisted values differ from MVDownloadState;
+/// callers must map the two enums explicitly.
 typedef NS_ENUM(NSInteger, MVTaskState) {
-    MVTaskStateQueued = 0,
-    MVTaskStateRunning = 1,
-    MVTaskStatePaused = 2,
-    MVTaskStateCompleted = 3,
-    MVTaskStateFailed = 4,
-    MVTaskStateCancelled = 5,
+    MVTaskStateQueued = MVNativeQueued,
+    MVTaskStateRunning = MVNativeRunning,
+    MVTaskStatePaused = MVNativePaused,
+    MVTaskStateCompleted = MVNativeCompleted,
+    MVTaskStateFailed = MVNativeFailed,
+    MVTaskStateCancelled = MVNativeCancelled,
 };
 
 /// One download, whatever engine produces it.
 ///
 /// This is the model the manager owns and the Downloads list reads. It carries
-/// everything the engines need to resume (part offsets, ETag) so a relaunch can
-/// continue instead of starting over.
+/// resume information such as part offsets and ETag. Continuation depends on
+/// the engine, server validators and the partial files still being available.
 @interface MVDownloadTask : NSObject
 
 @property (nonatomic, copy) NSString *identifier;
@@ -36,9 +37,13 @@ typedef NS_ENUM(NSInteger, MVTaskState) {
 @property (nonatomic) MVTaskState state;
 
 @property (nonatomic, copy) NSString *url;
-/// Headers the engine must replay (Referer, Cookie, User-Agent).
+/// Optional non-cookie request headers. Cookies are never retained here: the
+/// engine selects current browser cookies for each request instead.
 @property (nonatomic, copy) NSDictionary<NSString *, NSString *> *headers;
-@property (nonatomic, copy) NSString *referer;
+@property (nonatomic, copy, nullable) NSString *referer;
+/// Originating page, or the original manifest URL for manually entered streams.
+/// Nested HLS/DASH resources must not treat themselves as the cookie context.
+@property (nonatomic, readonly) NSString *resourceContextURL;
 
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy, nullable) NSString *suggestedFilename;

@@ -1,14 +1,18 @@
 #import "MVTorrentDownloader.h"
 #import "MVTaskStore.h"
+#import "MVDownloadStore.h"
 #import "MVTorrentMetadata.h"
 #import "MVTorrentStorage.h"
 #import "MVTorrentPeer.h"
 #import "MVTorrentTracker.h"
+#import "MVTorrentPolicy.h"
 #import "MVMagnet.h"
 #import "MVSHA1.h"
 #import "MVBencode.h"
 #import "MVPaths.h"
+#import "MVFileProtection.h"
 #import "MVMediaProbe.h"
+#import "MVHTTPSession.h"
 #import "MVLang.h"
 #import "MVLog.h"
 
@@ -29,8 +33,10 @@ static const NSUInteger kMaxKnownPeers = 400;
 /// pieces already open, plus this many new ones, so a multi-gigabyte torrent
 /// does not reserve its whole size in memory while it downloads.
 static const NSInteger kMaxOpenPieces = 96;
+/// Bound aggregate piece buffers even for torrents with unusually large pieces.
+static const long long kMaxOpenPieceBytes = 64LL * 1024 * 1024;
 /// The size of one BEP 9 metadata piece. The spec fixes it at 16 KiB.
-static const NSInteger kMetadataPieceSize = 16384;
+static const NSInteger kMetadataPieceSize = (NSInteger)MV_TORRENT_METADATA_CHUNK;
 /// How long to wait for a peer to answer a metadata request before trying
 /// another one. A magnet has no other peer source when it has no trackers, so
 /// giving up on the first silent peer would strand the download.
@@ -65,10 +71,22 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 #pragma mark - Job
 
+/// Retain the exact request object as well as its peer. A timeout/choke callback
+/// from an older request must not release a replacement sent to the same peer.
+@interface MVTorrentRequest : NSObject
+@property (nonatomic, strong) MVTorrentPeer *peer;
+@property (nonatomic, strong) MVTorrentBlock *block;
+@end
+@implementation MVTorrentRequest
+@end
+
 /// One running torrent. All fields are touched only on the engine's serial
 /// queue, so no locking is needed here.
 @interface MVTorrentJob : NSObject
 @property (nonatomic, strong) MVDownloadTask *task;
+@property (nonatomic, copy, nullable) NSString *priorPath;
+@property (nonatomic, copy) NSArray<NSString *> *protectedPaths;
+@property (nonatomic, copy, nullable) NSString *displayTitle;
 @property (nonatomic, strong) MVTorrentMetadata *metadata;
 @property (nonatomic, strong) MVTorrentStorage *storage;
 @property (nonatomic, strong) NSMutableArray<MVTorrentPiece *> *pieces;
@@ -81,15 +99,14 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 @property (nonatomic, strong) NSMutableArray<MVTorrentPeer *> *peers;
 @property (nonatomic, strong) NSMutableArray<MVTorrentPeerAddress *> *knownPeers;
 @property (nonatomic, strong) NSMutableSet<NSString *> *connectedKeys;
-/// Blocks requested but not yet received, keyed "index:begin", mapped to the
-/// peer that owes them.
-@property (nonatomic, strong) NSMutableDictionary<NSString *, MVTorrentPeer *> *inFlightBlocks;
+/// Blocks requested but not yet received, keyed "index:begin".
+@property (nonatomic, strong) NSMutableDictionary<NSString *, MVTorrentRequest *> *inFlightBlocks;
 @property (nonatomic) long long doneBytes;
 /// YES once the tracker has ever given us a peer, so a temporary empty swarm
 /// does not fail a download that was working.
 @property (nonatomic) BOOL hadPeers;
-@property (nonatomic) BOOL paused;
-@property (nonatomic) BOOL cancelled;
+@property (atomic) BOOL paused;
+@property (atomic) BOOL cancelled;
 @property (nonatomic) BOOL finishing;
 @property (nonatomic, strong) NSData *peerID;
 /// BEP 9: the metadata pieces a peer has sent while a magnet link is being
@@ -99,6 +116,8 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 @property (nonatomic) NSInteger metadataSize;
 /// The peer currently serving the metadata, so a silent one can be replaced.
 @property (nonatomic, weak, nullable) MVTorrentPeer *metadataPeer;
+/// Only the reply for this exact piece from metadataPeer may advance assembly.
+@property (nonatomic) NSInteger requestedMetadataPiece;
 /// YES once a tracker announce has been sent for this job, so resolving a magnet
 /// (which announces to find a metadata peer) is not announced again by
 /// `prepareJob` once the real metadata arrives.
@@ -136,7 +155,10 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 }
 
 - (void)markBlockInFlight:(MVTorrentBlock *)block onPeer:(MVTorrentPeer *)peer {
-    self.inFlightBlocks[[self keyForBlock:block]] = peer;
+    MVTorrentRequest *request = [MVTorrentRequest new];
+    request.peer = peer;
+    request.block = block;
+    self.inFlightBlocks[[self keyForBlock:block]] = request;
 }
 
 - (void)clearBlockInFlight:(MVTorrentBlock *)block {
@@ -147,7 +169,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 - (void)releaseBlocksForPeer:(MVTorrentPeer *)peer {
     NSMutableArray<NSString *> *keys = [NSMutableArray array];
     for (NSString *key in self.inFlightBlocks) {
-        if (self.inFlightBlocks[key] == peer) [keys addObject:key];
+        if (self.inFlightBlocks[key].peer == peer) [keys addObject:key];
     }
     [self.inFlightBlocks removeObjectsForKeys:keys];
 }
@@ -167,6 +189,9 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 #pragma mark - Engine
 
 @interface MVTorrentDownloader () <MVTorrentPeerDelegate>
++ (BOOL)root:(NSString *)root isReferencedBy:(NSArray<NSString *> *)protectedPaths;
++ (void)removeFilesAtRoot:(nullable NSString *)jobRoot path:(nullable NSString *)path
+              identifier:(NSString *)identifier protecting:(NSArray<NSString *> *)protectedPaths;
 @end
 
 @implementation MVTorrentDownloader {
@@ -206,12 +231,20 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 #pragma mark - Start / pause / cancel
 
+/// The stores are main-thread-owned. Snapshot before crossing to the engine
+/// queue for both legacy resume and deletion decisions.
+- (NSArray<NSString *> *)pathsProtectedFromTask:(MVDownloadTask *)task {
+    return [MVFileProtection pathsExcludingTask:task record:nil];
+}
+
 - (void)startTask:(MVDownloadTask *)task
          progress:(void (^)(MVDownloadTask *))progress
          finished:(void (^)(MVDownloadTask *))finished
            failed:(void (^)(MVDownloadTask *, NSString *))failed {
     MVTorrentJob *job = [MVTorrentJob new];
     job.task = task;
+    job.priorPath = task.path;
+    job.protectedPaths = [self pathsProtectedFromTask:task];
     job.progressBlock = progress;
     job.finishedBlock = finished;
     job.failedBlock = failed;
@@ -234,12 +267,30 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 }
 
 - (void)cancelTask:(MVDownloadTask *)task {
+    [self cancelTask:task deletingFiles:NO];
+}
+
+- (void)cancelTask:(MVDownloadTask *)task deletingFiles:(BOOL)deleteFiles {
+    NSString *identifier = [task.identifier copy];
+    NSString *priorPath = [task.path copy];
     dispatch_async(_queue, ^{
-        MVTorrentJob *job = self->_jobs[task.identifier];
-        if (!job) return;
-        job.cancelled = YES;
-        [self stopAllPeersForJob:job];
-        [self->_jobs removeObjectForKey:task.identifier];
+        MVTorrentJob *job = self->_jobs[identifier];
+        NSString *jobRoot = [job.storage.root copy];
+        if (job) {
+            job.cancelled = YES;
+            [self stopAllPeersForJob:job];
+            [self->_jobs removeObjectForKey:identifier];
+        }
+        if (!deleteFiles) return;
+        // All old peer writes have now stopped. Return to the store's queue to
+        // recheck references at deletion time rather than using a stale snapshot.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MVDownloadTask *current = [MVTaskStore.shared taskWithIdentifier:identifier];
+            if (current && (current != task || current.state != MVTaskStateCancelled)) return;
+            NSArray<NSString *> *protectedPaths = [self pathsProtectedFromTask:task];
+            [MVTorrentDownloader removeFilesAtRoot:jobRoot path:priorPath
+                                        identifier:identifier protecting:protectedPaths];
+        });
     });
 }
 
@@ -277,7 +328,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     job.metadata = [MVTorrentMetadata metadataWithMagnet:magnet];
     job.metadataPieces = [NSMutableDictionary dictionary];
     job.metadataSize = 0;
-    job.task.title = magnet.displayName.length ? magnet.displayName : magnet.infoHashHex;
+    job.displayTitle = magnet.displayName.length ? magnet.displayName : magnet.infoHashHex;
     [self reportProgressForJob:job];
 
     NSArray<NSString *> *trackers = magnet.trackers;
@@ -301,7 +352,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         NSDictionary *m = peer.extendedHandshake[@"m"];
         if (![m isKindOfClass:NSDictionary.class]) continue;
         NSNumber *metadataID = m[@"ut_metadata"];
-        if (![metadataID isKindOfClass:NSNumber.class]) continue;
+        if (![metadataID isKindOfClass:NSNumber.class] || metadataID.longLongValue < 1 || metadataID.longLongValue > 255) continue;
         [self askPeer:peer forMetadataPiece:piece inJob:job];
         return;
     }
@@ -320,11 +371,29 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     return -1;
 }
 
+/// Do not immediately pick the same silent/rejecting peer again. The address
+/// stays marked attempted until this resolution run ends; another tracker can
+/// still supply new addresses. Discard its pieces so a false size cannot poison
+/// a later peer's assembly.
+- (void)retireMetadataPeer:(MVTorrentPeer *)peer inJob:(MVTorrentJob *)job {
+    if (job.metadataPeer == peer) {
+        job.metadataAttempt += 1;
+        job.metadataPeer = nil;
+        job.metadataSize = 0;
+        [job.metadataPieces removeAllObjects];
+    }
+    [peer stop];
+    [job.peers removeObjectIdenticalTo:peer];
+    [self connectMorePeersForJob:job];
+    [self requestMetadataFromPeerForJob:job];
+}
+
 /// Sends one metadata request and arms its deadline. The attempt counter makes
 /// the deadline a no-op once this peer has answered or another peer was tried,
 /// so a peer that is serving pieces is never dropped by a stale timer.
 - (void)askPeer:(MVTorrentPeer *)peer forMetadataPiece:(NSInteger)piece inJob:(MVTorrentJob *)job {
     job.metadataPeer = peer;
+    job.requestedMetadataPiece = piece;
     job.metadataAttempt += 1;
     NSInteger attempt = job.metadataAttempt;
     MVLogInfo(@"torrent: asking %@:%ld for metadata piece %ld", peer.host, (long)peer.port, (long)piece);
@@ -335,12 +404,11 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMetadataTimeout * NSEC_PER_SEC)),
                    _queue, ^{
         typeof(self) self_ = weakSelf;
-        if (!self_ || !job.metadataPieces) return;
-        if (job.metadataAttempt != attempt) return;
-        if (job.metadataPeer != weakPeer) return;
-        // The peer accepted the request but went quiet; try someone else.
-        job.metadataPeer = nil;
-        [self_ requestMetadataFromPeerForJob:job];
+        MVTorrentPeer *current = weakPeer;
+        if (!self_ || !current || self_->_jobs[job.task.identifier] != job || !job.metadataPieces) return;
+        if (job.metadataAttempt != attempt || job.metadataPeer != current) return;
+        // Retire instead of reselecting the same silent peer in a tight loop.
+        [self_ retireMetadataPeer:current inJob:job];
     });
 }
 
@@ -348,8 +416,8 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 /// until they are all in, then the metadata is rebuilt and handed to the normal
 /// torrent path.
 - (void)handleMetadataMessage:(NSData *)payload forPeer:(MVTorrentPeer *)peer {
-    MVTorrentJob *job = _jobs[peer.jobIdentifier];
-    if (!job || job.cancelled || job.paused || job.finishing) return;
+    MVTorrentJob *job = [self jobForPeer:peer];
+    if (!job) return;
     if (!job.metadataPieces) return;
 
     // The message is a bencoded header followed by the raw metadata bytes; the
@@ -362,14 +430,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     if (![header isKindOfClass:NSDictionary.class]) return;
     NSNumber *msgType = header[@"msg_type"];
     NSNumber *pieceNumber = header[@"piece"];
-    if (![pieceNumber isKindOfClass:NSNumber.class]) return;
-    if (![msgType isKindOfClass:NSNumber.class]) return;
-
+    if (![pieceNumber isKindOfClass:NSNumber.class] || ![msgType isKindOfClass:NSNumber.class]) return;
+    // Ignore unsolicited, late or out-of-order messages. In particular, an old
+    // rejection cannot cancel another peer's current request.
+    if (job.metadataPeer != peer || pieceNumber.longLongValue != job.requestedMetadataPiece) return;
     if (msgType.integerValue == 2) {
-        // "reject": this peer will not serve the metadata; try another.
-        job.metadataAttempt += 1;
-        job.metadataPeer = nil;
-        [self requestMetadataFromPeerForJob:job];
+        [self retireMetadataPeer:peer inJob:job];
         return;
     }
     if (msgType.integerValue != 1) return;       // only "data" carries the info dict
@@ -377,14 +443,13 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     NSData *body = [payload subdataWithRange:NSMakeRange((NSUInteger)headerLength,
                                                          payload.length - (NSUInteger)headerLength)];
     NSNumber *totalSize = header[@"total_size"];
-    if ([totalSize isKindOfClass:NSNumber.class] && totalSize.integerValue > 0) {
-        job.metadataSize = totalSize.integerValue;
+    long long total = [totalSize isKindOfClass:NSNumber.class] ? totalSize.longLongValue : 0;
+    if (!MVTorrentValidMetadataChunk(total, pieceNumber.longLongValue, (int64_t)body.length) ||
+        (job.metadataSize && total != job.metadataSize)) {
+        [self retireMetadataPeer:peer inJob:job];
+        return;
     }
-    if (!job.metadataSize) return;               // a piece before the size is useless
-    // Ignore a piece that would extend past the announced size, so a peer cannot
-    // make the assembler allocate a huge buffer.
-    if (pieceNumber.integerValue < 0) return;
-    if ((long long)pieceNumber.integerValue * kMetadataPieceSize + body.length > job.metadataSize) return;
+    job.metadataSize = (NSInteger)total;
     job.metadataPieces[pieceNumber] = body;
 
     NSInteger next = [self firstMissingMetadataPieceForJob:job];
@@ -412,10 +477,6 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         if (!piece) return;
         [infoBytes appendData:piece];
     }
-    job.metadataPieces = nil;
-    job.metadataPeer = nil;
-    job.metadataAttempt += 1;
-
     // The hash is the only proof that this is the torrent the link named; a peer
     // could otherwise hand us anything, and the row would happily download
     // unrelated content under the name from the link.
@@ -424,9 +485,13 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     if (![actual isEqualToData:expected]) {
         MVLogWarn(@"torrent: magnet metadata hash mismatch (%@ != %@)",
                   [MVSHA1 hexString:actual], [MVSHA1 hexString:expected]);
-        [self failJob:job message:[MVLang t:@"A peer sent metadata that does not match this magnet"]];
+        MVTorrentPeer *peer = job.metadataPeer;
+        if (peer) [self retireMetadataPeer:peer inJob:job];
         return;
     }
+    job.metadataPieces = nil;
+    job.metadataPeer = nil;
+    job.metadataAttempt += 1;
 
     NSData *torrentBytes = [MVBencode torrentDataWithInfoDict:infoBytes];
     NSString *decodeError = nil;
@@ -475,7 +540,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 /// Lays out the files and the piece table once the metadata is known.
 - (void)prepareJob:(MVTorrentJob *)job metadata:(MVTorrentMetadata *)metadata {
-    if (job.cancelled || job.paused) return;
+    if (_jobs[job.task.identifier] != job || job.cancelled || job.paused || job.finishing) return;
     job.metadata = metadata;
 
     // Peers found while resolving a magnet were built when the piece count was
@@ -484,11 +549,28 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     // with the real geometry.
     if (job.peers.count) [self stopAllPeersForJob:job];
 
-    // Each torrent owns a folder named after it, so two torrents never collide
-    // and a cancel can delete exactly what it wrote.
-    NSString *base = [MVPaths directoryForCategory:@"Torrents"];
+    // New tasks get distinct folders even when two torrents share a name.
+    // A previously persisted path keeps its legacy folder so existing partial
+    // pieces can still be verified and resumed after an upgrade.
+    NSString *base = [[MVPaths directoryForCategory:@"Torrents"] stringByStandardizingPath];
     NSString *folder = [MVPaths sanitizeFilename:metadata.name.length ? metadata.name : metadata.infoHashHex];
-    NSString *root = [base stringByAppendingPathComponent:folder];
+    NSString *prior = job.priorPath.stringByStandardizingPath;
+    NSString *prefix = [base stringByAppendingString:@"/"];
+    NSString *root = nil;
+    if ([prior hasPrefix:prefix]) {
+        NSString *relative = [prior substringFromIndex:prefix.length];
+        NSString *first = relative.pathComponents.firstObject;
+        if (first.length && ![first isEqualToString:@"."] && ![first isEqualToString:@".."]) {
+            root = [base stringByAppendingPathComponent:first];
+        }
+    }
+    // Old versions could put multiple tasks in the same name-based folder.
+    // Reuse it only when no other saved task/download points into or above it.
+    if (root && [MVTorrentDownloader root:root isReferencedBy:job.protectedPaths]) root = nil;
+    if (!root) {
+        NSString *owned = [MVPaths sanitizeFilename:[NSString stringWithFormat:@"%@-%@", job.task.identifier, folder]];
+        root = [base stringByAppendingPathComponent:owned];
+    }
     job.storage = [[MVTorrentStorage alloc] initWithMetadata:metadata root:root];
 
     NSString *prepareError = nil;
@@ -496,14 +578,9 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         [self failJob:job message:prepareError ?: [MVLang t:@"Could not create the torrent files"]];
         return;
     }
-    job.task.path = job.storage.outputPath;
-    job.task.totalBytes = metadata.totalLength;
-
-    // The row title comes from the page title (the .torrent link's page), so
-    // every torrent from one page shares it. The torrent's own name is what
-    // identifies it, so use that instead.
-    if (metadata.name.length) job.task.title = metadata.name;
-    dispatch_async(dispatch_get_main_queue(), ^{ [MVTaskStore.shared update:job.task]; });
+    // Marshal the title/path/progress together through the guarded callback;
+    // a late metadata response must not recreate a removed or resumed task.
+    if (metadata.name.length) job.displayTitle = metadata.name;
 
     // The piece table. The last piece is shorter than the piece length.
     long long total = metadata.totalLength;
@@ -528,13 +605,11 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         piece.state = MVPieceStateComplete;
         job.doneBytes += piece.length;
     }
-    job.task.doneBytes = job.doneBytes;
     if (job.doneBytes >= metadata.totalLength) {
         [self finishJob:job];
         return;
     }
 
-    job.task.phase = [MVLang t:@"Finding peers"];
     [self reportProgressForJob:job];
 
     // Reconnect the addresses already known (a resolved magnet keeps them), then
@@ -564,6 +639,11 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         return;
     }
     MVTorrentJob *currentJob = job;
+    // Capture queue-owned fields before leaving the engine queue.
+    NSData *infoHash = [job.metadata.infoHash copy];
+    NSData *peerID = [job.peerID copy];
+    long long downloaded = job.doneBytes;
+    long long left = MAX(0, job.metadata.totalLength - downloaded);
     dispatch_async(_networkQueue, ^{
         BOOL gotAny = NO;
         NSTimeInterval interval = 0;
@@ -571,12 +651,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         for (NSString *tracker in trackers) {
             if (currentJob.cancelled || currentJob.paused) return;
             NSURL *announce = [MVTorrentTracker announceURLForTracker:tracker
-                                                             infoHash:currentJob.metadata.infoHash
-                                                               peerID:currentJob.peerID
+                                                             infoHash:infoHash
+                                                               peerID:peerID
                                                                  port:6881
                                                              uploaded:0
-                                                           downloaded:currentJob.doneBytes
-                                                                 left:MAX(0, currentJob.metadata.totalLength - currentJob.doneBytes)
+                                                           downloaded:downloaded
+                                                                 left:left
                                                                 event:event];
             if (!announce) continue;
             NSError *error = nil;
@@ -597,23 +677,21 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
                 continue;
             }
             gotAny = YES;
-            currentJob.hadPeers = YES;
             if (interval <= 0) interval = [MVTorrentTracker intervalFromAnnounceResponse:response];
             dispatch_async(self->_queue, ^{ [self addPeers:peers toJob:currentJob]; });
         }
-        if (!gotAny && !currentJob.hadPeers) {
-            NSString *reason = lastFailure ?: [MVLang t:@"No peers were found for this torrent"];
-            dispatch_async(self->_queue, ^{
-                if (currentJob.peers.count == 0 && !currentJob.finishing && !currentJob.cancelled) {
-                    [self failJob:currentJob message:reason];
-                }
-            });
-        } else {
-            // Re-announce on the tracker's interval so a swarm that was empty or
-            // whose peers died is re-queried, instead of the download sitting at
-            // 0% forever.
-            [self scheduleNextAnnounceForJob:currentJob interval:interval];
-        }
+        NSString *reason = lastFailure ?: [MVLang t:@"No peers were found for this torrent"];
+        dispatch_async(self->_queue, ^{
+            if (self->_jobs[currentJob.task.identifier] != currentJob || currentJob.finishing ||
+                currentJob.cancelled || currentJob.paused) return;
+            if (gotAny) currentJob.hadPeers = YES;
+            if (!currentJob.hadPeers && currentJob.peers.count == 0) {
+                [self failJob:currentJob message:reason];
+            } else {
+                // Re-announce so a swarm whose peers died is queried again.
+                [self scheduleNextAnnounceForJob:currentJob interval:interval];
+            }
+        });
     });
 }
 
@@ -636,7 +714,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 #pragma mark - Peers
 
 - (void)addPeers:(NSArray<MVTorrentPeerAddress *> *)addresses toJob:(MVTorrentJob *)job {
-    if (job.cancelled || job.paused || job.finishing) return;
+    if (_jobs[job.task.identifier] != job || job.cancelled || job.paused || job.finishing) return;
     NSMutableSet<NSString *> *known = [NSMutableSet set];
     for (MVTorrentPeerAddress *address in job.knownPeers) [known addObject:address.key];
     for (MVTorrentPeerAddress *address in addresses) {
@@ -679,12 +757,17 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 #pragma mark - Piece scheduling
 
+- (NSInteger)openPieceLimitForJob:(MVTorrentJob *)job {
+    long long pieceLength = MAX(1LL, job.metadata.pieceLength);
+    return MAX(1, MIN(kMaxOpenPieces, (NSInteger)(kMaxOpenPieceBytes / pieceLength)));
+}
+
 /// Opens one more piece for filling, choosing the next piece the peer actually
 /// holds so a window is never wasted on pieces it cannot serve. The cursor is a
 /// hint; when it runs out the scan restarts from the beginning, so a piece only
 /// a later peer has is still found.
 - (nullable MVTorrentPiece *)openNextPieceForJob:(MVTorrentJob *)job available:(NSIndexSet *)available {
-    if ((NSInteger)job.openPieces.count >= kMaxOpenPieces) return nil;
+    if ((NSInteger)job.openPieces.count >= [self openPieceLimitForJob:job]) return nil;
     NSInteger count = (NSInteger)job.pieces.count;
     for (NSInteger pass = 0; pass < 2; pass++) {
         NSInteger start = (pass == 0) ? job.nextPieceToOpen : 0;
@@ -702,9 +785,9 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     return nil;
 }
 
-/// Frees the buffer of an open piece that has nothing to lose (no block has
-/// arrived and none is in flight), so its slot can be reused. A piece with
-/// partial data keeps its buffer — that work is worth keeping.
+/// Frees idle buffers so the bounded window cannot be stranded on pieces that
+/// no currently usable peer has. Partial data is retained whenever a peer can
+/// continue it; otherwise it is safe to discard and fetch again later.
 - (void)reapOpenPiecesForJob:(MVTorrentJob *)job {
     if (!job.openPieces.count) return;
     // Pieces with an outstanding block, gathered in one pass over the in-flight
@@ -719,13 +802,20 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
          index != NSNotFound;
          index = [job.openPieces indexGreaterThanIndex:index]) {
         MVTorrentPiece *piece = job.pieces[index];
-        if (piece.state == MVPieceStateComplete) continue;
-        if (piece.receivedBegins.count) continue;
-        if ([busy containsIndex:index]) continue;
-        [idle addObject:@(index)];
+        if (piece.state == MVPieceStateComplete || [busy containsIndex:index]) continue;
+        BOOL canContinue = NO;
+        for (MVTorrentPeer *peer in job.peers) {
+            if (peer.connected && peer.unchoked && [peer.availablePieces containsIndex:index]) {
+                canContinue = YES;
+                break;
+            }
+        }
+        if (!canContinue) [idle addObject:@(index)];
     }
     for (NSNumber *index in idle) {
-        job.pieces[index.unsignedIntegerValue].buffer = nil;
+        MVTorrentPiece *piece = job.pieces[index.unsignedIntegerValue];
+        piece.buffer = nil;
+        [piece.receivedBegins removeAllObjects];
         [job.openPieces removeIndex:index.unsignedIntegerValue];
     }
 }
@@ -762,11 +852,11 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
     MVTorrentBlock *block = [self blockFromOpenPiecesForJob:job available:available];
     while (!block) {
-        if ((NSInteger)job.openPieces.count >= kMaxOpenPieces) {
-            // The window is full; reuse a slot only if some open piece has
-            // nothing in flight and no data yet.
+        if ((NSInteger)job.openPieces.count >= [self openPieceLimitForJob:job]) {
+            // Reuse a slot only when no connected, unchoked peer can continue
+            // it and no block is still in flight.
             [self reapOpenPiecesForJob:job];
-            if ((NSInteger)job.openPieces.count >= kMaxOpenPieces) break;
+            if ((NSInteger)job.openPieces.count >= [self openPieceLimitForJob:job]) break;
         }
         MVTorrentPiece *opened = [self openNextPieceForJob:job available:available];
         if (!opened) break;
@@ -790,9 +880,18 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 #pragma mark - Delegate (called on the engine queue)
 
-- (void)peerDidConnect:(MVTorrentPeer *)peer {
+// A peer from an earlier run can still deliver a queued delegate callback after
+// the same task ID has been resumed. Membership binds it to the exact run.
+- (MVTorrentJob *)jobForPeer:(MVTorrentPeer *)peer {
     MVTorrentJob *job = _jobs[peer.jobIdentifier];
-    if (!job || job.cancelled || job.paused) return;
+    if (!job || job.cancelled || job.paused || job.finishing ||
+        [job.peers indexOfObjectIdenticalTo:peer] == NSNotFound) return nil;
+    return job;
+}
+
+- (void)peerDidConnect:(MVTorrentPeer *)peer {
+    MVTorrentJob *job = [self jobForPeer:peer];
+    if (!job) return;
     MVLogInfo(@"torrent: peer %@:%ld connected", peer.host, (long)peer.port);
     // Report now so a connected swarm clears the "Finding peers" phase at once
     // instead of waiting for the first piece to finish.
@@ -804,30 +903,31 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 }
 
 - (void)peerDidChangeAvailability:(MVTorrentPeer *)peer {
-    MVTorrentJob *job = _jobs[peer.jobIdentifier];
-    if (!job || job.cancelled || job.paused) return;
+    MVTorrentJob *job = [self jobForPeer:peer];
+    if (!job) return;
     // A choked peer will not answer, so hand back whatever it still owes.
     if (!peer.unchoked) [job releaseBlocksForPeer:peer];
     [self fillPipelinesForJob:job];
 }
 
 - (void)peer:(MVTorrentPeer *)peer didReceiveBlock:(MVTorrentBlock *)block data:(NSData *)data {
-    MVTorrentJob *job = _jobs[peer.jobIdentifier];
-    if (!job || job.cancelled || job.paused) return;
+    MVTorrentJob *job = [self jobForPeer:peer];
+    if (!job) return;
     if (block.index < 0 || block.index >= (NSInteger)job.pieces.count) return;
-
+    // A timeout or choke may already have reassigned this block to another
+    // peer. A late reply must not clear or overwrite the new owner's request.
+    MVTorrentRequest *request = job.inFlightBlocks[[job keyForBlock:block]];
+    if (request.peer != peer || request.block != block) return;
     MVTorrentPiece *piece = job.pieces[block.index];
     [job clearBlockInFlight:block];
     if (piece.state == MVPieceStateComplete) {
         [self fillPipelinesForJob:job];
         return;
     }
-    if (block.begin < 0 || block.begin + (NSInteger)data.length > piece.length) return;
-    // A block can only arrive for a piece we opened, but allocate defensively so
-    // a stray message cannot write into a nil buffer.
-    if (!piece.buffer) {
-        piece.buffer = [NSMutableData dataWithLength:(NSUInteger)piece.length];
-        [job.openPieces addIndex:(NSUInteger)piece.index];
+    if (!piece.buffer || block.begin < 0 || block.begin % kBlockSize != 0 ||
+        block.begin >= piece.length || data.length != (NSUInteger)MIN((long long)kBlockSize, piece.length - block.begin)) {
+        [self fillPipelinesForJob:job];
+        return;
     }
 
     [piece.buffer replaceBytesInRange:NSMakeRange((NSUInteger)block.begin, data.length) withBytes:data.bytes];
@@ -841,34 +941,45 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 }
 
 - (void)peer:(MVTorrentPeer *)peer didLoseBlock:(MVTorrentBlock *)block {
-    MVTorrentJob *job = _jobs[peer.jobIdentifier];
+    MVTorrentJob *job = [self jobForPeer:peer];
     if (!job) return;
+    MVTorrentRequest *request = job.inFlightBlocks[[job keyForBlock:block]];
+    if (request.peer != peer || request.block != block) return;
     [job clearBlockInFlight:block];
     [self fillPipelinesForJob:job];
 }
 
 - (void)peer:(MVTorrentPeer *)peer didReceiveExtendedMessage:(NSInteger)extendedID payload:(NSData *)payload {
+    MVTorrentJob *job = [self jobForPeer:peer];
+    if (!job) return;
     if (extendedID == 0) {
         // The peer's extended handshake just arrived, so this peer can now be
         // asked for a magnet's metadata.
-        [self requestMetadataFromPeerForJob:_jobs[peer.jobIdentifier]];
+        [self requestMetadataFromPeerForJob:job];
         return;
     }
-    [self handleMetadataMessage:payload forPeer:peer];
+    // We advertised local ut_metadata id 1. Other extension IDs are not BEP 9.
+    if (extendedID == 1) [self handleMetadataMessage:payload forPeer:peer];
 }
 
 - (void)peerDidDisconnect:(MVTorrentPeer *)peer reason:(NSString *)reason {
-    MVTorrentJob *job = _jobs[peer.jobIdentifier];
+    MVTorrentJob *job = [self jobForPeer:peer];
     if (!job) return;
     MVLogInfo(@"torrent: peer %@:%ld left: %@", peer.host, (long)peer.port, reason ?: @"closed");
     [job.peers removeObjectIdenticalTo:peer];
     if (job.cancelled || job.paused) return;
-
+    if (job.metadataPeer == peer) {
+        job.metadataAttempt += 1;
+        job.metadataPeer = nil;
+        job.metadataSize = 0;
+        [job.metadataPieces removeAllObjects];
+    }
     // The peer's in-flight blocks are lost; free them so another peer can take
     // them, and connect a replacement if one is known.
     [job releaseBlocksForPeer:peer];
     [self connectMorePeersForJob:job];
-    [self fillPipelinesForJob:job];
+    if (job.metadataPieces) [self requestMetadataFromPeerForJob:job];
+    else [self fillPipelinesForJob:job];
 }
 
 /// Verifies a finished piece and, when it is correct, writes it to disk and
@@ -895,7 +1006,6 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     piece.buffer = nil;
     [job.openPieces removeIndex:(NSUInteger)piece.index];
     job.doneBytes += piece.length;
-    job.task.doneBytes = job.doneBytes;
 
     for (MVTorrentPeer *peer in job.peers) [peer sendHave:piece.index];
     [self reportProgressForJob:job];
@@ -910,50 +1020,67 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 #pragma mark - Progress / completion
 
 - (void)reportProgressForJob:(MVTorrentJob *)job {
-    MVDownloadTask *task = job.task;
-    // "Finding peers" is only true until the swarm actually connects. Deriving
-    // the phase from the live peer count clears it the moment peers arrive, so
-    // the row stops showing a stale "Finding peers" over a download that is
-    // clearly moving bytes.
-    if (job.peers.count == 0) {
-        task.phase = [MVLang t:@"Finding peers"];
-    } else {
-        task.phase = nil;
-    }
+    if (_jobs[job.task.identifier] != job || job.paused || job.cancelled || job.finishing) return;
+    NSString *phase = job.peers.count ? nil : [MVLang t:@"Finding peers"];
+    NSString *title = [job.displayTitle copy];
+    NSString *path = [job.storage.outputPath copy];
+    long long done = job.doneBytes;
+    long long total = job.metadata.totalLength;
     dispatch_async(dispatch_get_main_queue(), ^{
+        __block BOOL current;
+        dispatch_sync(self->_queue, ^{
+            current = self->_jobs[job.task.identifier] == job && !job.paused && !job.cancelled && !job.finishing;
+        });
+        if (!current || job.task.state != MVTaskStateRunning) return;
+        MVDownloadTask *task = job.task;
+        task.phase = phase;
+        if (title.length) task.title = title;
+        if (path.length) task.path = path;
+        task.doneBytes = done;
+        if (total > 0) task.totalBytes = total;
         if (job.progressBlock) job.progressBlock(task);
     });
 }
 
 - (void)finishJob:(MVTorrentJob *)job {
-    if (job.finishing) return;
+    if (_jobs[job.task.identifier] != job || job.paused || job.cancelled || job.finishing) return;
     job.finishing = YES;
     [self stopAllPeersForJob:job];
-
-    MVDownloadTask *task = job.task;
-    task.doneBytes = job.metadata.totalLength;
-    task.totalBytes = job.metadata.totalLength;
-    task.path = job.storage.outputPath;
-    task.phase = nil;
-    MVLogInfo(@"torrent: finished %@", task.title);
-
+    NSString *path = [job.storage.outputPath copy];
+    NSString *title = [job.displayTitle copy];
+    long long total = job.metadata.totalLength;
     dispatch_async(dispatch_get_main_queue(), ^{
+        __block BOOL current;
+        dispatch_sync(self->_queue, ^{
+            current = self->_jobs[job.task.identifier] == job && !job.paused && !job.cancelled;
+            if (current) [self->_jobs removeObjectForKey:job.task.identifier];
+        });
+        if (!current || job.task.state != MVTaskStateRunning) return;
+        MVDownloadTask *task = job.task;
+        task.doneBytes = total;
+        task.totalBytes = total;
+        task.path = path;
+        task.phase = nil;
+        if (title.length) task.title = title;
+        MVLogInfo(@"torrent: finished %@", task.title);
         if (job.finishedBlock) job.finishedBlock(task);
     });
-    [_jobs removeObjectForKey:task.identifier];
 }
 
 - (void)failJob:(MVTorrentJob *)job message:(NSString *)message {
-    if (job.finishing) return;
+    if (_jobs[job.task.identifier] != job || job.paused || job.cancelled || job.finishing) return;
     job.finishing = YES;
     [self stopAllPeersForJob:job];
-
-    MVDownloadTask *task = job.task;
-    MVLogError(@"torrent: failed %@: %@", task.title, message);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (job.failedBlock) job.failedBlock(task, message);
+        __block BOOL current;
+        dispatch_sync(self->_queue, ^{
+            current = self->_jobs[job.task.identifier] == job && !job.paused && !job.cancelled;
+            if (current) [self->_jobs removeObjectForKey:job.task.identifier];
+        });
+        if (!current || job.task.state != MVTaskStateRunning) return;
+        MVLogError(@"torrent: failed %@: %@", job.task.title, message);
+        if (job.failedBlock) job.failedBlock(job.task, message);
     });
-    [_jobs removeObjectForKey:task.identifier];
 }
 
 #pragma mark - Networking
@@ -970,11 +1097,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:target
                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                       timeoutInterval:30];
+    request.HTTPShouldHandleCookies = NO;
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSData *result = nil;
     __block NSError *resultError = nil;
-    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request
+    NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
                                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
         NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
         if (err) resultError = err;
@@ -986,10 +1114,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         dispatch_semaphore_signal(sem);
     }];
     [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kRequestTimeout * NSEC_PER_SEC)));
-    if (!result && !resultError) {
-        resultError = [NSError errorWithDomain:@"MVTorrent" code:-1
-                                     userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Connection timed out"]}];
+    long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kRequestTimeout * NSEC_PER_SEC)));
+    if (timedOut) {
+        [task cancel];
+        if (error) *error = [NSError errorWithDomain:@"MVTorrent" code:-1
+                                           userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Connection timed out"]}];
+        return nil; // completion may still run after cancel
     }
     if (error) *error = resultError;
     return result;
@@ -997,26 +1127,37 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 #pragma mark - Cleanup
 
-+ (void)removePartFilesForTask:(MVDownloadTask *)task {
-    // The torrent owns exactly one folder under the Torrents category; the task's
-    // path is either that folder (multi-file) or a file inside it (single file),
-    // possibly nested in subfolders. Delete the first component under Torrents,
-    // so everything the torrent wrote goes and nothing else does.
-    if (!task.path.length) return;
++ (BOOL)root:(NSString *)root isReferencedBy:(NSArray<NSString *> *)protectedPaths {
+    return [MVFileProtection path:root conflictsWithPaths:protectedPaths];
+}
+
++ (void)removeFilesAtRoot:(NSString *)jobRoot path:(NSString *)path
+              identifier:(NSString *)identifier protecting:(NSArray<NSString *> *)protectedPaths {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *root = [MVPaths directoryForCategory:@"Torrents"];
-    NSString *path = task.path;
-    if (root.length && [path hasPrefix:root]) {
-        NSString *rest = [path substringFromIndex:root.length];
-        NSRange slash = [rest rangeOfString:@"/"];
-        if (slash.location != NSNotFound) {
-            NSUInteger start = slash.location + 1;
-            NSRange next = [rest rangeOfString:@"/" options:0 range:NSMakeRange(start, rest.length - start)];
-            NSUInteger end = (next.location == NSNotFound) ? rest.length : next.location;
-            path = [root stringByAppendingPathComponent:[rest substringWithRange:NSMakeRange(start, end - start)]];
+    NSString *base = [[MVPaths directoryForCategory:@"Torrents"] stringByStandardizingPath];
+    NSString *prefix = [base stringByAppendingString:@"/"];
+    NSString *candidate = jobRoot.stringByStandardizingPath;
+    if (![candidate.stringByDeletingLastPathComponent isEqualToString:base]) candidate = nil;
+    if (!candidate.length && [path.stringByStandardizingPath hasPrefix:prefix]) {
+        NSString *relative = [path.stringByStandardizingPath substringFromIndex:prefix.length];
+        NSString *first = relative.pathComponents.firstObject;
+        if (first.length && ![first isEqualToString:@"."] && ![first isEqualToString:@".."]) {
+            candidate = [base stringByAppendingPathComponent:first];
         }
     }
-    [fm removeItemAtPath:path error:nil];
+    if (candidate.length) {
+        if (![self root:candidate isReferencedBy:protectedPaths]) [fm removeItemAtPath:candidate error:nil];
+        return;
+    }
+    // A cancellation can beat the guarded path update. Newly created folders
+    // carry the task ID, which lets us remove only this task's private folder.
+    if (!identifier.length) return;
+    NSString *ownedPrefix = [identifier stringByAppendingString:@"-"];
+    for (NSString *name in [fm contentsOfDirectoryAtPath:base error:nil]) {
+        if (![name hasPrefix:ownedPrefix]) continue;
+        NSString *owned = [base stringByAppendingPathComponent:name];
+        if (![self root:owned isReferencedBy:protectedPaths]) [fm removeItemAtPath:owned error:nil];
+    }
 }
 
 @end

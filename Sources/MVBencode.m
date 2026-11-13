@@ -1,18 +1,26 @@
 #import "MVBencode.h"
 #import "MVSHA1.h"
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+
+// Torrent files and tracker/peer replies are untrusted. Bound recursive lists
+// and dictionaries to avoid exhausting the stack on a malformed response.
+static const NSUInteger kMaxBencodeDepth = 128;
 
 /// Walks a byte buffer, decoding one value at a time. A class rather than a
 /// pile of functions so the cursor and the error live in one place.
 @interface MVBencodeReader : NSObject
 @property (nonatomic, strong) NSData *data;
 @property (nonatomic) NSUInteger pos;
+@property (nonatomic) NSUInteger depth;
 @property (nonatomic, copy, nullable) NSString *error;
 @end
 
 @implementation MVBencodeReader
 
 - (BOOL)hasBytes:(NSUInteger)count {
-    return _pos + count <= _data.length;
+    return _pos <= _data.length && count <= _data.length - _pos;
 }
 
 - (uint8_t)peek {
@@ -51,6 +59,7 @@
             self.error = @"bad character in integer";
             return nil;
         }
+        if (digits.length >= 19) { self.error = @"integer exceeds the supported range"; return nil; }
         [digits appendFormat:@"%c", c];
         _pos += 1;
     }
@@ -63,8 +72,13 @@
         self.error = @"integer has a leading zero";
         return nil;
     }
-    // A 64-bit counter (a large piece length, a file offset) needs long long.
+    // Reject overflow rather than wrapping a size into a negative value.
+    errno = 0;
     unsigned long long value = strtoull(digits.UTF8String, NULL, 10);
+    if (errno == ERANGE || value > LLONG_MAX) {
+        self.error = @"integer exceeds the supported range";
+        return nil;
+    }
     return @((long long)value);
 }
 
@@ -77,6 +91,7 @@
             self.error = @"bad length in string";
             return nil;
         }
+        if (digits.length >= 20) { self.error = @"string length exceeds the supported range"; return nil; }
         [digits appendFormat:@"%c", c];
         _pos += 1;
     }
@@ -85,8 +100,9 @@
         self.error = @"empty string length";
         return nil;
     }
+    errno = 0;
     unsigned long long len = strtoull(digits.UTF8String, NULL, 10);
-    if (len > _data.length) {
+    if (errno == ERANGE || len > _data.length - _pos) {
         self.error = @"string length exceeds the data";
         return nil;
     }
@@ -128,31 +144,41 @@
         self.error = @"unexpected end of data";
         return nil;
     }
+    if (_depth >= kMaxBencodeDepth) {
+        self.error = @"bencode nesting is too deep";
+        return nil;
+    }
+    _depth++;
     uint8_t c = [self peek];
-    if (c == 'i') return [self readInteger];
-    if (c == 'l') return [self readList];
-    if (c == 'd') return [self readDictionary];
-    if (c >= '0' && c <= '9') return [self readString];
-    self.error = [NSString stringWithFormat:@"unknown type '%c' at %lu", c, (unsigned long)_pos];
-    return nil;
+    id value = nil;
+    if (c == 'i') value = [self readInteger];
+    else if (c == 'l') value = [self readList];
+    else if (c == 'd') value = [self readDictionary];
+    else if (c >= '0' && c <= '9') value = [self readString];
+    else self.error = [NSString stringWithFormat:@"unknown type '%c' at %lu", c, (unsigned long)_pos];
+    _depth--;
+    return value;
 }
 
 /// Skips one value without building it, advancing past it. Used to find where a
 /// top-level value ends so its raw bytes can be sliced out.
 - (BOOL)skipValue {
+    if (_depth >= kMaxBencodeDepth) { self.error = @"bencode nesting is too deep"; return NO; }
+    _depth++;
+    BOOL result = [self skipValueBody];
+    _depth--;
+    return result;
+}
+
+- (BOOL)skipValueBody {
     if (![self hasBytes:1]) { self.error = @"unexpected end of data"; return NO; }
     uint8_t c = [self peek];
-    if (c == 'i') {
-        while ([self hasBytes:1] && [self peek] != 'e') _pos += 1;
-        return [self expect:'e'];
-    }
+    if (c == 'i') return [self readInteger] != nil;
     if (c == 'l' || c == 'd') {
         _pos += 1;
         while ([self hasBytes:1] && [self peek] != 'e') {
-            if (c == 'd') {
-                if (![self skipValue]) return NO;   // the key
-            }
-            if (![self skipValue]) return NO;       // the value
+            if (c == 'd' && ![self readString]) return NO; // dictionary keys are byte strings
+            if (![self skipValue]) return NO;
         }
         return [self expect:'e'];
     }
@@ -161,12 +187,15 @@
         while ([self hasBytes:1] && [self peek] != ':') {
             uint8_t d = [self peek];
             if (d < '0' || d > '9') { self.error = @"bad length in string"; return NO; }
+            if (digits.length >= 20) { self.error = @"string length exceeds the supported range"; return NO; }
             [digits appendFormat:@"%c", d];
             _pos += 1;
         }
         if (![self expect:':']) return NO;
+        if (!digits.length) { self.error = @"empty string length"; return NO; }
+        errno = 0;
         unsigned long long len = strtoull(digits.UTF8String, NULL, 10);
-        if (len > _data.length - _pos) { self.error = @"string length exceeds the data"; return NO; }
+        if (errno == ERANGE || len > _data.length - _pos) { self.error = @"string length exceeds the data"; return NO; }
         _pos += (NSUInteger)len;
         return YES;
     }

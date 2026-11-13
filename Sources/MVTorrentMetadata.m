@@ -1,8 +1,25 @@
 #import "MVTorrentMetadata.h"
 #import "MVBencode.h"
 #import "MVSHA1.h"
+#import "MVTorrentPolicy.h"
+#include <limits.h>
 
 static const NSInteger kPieceHashLength = 20;
+static const NSUInteger kMaxTorrentFiles = 4096;
+static const NSUInteger kMaxPathComponents = 64;
+
+// A path component is one filename, never a path or a C-string with an
+// embedded terminator. Reject invalid metadata rather than changing its layout.
+static NSString *MVTorrentPathComponent(id value) {
+    if (![value isKindOfClass:NSData.class]) return nil;
+    NSString *name = [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+    if (!name.length || [name isEqualToString:@"."] || [name isEqualToString:@".."]) return nil;
+    for (NSUInteger i = 0; i < name.length; i++) {
+        unichar c = [name characterAtIndex:i];
+        if (c < 0x20 || c == 0x7f || c == '/' || c == '\\') return nil;
+    }
+    return name;
+}
 
 @implementation MVTorrentFile
 
@@ -15,6 +32,12 @@ static const NSInteger kPieceHashLength = 20;
 @implementation MVTorrentMetadata
 
 + (instancetype)metadataWithTorrentData:(NSData *)data error:(NSString **)error {
+    // Bound parser allocations for a downloaded .torrent as well as BEP 9.
+    if (!data.length || data.length > (NSUInteger)(2 * MV_TORRENT_MAX_METADATA_BYTES) ||
+        [MVBencode byteLengthOfValueIn:data] != (NSInteger)data.length) {
+        if (error) *error = @"torrent data is malformed or too large";
+        return nil;
+    }
     NSString *decodeError = nil;
     id root = [MVBencode decode:data error:&decodeError];
     if (![root isKindOfClass:NSDictionary.class]) {
@@ -26,8 +49,8 @@ static const NSInteger kPieceHashLength = 20;
     // Slice the info dictionary's original bytes rather than re-encoding it:
     // the info-hash must match what the swarm computes.
     NSData *infoBytes = [MVBencode rawValueForTopLevelKey:@"info" inData:data];
-    if (!infoBytes.length) {
-        if (error) *error = @"torrent has no info dictionary";
+    if (!infoBytes.length || infoBytes.length > (NSUInteger)MV_TORRENT_MAX_METADATA_BYTES) {
+        if (error) *error = @"torrent has no usable info dictionary";
         return nil;
     }
     NSDictionary *info = [MVBencode decode:infoBytes error:&decodeError];
@@ -62,86 +85,91 @@ static const NSInteger kPieceHashLength = 20;
                          infoHash:(NSData *)infoHash
                          trackers:(NSArray<NSString *> *)trackers
                             error:(NSString **)error {
+    if (![info isKindOfClass:NSDictionary.class] || infoHash.length != kPieceHashLength) {
+        if (error) *error = @"torrent info or hash is malformed";
+        return nil;
+    }
     MVTorrentMetadata *meta = [MVTorrentMetadata new];
     meta.infoHash = infoHash;
     meta.trackers = trackers ?: @[];
-
-    NSData *nameData = info[@"name"];
-    NSString *name = [nameData isKindOfClass:NSData.class]
-        ? [[NSString alloc] initWithData:nameData encoding:NSUTF8StringEncoding] : nil;
-    meta.name = name.length ? name : (infoHash.length ? [MVSHA1 hexString:infoHash] : @"torrent");
+    meta.name = MVTorrentPathComponent(info[@"name"]);
+    if (!meta.name) {
+        if (error) *error = @"torrent name is invalid";
+        return nil;
+    }
 
     NSNumber *pieceLength = info[@"piece length"];
     meta.pieceLength = [pieceLength isKindOfClass:NSNumber.class] ? pieceLength.longLongValue : 0;
-
     NSData *pieces = info[@"pieces"];
-    meta.pieceHashes = [pieces isKindOfClass:NSData.class] ? pieces : [NSData data];
-
+    if (![pieces isKindOfClass:NSData.class] || pieces.length % kPieceHashLength != 0 ||
+        pieces.length / kPieceHashLength > (NSUInteger)MV_TORRENT_MAX_PIECES) {
+        if (error) *error = @"torrent piece hashes are malformed or too numerous";
+        return nil;
+    }
+    meta.pieceHashes = pieces;
     NSNumber *privateFlag = info[@"private"];
     meta.isPrivate = [privateFlag isKindOfClass:NSNumber.class] && privateFlag.integerValue == 1;
 
-    // Files: a "length" key means one file; "files" means a multi-file torrent
-    // (BEP 3 / BEP 47). Both are flattened to one stream with running offsets.
+    // A torrent is one ordered stream. Skipping an invalid file would change all
+    // subsequent offsets and make valid-looking data land in the wrong file.
     NSMutableArray<MVTorrentFile *> *files = [NSMutableArray array];
-    NSNumber *singleLength = info[@"length"];
-    if ([singleLength isKindOfClass:NSNumber.class]) {
-        MVTorrentFile *file = [MVTorrentFile new];
-        file.path = @[meta.name];
-        file.length = singleLength.longLongValue;
-        file.offset = 0;
-        [files addObject:file];
-    } else {
-        NSArray *entries = info[@"files"];
-        if (![entries isKindOfClass:NSArray.class]) {
-            if (error) *error = @"torrent lists neither length nor files";
+    id singleLength = info[@"length"];
+    id entries = info[@"files"];
+    long long total = 0;
+    if (singleLength) {
+        if (entries || ![singleLength isKindOfClass:NSNumber.class] || [singleLength longLongValue] < 0) {
+            if (error) *error = @"torrent file length is invalid";
             return nil;
         }
-        long long offset = 0;
+        MVTorrentFile *file = [MVTorrentFile new];
+        file.path = @[meta.name];
+        file.length = [singleLength longLongValue];
+        file.offset = 0;
+        total = file.length;
+        [files addObject:file];
+    } else {
+        if (![entries isKindOfClass:NSArray.class] || ![entries count] || [entries count] > kMaxTorrentFiles) {
+            if (error) *error = @"torrent file list is invalid or too large";
+            return nil;
+        }
         for (id entry in entries) {
-            if (![entry isKindOfClass:NSDictionary.class]) continue;
-            NSDictionary *dict = entry;
-            NSNumber *length = dict[@"length"];
-            if (![length isKindOfClass:NSNumber.class]) continue;
-            NSMutableArray<NSString *> *components = [NSMutableArray array];
-            for (id part in (dict[@"path"] ?: @[])) {
-                if (![part isKindOfClass:NSData.class]) continue;
-                NSString *piece = [[NSString alloc] initWithData:part encoding:NSUTF8StringEncoding];
-                if (piece.length) [components addObject:piece];
+            if (![entry isKindOfClass:NSDictionary.class]) {
+                if (error) *error = @"torrent file entry is malformed";
+                return nil;
             }
-            if (!components.count) [components addObject:meta.name];
-
+            id length = entry[@"length"];
+            id path = entry[@"path"];
+            if (![length isKindOfClass:NSNumber.class] || [length longLongValue] < 0 ||
+                ![path isKindOfClass:NSArray.class] || ![path count] || [path count] > kMaxPathComponents ||
+                [length longLongValue] > LLONG_MAX - total) {
+                if (error) *error = @"torrent file length or path is invalid";
+                return nil;
+            }
+            NSMutableArray<NSString *> *components = [NSMutableArray array];
+            for (id part in path) {
+                NSString *component = MVTorrentPathComponent(part);
+                if (!component) {
+                    if (error) *error = @"torrent path contains an invalid component";
+                    return nil;
+                }
+                [components addObject:component];
+            }
             MVTorrentFile *file = [MVTorrentFile new];
             file.path = components;
-            file.length = length.longLongValue;
-            file.offset = offset;
-            // A BEP 47 padding file occupies stream space but has no content on
-            // disk; the "attr" string carries a 'p' to mark it.
-            NSData *attr = dict[@"attr"];
+            file.length = [length longLongValue];
+            file.offset = total;
+            NSData *attr = entry[@"attr"];
             if ([attr isKindOfClass:NSData.class]) {
                 NSString *text = [[NSString alloc] initWithData:attr encoding:NSUTF8StringEncoding];
                 file.isPadding = [text containsString:@"p"];
             }
-            offset += file.length;
+            total += file.length;
             [files addObject:file];
         }
     }
     meta.files = files;
-
-    if (!meta.pieceLength) {
-        if (error) *error = @"torrent has no piece length";
-        return nil;
-    }
-    if (meta.pieceHashes.length % kPieceHashLength != 0) {
-        if (error) *error = @"torrent piece hashes are malformed";
-        return nil;
-    }
-    if (!files.count) {
-        if (error) *error = @"torrent has no files";
-        return nil;
-    }
-    long long expected = (meta.totalLength + meta.pieceLength - 1) / meta.pieceLength;
-    if (expected != meta.pieceCount) {
-        if (error) *error = @"torrent piece count does not match its files";
+    if (!MVTorrentValidGeometry(total, meta.pieceLength, (int64_t)(pieces.length / kPieceHashLength))) {
+        if (error) *error = @"torrent piece geometry does not match its files or exceeds supported limits";
         return nil;
     }
     return meta;

@@ -5,12 +5,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Downloads plain HTTP(S) files.
 ///
-/// This checkpoint ships the single-connection path: the body is streamed
-/// straight to a `.part` file with NSFileHandle, so a 4 GB video never sits in
-/// memory, and an interrupted transfer resumes with a Range request instead of
-/// starting over. The segmented (multi-connection) path is added in the next
-/// checkpoint on top of exactly this file-writing core, which is why the writes
-/// already go through one serial queue per task.
+/// Streams one or more ranges to `.part` files and joins them without loading
+/// the whole download into memory. Partial ranges are reused only when the
+/// server provides a matching validator; otherwise the transfer starts fresh.
 ///
 /// Callbacks are always delivered on the main queue.
 @interface MVFastDownloader : NSObject
@@ -34,7 +31,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// YES while bytes are moving for this task.
 - (BOOL)isRunningTask:(MVDownloadTask *)task;
 
-/// A global cap in bytes/second, applied to every transfer. 0 disables it.
+/// Approximate bytes/second per direct transfer, not a global cap. 0 disables
+/// it; enabling it for an already-running transfer requires a restart.
 @property (nonatomic) long long speedLimit;
 
 /// Deletes every partial file a task left behind: the single-file `.part` and
