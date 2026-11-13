@@ -75,16 +75,16 @@ jobs:
           which ldid || true
 
       - name: Run torrent core tests
-        run: bash scripts/torrent-tests.sh
+        run: bash scripts/ci-checked.sh bash scripts/torrent-tests.sh
 
       - name: Run native queue recovery tests
-        run: bash scripts/queue-tests.sh
+        run: bash scripts/ci-checked.sh bash scripts/queue-tests.sh
 
       - name: Run native privacy tests
-        run: bash scripts/privacy-tests.sh
+        run: bash scripts/ci-checked.sh bash scripts/privacy-tests.sh
 
       - name: Run native transfer tests
-        run: bash scripts/transfer-tests.sh
+        run: bash scripts/ci-checked.sh bash scripts/transfer-tests.sh
 
       - name: Build IPA
         env:
@@ -96,7 +96,7 @@ jobs:
           MV_DISPLAY_NAME: ${{ inputs.variant && 'MoodyVid Test' || 'MoodyVid' }}
           MV_ICON_TOP: ${{ inputs.variant && '150,90,220' || '18,172,186' }}
           MV_ICON_BOTTOM: ${{ inputs.variant && '95,50,160' || '8,116,132' }}
-        run: bash scripts/build.sh
+        run: bash scripts/ci-checked.sh bash scripts/build.sh
 
       # Every branch and test variant still gets a downloadable Actions artifact.
       - name: Upload IPA
