@@ -105,6 +105,7 @@ int main(void) {
             firstResult = [MVMediaProbe headersForURL:kURL referer:kPage];
             dispatch_group_leave(requests);
         });
+        __block BOOL finished = NO;
         dispatch_group_notify(requests, dispatch_get_main_queue(), ^{
             CHECK(fetchCount == 2, "fresh request fetched a new snapshot after clear");
             CHECK(![firstResult[@"Cookie"] containsString:@"old="], "in-flight old cookie not returned");
@@ -123,14 +124,20 @@ int main(void) {
             NSDictionary *cleared = [MVMediaProbe headersForURL:kURL referer:kPage];
             CHECK(!cleared[@"Cookie"] && fetchCount == 2, "clear discards cached snapshot without refetching");
             [MVMediaProbe finishClearingBrowserCookies];
-            method_setImplementation(method, original);
-            if (failures) fprintf(stderr, "%d COOKIE CACHE FAILURE(S)\n", failures);
-            else puts("ALL COOKIE CACHE TESTS PASSED");
-            fflush(stdout);
-            fflush(stderr);
-            exit(failures ? 1 : 0);
+            finished = YES;
         });
-        alarm(20);
-        dispatch_main();
+        // dispatch_main() can retire the process's initial thread on macOS,
+        // causing main-queue work to fail an NSThread.isMainThread check even
+        // though production iOS services the queue on its UI thread. Keep the
+        // actual main thread alive and service its run loop instead.
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+        while (!finished && deadline.timeIntervalSinceNow > 0) {
+            [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        }
+        CHECK(finished, "cookie-cache callbacks finished before the deadline");
+        method_setImplementation(method, original);
+        if (failures) fprintf(stderr, "%d COOKIE CACHE FAILURE(S)\n", failures);
+        else puts("ALL COOKIE CACHE TESTS PASSED");
+        return failures ? 1 : 0;
     }
 }

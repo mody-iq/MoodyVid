@@ -84,6 +84,7 @@ jobs:
         run: bash scripts/ci-checked.sh bash scripts/privacy-tests.sh
 
       - name: Run native transfer tests
+        if: ${{ !cancelled() }}
         run: bash scripts/ci-checked.sh bash scripts/transfer-tests.sh
 
       - name: Build IPA
