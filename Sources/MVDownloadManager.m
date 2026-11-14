@@ -5,6 +5,7 @@
 #import "MVHLSDownloader.h"
 #import "MVMPDDownloader.h"
 #import "MVTorrentDownloader.h"
+#import "MVTorrentImport.h"
 #import "MVPaths.h"
 #import "MVFileProtection.h"
 #import "MVMediaProbe.h"
@@ -507,6 +508,16 @@ static const NSUInteger kDefaultConcurrent = 3;
             [[NSFileManager defaultManager] removeItemAtPath:task.path error:nil];
     }
     [MVTaskStore.shared remove:task];
+    // The picker copy is needed only while a row can be resumed. It is never
+    // the user's original .torrent or the output. Guard even unusual duplicate
+    // references before removing the private copy.
+    if (task.source == MVTaskSourceTorrent && [MVTorrentImport isImportReference:task.url]) {
+        BOOL referenced = NO;
+        for (MVDownloadTask *other in MVTaskStore.shared.tasks) {
+            if ([other.url isEqualToString:task.url]) { referenced = YES; break; }
+        }
+        if (!referenced) [MVTorrentImport.shared removeReference:task.url];
+    }
     [self updateBackgroundTask];
 }
 

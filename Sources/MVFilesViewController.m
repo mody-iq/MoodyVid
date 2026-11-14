@@ -1231,7 +1231,7 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
     [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
     NSString *title = isDirectory ? [MVLang t:@"Delete this folder?"] : [MVLang t:@"Move to Trash?"];
     NSString *message = isDirectory ? [MVLang t:@"Folders are deleted permanently and cannot be restored."]
-                                    : [MVLang t:@"You can restore this file from Manage storage. Trash uses space until emptied."];
+                                    : [MVLang t:@"You can restore the file from Manage storage, but its completed download history will be removed. Trash uses space until emptied."];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:(isDirectory ? @"Delete" : @"Move to Trash")]
@@ -1254,6 +1254,7 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
                 [self alert:[MVLang t:@"Failed"] message:[MVLang t:error ?: @"Could not move the file to Trash."]];
                 return;
             }
+            [MVStorageProtection forgetCompletedRecordsAtPath:path];
         }
         [self refresh];
     }]];

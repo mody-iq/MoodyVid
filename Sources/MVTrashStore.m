@@ -36,6 +36,26 @@ static BOOL MVRegularUnlinkedFile(NSString *path, struct stat *info) {
     }
     return paths;
 }
+
++ (void)forgetCompletedRecordsAtPath:(NSString *)path {
+    if (!path.length) return;
+    NSString *standard = path.stringByStandardizingPath;
+    // A completed history row must not keep pointing at the original pathname:
+    // another file may later appear there, or restore may choose a new name.
+    // Remove only completed rows for the exact path, without deleting bytes.
+    for (MVDownloadTask *task in MVTaskStore.shared.tasks) {
+        if (task.state == MVTaskStateCompleted && task.path.length &&
+            [task.path.stringByStandardizingPath isEqualToString:standard]) {
+            [MVTaskStore.shared remove:task];
+        }
+    }
+    for (MVDownloadRecord *record in MVDownloadStore.shared.records) {
+        if (record.state == MVDownloadStateCompleted && record.path.length &&
+            [record.path.stringByStandardizingPath isEqualToString:standard]) {
+            [MVDownloadStore.shared remove:record];
+        }
+    }
+}
 @end
 
 @implementation MVTrashStore {

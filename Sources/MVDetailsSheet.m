@@ -175,26 +175,29 @@
         [_stack addArrangedSubview:err];
     }
 
-    // One primary action, then the rest as a compact icon row: a stack of six
-    // full-width buttons is what made this sheet feel like a form.
+    // Actions that present another screen run only after this sheet closes;
+    // otherwise its presenter is already presenting and UIKit rejects the share
+    // sheet, player or delete confirmation. Weak captures also avoid a cycle
+    // from the buttons back to their owning controller.
+    __weak typeof(self) weakSelf = self;
     if (row.isFinished && row.path.length) {
         [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Open"] symbol:@"play.fill" primary:YES
-                                             handler:^{ if (self.onPlay) self.onPlay(row); }]];
+                                             handler:^{ [weakSelf dismissThenPerform:weakSelf.onPlay]; }]];
         [_stack addArrangedSubview:[self iconRow:@[
-            @[[MVLang t:@"Share"], @"square.and.arrow.up", ^{ if (self.onShare) self.onShare(row); }],
-            @[[MVLang t:@"Save to Photos"], @"photo.on.rectangle", ^{ if (self.onSaveToPhotos) self.onSaveToPhotos(row); }],
-            @[[MVLang t:@"Show in Files"], @"folder", ^{ if (self.onRevealInFiles) self.onRevealInFiles(row); }],
+            @[[MVLang t:@"Share"], @"square.and.arrow.up", ^{ [weakSelf dismissThenPerform:weakSelf.onShare]; }],
+            @[[MVLang t:@"Save to Photos"], @"photo.on.rectangle", ^{ [weakSelf dismissThenPerform:weakSelf.onSaveToPhotos]; }],
+            @[[MVLang t:@"Show in Files"], @"folder", ^{ [weakSelf dismissThenPerform:weakSelf.onRevealInFiles]; }],
             @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
         ]]];
     } else if (row.isPaused || row.isFailed) {
         [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Resume"] symbol:@"play.fill" primary:YES
-                                             handler:^{ [MVDownloadActions resumeRow:row]; [self dismissSelf]; }]];
+                                             handler:^{ [MVDownloadActions resumeRow:row]; [weakSelf dismissSelf]; }]];
         [_stack addArrangedSubview:[self iconRow:@[
             @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
         ]]];
     } else if (row.isActive) {
         [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Pause"] symbol:@"pause.fill" primary:YES
-                                             handler:^{ [MVDownloadActions pauseRow:row]; [self dismissSelf]; }]];
+                                             handler:^{ [MVDownloadActions pauseRow:row]; [weakSelf dismissSelf]; }]];
         [_stack addArrangedSubview:[self iconRow:@[
             @[[MVLang t:@"Copy link"], @"doc.on.doc", ^{ UIPasteboard.generalPasteboard.string = row.url; }],
         ]]];
@@ -204,7 +207,12 @@
         ]]];
     }
     [_stack addArrangedSubview:[self actionButton:[MVLang t:@"Delete"] symbol:@"trash" primary:NO destructive:YES
-                                         handler:^{ if (self.onDelete) self.onDelete(row); [self dismissSelf]; }]];
+                                         handler:^{ [weakSelf dismissThenPerform:weakSelf.onDelete]; }]];
+}
+
+- (void)dismissThenPerform:(void (^)(MVDownloadRow *))action {
+    MVDownloadRow *row = self.row;
+    [self dismissViewControllerAnimated:YES completion:^{ if (action) action(row); }];
 }
 
 /// A row of equally sized icon buttons, each with its own accessibility label.

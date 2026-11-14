@@ -2,6 +2,7 @@
 #import "MVTaskStore.h"
 #import "MVDownloadStore.h"
 #import "MVTorrentMetadata.h"
+#import "MVTorrentImport.h"
 #import "MVTorrentStorage.h"
 #import "MVTorrentPeer.h"
 #import "MVTorrentTracker.h"
@@ -531,9 +532,14 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     }
 
     dispatch_async(_networkQueue, ^{
-        NSDictionary *headers = [MVMediaProbe headersForURL:url referer:job.task.referer];
         NSError *error = nil;
-        NSData *data = [self syncGet:url headers:headers error:&error group:job.requests];
+        NSData *data = nil;
+        if ([MVTorrentImport isImportReference:url]) {
+            data = [MVTorrentImport.shared dataForReference:url];
+        } else {
+            NSDictionary *headers = [MVMediaProbe headersForURL:url referer:job.task.referer];
+            data = [self syncGet:url headers:headers error:&error group:job.requests];
+        }
         if (!data.length) {
             NSString *message = error.localizedDescription ?: [MVLang t:@"Could not open the torrent"];
             dispatch_async(self->_queue, ^{ [self failJob:job message:message]; });

@@ -21,6 +21,10 @@ FOUNDATION_EXPORT NSNotificationName const MVTrashDidChangeNotification;
 /// output are protected, including private workspaces used by Python.
 @interface MVStorageProtection : NSObject
 + (NSArray<NSString *> *)protectedPaths;
+/// After a successful move, remove completed history rows for this exact path.
+/// Restoring a file returns the file itself, not the removed history rows.
+/// Call on the main thread, just like the download stores.
++ (void)forgetCompletedRecordsAtPath:(NSString *)path;
 @end
 
 NS_ASSUME_NONNULL_END

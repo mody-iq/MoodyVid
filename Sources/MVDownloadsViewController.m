@@ -17,6 +17,7 @@
 #import "MVTypeFilterSheet.h"
 #import "MVDetailsSheet.h"
 #import "MVSnifferItem.h"
+#import "MVTorrentImport.h"
 #import "MVPlaylistViewController.h"
 #import "MVPaths.h"
 #import "MVLang.h"
@@ -59,6 +60,7 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 @property (nonatomic) MVStatusFilter statusFilter;
 @property (nonatomic) MVSortOrder sortOrder;
 @property (nonatomic) BOOL editingMode;
+@property (nonatomic) BOOL pickingTorrent;
 @property (nonatomic, copy) NSArray<NSString *> *shownIdentifiers;
 @end
 
@@ -645,13 +647,11 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     sheet.onDelete = ^(MVDownloadRow *r) { [weakSelf confirmDeleteRow:r]; };
     sheet.onSaveToPhotos = ^(MVDownloadRow *r) { [weakSelf saveRowToPhotos:r]; };
     sheet.onRevealInFiles = ^(MVDownloadRow *r) {
-        [weakSelf dismissViewControllerAnimated:YES completion:^{
-            if (r.path.length) {
-                [NSNotificationCenter.defaultCenter postNotificationName:@"MVRevealFileNotification"
-                                                                  object:nil
-                                                                userInfo:@{@"path": r.path}];
-            }
-        }];
+        if (r.path.length) {
+            [NSNotificationCenter.defaultCenter postNotificationName:@"MVRevealFileNotification"
+                                                              object:nil
+                                                            userInfo:@{@"path": r.path}];
+        }
     };
     if (@available(iOS 15.0, *)) {
         UISheetPresentationController *presentation = sheet.sheetPresentationController;
@@ -665,8 +665,17 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 
 #pragma mark - Row actions
 
+- (BOOL)hasCompletedFileForRow:(MVDownloadRow *)row {
+    BOOL completed = row.kind == MVRowKindTask ? row.task.state == MVTaskStateCompleted :
+                                                row.record.state == MVDownloadStateCompleted;
+    return completed && row.path.length && [NSFileManager.defaultManager fileExistsAtPath:row.path];
+}
+
 - (void)shareRow:(MVDownloadRow *)row {
-    if (!row.path.length) return;
+    if (![self hasCompletedFileForRow:row]) {
+        [self alert:[MVLang t:@"Not found"] message:[MVLang t:@"This completed file is no longer available."]];
+        return;
+    }
     UIActivityViewController *share = [[UIActivityViewController alloc]
         initWithActivityItems:@[[NSURL fileURLWithPath:row.path]] applicationActivities:nil];
     share.popoverPresentationController.sourceView = self.view;
@@ -912,7 +921,7 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 - (void)editShare {
     NSMutableArray *urls = [NSMutableArray array];
     [self selectedRowsApply:^(MVDownloadRow *row) {
-        if (row.path.length) [urls addObject:[NSURL fileURLWithPath:row.path]];
+        if ([self hasCompletedFileForRow:row]) [urls addObject:[NSURL fileURLWithPath:row.path]];
     }];
     if (urls.count) {
         UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:urls
@@ -920,6 +929,8 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
         share.popoverPresentationController.sourceView = self.editBar;
         share.popoverPresentationController.sourceRect = self.editBar.bounds;
         [self presentViewController:share animated:YES completion:nil];
+    } else {
+        [self alert:[MVLang t:@"Not found"] message:[MVLang t:@"This completed file is no longer available."]];
     }
 }
 
@@ -986,6 +997,7 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 }
 
 - (void)importLinksFromFile {
+    self.pickingTorrent = NO;
     UIDocumentPickerViewController *picker =
         [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypePlainText, UTTypeText]
                                                                   asCopy:YES];
@@ -995,8 +1007,11 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
 }
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    BOOL torrent = self.pickingTorrent;
+    self.pickingTorrent = NO;
     NSURL *url = urls.firstObject;
     if (!url) return;
+    if (torrent) { [self importTorrentAtURL:url]; return; }
     NSString *text = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
     if (!text.length) {
         [self alert:[MVLang t:@"Could not read the file"] message:nil];
@@ -1008,6 +1023,42 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
         if (trimmed.length) { [self enqueueURLString:trimmed]; added++; }
     }
     [self alert:[MVLang t:@"Imported links"] message:[NSString stringWithFormat:@"%ld", (long)added]];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    self.pickingTorrent = NO;
+}
+
+- (void)importTorrentAtURL:(NSURL *)url {
+    NSString *name = [MVPaths sanitizeFilename:url.lastPathComponent ?: @"torrent"];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL scoped = [url startAccessingSecurityScopedResource];
+        NSString *error = nil;
+        NSString *reference = [MVTorrentImport.shared importFileURL:url error:&error];
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self_ = weakSelf;
+            if (!self_) {
+                if (reference) [MVTorrentImport.shared removeReference:reference];
+                return;
+            }
+            if (!reference) {
+                [self_ alert:[MVLang t:@"Failed"] message:[MVLang t:error ?: @"This torrent file could not be read"]];
+                return;
+            }
+            MVSnifferItem *item = [MVSnifferItem itemWithURL:reference pageURL:nil pageTitle:nil mime:@"application/x-bittorrent"];
+            item.suggestedFilename = name;
+            BOOL added = NO;
+            MVDownloadTask *task = [MVDownloadManager.shared enqueueItem:item added:&added];
+            if (!task) {
+                [MVTorrentImport.shared removeReference:reference];
+                [self_ alert:[MVLang t:@"Failed"] message:[MVLang t:@"Could not open the torrent"]];
+            } else if (!added) {
+                [self_ alert:[MVLang t:@"Already in downloads"] message:nil];
+            }
+        });
+    });
 }
 
 /// The "Add torrent or magnet" sheet: one field plus a Browse button for a
@@ -1022,16 +1073,37 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
         f.semanticContentAttribute = UISemanticContentAttributeForceLeftToRight;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Browse"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        self.pickingTorrent = YES;
         UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
             initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
         picker.delegate = self;
+        picker.allowsMultipleSelection = NO;
         [self presentViewController:picker animated:YES completion:nil];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Add"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self enqueueURLString:alert.textFields.firstObject.text];
+        [self enqueueTorrentString:alert.textFields.firstObject.text];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)enqueueTorrentString:(NSString *)raw {
+    NSString *url = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSURLComponents *parts = [NSURLComponents componentsWithString:url];
+    NSString *scheme = parts.scheme.lowercaseString;
+    BOOL magnet = [url.lowercaseString hasPrefix:@"magnet:"];
+    BOOL http = parts.host.length && ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]);
+    if (!magnet && !http) {
+        [self alert:[MVLang t:@"Failed"] message:[MVLang t:@"Enter a magnet link or an HTTP(S) torrent URL."]];
+        return;
+    }
+    // A torrent endpoint need not end in .torrent. The dedicated torrent
+    // dialog is an explicit request to use the torrent engine for this URL.
+    MVSnifferItem *item = [MVSnifferItem itemWithURL:url pageURL:nil pageTitle:nil mime:@"application/x-bittorrent"];
+    item.kind = MVSniffKindTorrent;
+    BOOL added = NO;
+    [[MVDownloadManager shared] enqueueItem:item added:&added];
+    if (!added) [self alert:[MVLang t:@"Already in downloads"] message:nil];
 }
 
 /// The single door every "add" route goes through: classify the URL with the

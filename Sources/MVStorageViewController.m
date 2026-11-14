@@ -144,14 +144,19 @@
         [self alert:[MVLang t:@"Needed by a download"] message:[MVLang t:@"This file is needed by a saved download. Remove its task first, or leave it in place."]];
         return;
     }
+    NSString *message = [NSString stringWithFormat:@"%@\n\n%@", path.lastPathComponent,
+                         [MVLang t:@"You can restore the file from Manage storage, but its completed download history will be removed. Trash uses space until emptied."]];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Move to Trash?"]
-        message:path.lastPathComponent preferredStyle:UIAlertControllerStyleAlert];
+        message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Move to Trash"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         NSString *error = nil;
         if (![MVTrashStore.shared moveToTrash:path protecting:[MVStorageProtection protectedPaths] error:&error]) {
             [self alert:[MVLang t:@"Failed"] message:[MVLang t:error ?: @"Could not move the file to Trash."]];
-        } else [self startScan];
+        } else {
+            [MVStorageProtection forgetCompletedRecordsAtPath:path];
+            [self startScan];
+        }
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }

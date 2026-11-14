@@ -1,8 +1,24 @@
 #import <Foundation/Foundation.h>
 #import "MVTrashStore.h"
 #import "MVStorageScanner.h"
+#import "MVTaskStore.h"
+#import "MVDownloadStore.h"
 #include <unistd.h>
 #include <stdio.h>
+
+@interface MVTaskStore (StorageTestFixtures)
++ (void)setTestTasks:(NSArray *)tasks;
+@end
+@interface MVDownloadStore (StorageTestFixtures)
++ (void)setTestRecords:(NSArray *)records;
+@end
+// Only the path and state accessors are needed by history cleanup.
+@interface FakeHistoryItem : NSObject
+@property (nonatomic, copy) NSString *path;
+@property (nonatomic) NSInteger state;
+@end
+@implementation FakeHistoryItem
+@end
 
 static int failures = 0;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } } while (0)
@@ -49,7 +65,24 @@ int main(void) {
         CHECK(![store moveToTrash:outside protecting:@[] error:&error]);
         CHECK(![store moveToTrash:linkPath protecting:@[] error:&error]);
         CHECK(![store moveToTrash:work protecting:@[] error:&error]);
+        FakeHistoryItem *completedTask = [FakeHistoryItem new];
+        completedTask.path = a; completedTask.state = MVTaskStateCompleted;
+        FakeHistoryItem *unfinishedTask = [FakeHistoryItem new];
+        unfinishedTask.path = a; unfinishedTask.state = MVTaskStatePaused;
+        FakeHistoryItem *otherTask = [FakeHistoryItem new];
+        otherTask.path = b; otherTask.state = MVTaskStateCompleted;
+        FakeHistoryItem *completedRecord = [FakeHistoryItem new];
+        completedRecord.path = a; completedRecord.state = MVDownloadStateCompleted;
+        FakeHistoryItem *unfinishedRecord = [FakeHistoryItem new];
+        unfinishedRecord.path = a; unfinishedRecord.state = MVDownloadStatePaused;
+        [MVTaskStore setTestTasks:@[completedTask, unfinishedTask, otherTask]];
+        [MVDownloadStore setTestRecords:@[completedRecord, unfinishedRecord]];
         CHECK([store moveToTrash:a protecting:@[] error:&error] && ![fm fileExistsAtPath:a]);
+        [MVStorageProtection forgetCompletedRecordsAtPath:a];
+        CHECK([MVTaskStore.shared.tasks isEqualToArray:@[unfinishedTask, otherTask]]);
+        CHECK([MVDownloadStore.shared.records isEqualToArray:@[unfinishedRecord]]);
+        [MVTaskStore setTestTasks:@[]];
+        [MVDownloadStore setTestRecords:@[]];
         NSArray *entries = store.entries;
         CHECK(entries.count == 1);
         NSString *identifier = entries.firstObject[@"identifier"];

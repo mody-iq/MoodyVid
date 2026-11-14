@@ -7,10 +7,13 @@
 #import "MVSHA1.h"
 #import "MVMagnet.h"
 #import "MVTorrentMetadata.h"
+#import "MVTorrentImport.h"
+#import "MVTorrentPolicy.h"
 #import "MVTorrentStorage.h"
 #import "MVTorrentTracker.h"
 #import "MVPaths.h"
 #include <limits.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 static int failures = 0;
@@ -34,6 +37,49 @@ static MVTorrentMetadata *Metadata(NSArray *files, NSData *contents, NSInteger p
     NSDictionary *info = @{@"name": B(@"root"), @"piece length": @(pieceLength),
                            @"pieces": hashes, @"files": files};
     return [MVTorrentMetadata metadataWithInfoDict:info infoHash:[MVSHA1 digest:B(@"torrent")] trackers:@[] error:nil];
+}
+
+static void testTorrentImport(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    CHECK([fm createDirectoryAtPath:temp withIntermediateDirectories:YES attributes:nil error:nil], "create import fixture directory");
+    NSString *source = [temp stringByAppendingPathComponent:@"source.torrent"];
+    NSString *cached = [temp stringByAppendingPathComponent:@"imports"];
+    MVTorrentImport *store = [[MVTorrentImport alloc] initWithDirectory:cached];
+    NSString *info = @"d6:lengthi16384e4:name8:test.bin12:piece lengthi16384e6:pieces20:01234567890123456789e";
+    NSData *bytes = B([NSString stringWithFormat:@"d8:announce20:http://tracker.test/4:info%@e", info]);
+    CHECK([bytes writeToFile:source atomically:YES], "write selected torrent fixture");
+    NSString *error = nil;
+    NSString *reference = [store importFileURL:[NSURL fileURLWithPath:source] error:&error];
+    CHECK([MVTorrentImport isImportReference:reference], "valid torrent gets an opaque import reference");
+    if (!reference) { [fm removeItemAtPath:temp error:nil]; return; }
+    CHECK([[store dataForReference:reference] isEqualToData:bytes], "import is copied to private storage");
+    CHECK([B(@"changed") writeToFile:source atomically:YES], "change original after import");
+    CHECK([[store dataForReference:reference] isEqualToData:bytes], "private copy survives changes to the original");
+    CHECK(![store importFileURL:[NSURL fileURLWithPath:source] error:&error], "malformed torrent rejected");
+    CHECK(![store dataForReference:@"moodyvid-torrent:../../source"] &&
+          ![MVTorrentImport isImportReference:@"moodyvid-torrent:../../source"], "path traversal reference rejected");
+    NSString *link = [temp stringByAppendingPathComponent:@"link.torrent"];
+    CHECK(symlink(source.fileSystemRepresentation, link.fileSystemRepresentation) == 0, "make selected symlink");
+    CHECK(![store importFileURL:[NSURL fileURLWithPath:link] error:&error], "selected symlink is rejected");
+    NSString *large = [temp stringByAppendingPathComponent:@"large.torrent"];
+    int fd = open(large.fileSystemRepresentation, O_CREAT | O_WRONLY | O_EXCL, 0600);
+    CHECK(fd >= 0 && ftruncate(fd, (off_t)(2 * MV_TORRENT_MAX_METADATA_BYTES + 1)) == 0, "create oversized sparse fixture");
+    if (fd >= 0) close(fd);
+    CHECK(![store importFileURL:[NSURL fileURLWithPath:large] error:&error], "oversized torrent rejected before reading");
+    NSString *identifier = [reference substringFromIndex:[@"moodyvid-torrent:" length]];
+    NSString *payload = [cached stringByAppendingPathComponent:[identifier stringByAppendingPathExtension:@"torrent"]];
+    NSString *temporary = [cached stringByAppendingPathComponent:[identifier stringByAppendingPathExtension:@"tmp"]];
+    CHECK(link(payload.fileSystemRepresentation, temporary.fileSystemRepresentation) == 0, "simulate interrupted atomic import");
+    [store removeReference:reference];
+    CHECK(![fm fileExistsAtPath:payload] && ![fm fileExistsAtPath:temporary] &&
+          [[NSData dataWithContentsOfFile:source] isEqualToData:B(@"changed")],
+          "removing import cleans its interrupted link and leaves original untouched");
+    CHECK(symlink(source.fileSystemRepresentation, payload.fileSystemRepresentation) == 0, "replace cached file with symlink");
+    CHECK(![store dataForReference:reference], "cached symlink is not followed");
+    [store removeReference:reference];
+    CHECK([[NSData dataWithContentsOfFile:source] isEqualToData:B(@"changed")], "cleanup never follows cached symlink");
+    [fm removeItemAtPath:temp error:nil];
 }
 
 static void testStorage(void) {
@@ -287,6 +333,7 @@ int main(void) {
         CHECK(twoPieces == 3, "larger metadata piece count");
 
         testStorage();
+        testTorrentImport();
         printf(failures ? "\n%d FAILURE(S)\n" : "ALL TORRENT CORE TESTS PASSED\n", failures);
     }
     return failures ? 1 : 0;

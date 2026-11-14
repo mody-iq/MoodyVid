@@ -1029,9 +1029,8 @@ static id gParkedObserver = nil;
 - (void)routeMagnetLink:(NSString *)magnet {
     MVSnifferItem *item = [MVSnifferItem itemWithURL:magnet pageURL:self.activeTab.url
                                            pageTitle:self.activeTab.title mime:nil];
-    // The magnet is queued like any other torrent. It fails asynchronously with a
-    // localised reason (the BEP 9 metadata exchange is not built yet), so the
-    // downloads row carries the explanation; no alert is needed here.
+    // Tracker-backed v1 magnets can resolve metadata through BEP 9. Unsupported
+    // magnets fail asynchronously with a reason on their download row.
     BOOL added = NO;
     [[MVDownloadManager shared] enqueueItem:item added:&added];
     if (added) {
