@@ -59,9 +59,9 @@ static void testTorrentImport(void) {
     CHECK(![store importFileURL:[NSURL fileURLWithPath:source] error:&error], "malformed torrent rejected");
     CHECK(![store dataForReference:@"moodyvid-torrent:../../source"] &&
           ![MVTorrentImport isImportReference:@"moodyvid-torrent:../../source"], "path traversal reference rejected");
-    NSString *link = [temp stringByAppendingPathComponent:@"link.torrent"];
-    CHECK(symlink(source.fileSystemRepresentation, link.fileSystemRepresentation) == 0, "make selected symlink");
-    CHECK(![store importFileURL:[NSURL fileURLWithPath:link] error:&error], "selected symlink is rejected");
+    NSString *linkPath = [temp stringByAppendingPathComponent:@"link.torrent"];
+    CHECK(symlink(source.fileSystemRepresentation, linkPath.fileSystemRepresentation) == 0, "make selected symlink");
+    CHECK(![store importFileURL:[NSURL fileURLWithPath:linkPath] error:&error], "selected symlink is rejected");
     NSString *large = [temp stringByAppendingPathComponent:@"large.torrent"];
     int fd = open(large.fileSystemRepresentation, O_CREAT | O_WRONLY | O_EXCL, 0600);
     CHECK(fd >= 0 && ftruncate(fd, (off_t)(2 * MV_TORRENT_MAX_METADATA_BYTES + 1)) == 0, "create oversized sparse fixture");

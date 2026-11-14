@@ -51,6 +51,7 @@ python3 -m pip install Pillow
 python3 -m unittest discover -s tests -v
 bash scripts/http-policy-tests.sh  # Linux أو macOS، يحتاج مترجم C
 bash scripts/transfer-policy-tests.sh  # استعادة الطابور والنطاقات والسرعة والتورنت
+node tests/video_button_test.js     # محاكاة DOM لزر الفيديو
 python3 scripts/check-strings.py
 ```
 
@@ -66,6 +67,8 @@ python3 scripts/check-strings.py
 bash scripts/privacy-tests.sh  # الكوكيز والتحويلات والسجلات؛ خادم محلي مؤقت
 bash scripts/torrent-tests.sh  # بيانات التورنت والتخزين وتراسل النظير
 bash scripts/queue-tests.sh    # استعادة السجلات المحفوظة
+bash scripts/player-tests.sh   # مواضع التشغيل والترجمة المحلية
+bash scripts/storage-tests.sh  # فحص الملفات والسلة في مجلد مؤقت
 bash scripts/transfer-tests.sh # قوائم HLS/DASH ونقل HTTP عبر خادم محلي
 ```
 
@@ -84,13 +87,31 @@ bash scripts/transfer-tests.sh # قوائم HLS/DASH ونقل HTTP عبر خاد
   المشتركة أو غير الآمنة احتياطيًا؛ قد يبقى بعضها للتنظيف اليدوي. لا يمنع
   ذلك جميع حالات تغيير نظام الملفات بالتزامن، واختيار اسم الملف النهائي
   غير ذري عند حدوث تعارض متزامن.
-- خيار Wi-Fi يمنع بدء مهام جديدة على شبكة غير مناسبة؛ لا يربط المقبس بشبكة
-  بعينها ولا يوقف نقلًا بدأ بالفعل. حد السرعة تقريبي لكل تنزيل مباشر، وليس
-  حدًا إجماليًا للتطبيق؛ تفعيله أثناء النقل يتطلب إعادة تشغيل المهمة.
+- عند تفعيل Wi-Fi ينتظر الطابور شبكة مناسبة ويحاول إيقاف المهام النشطة ثم
+  إعادتها للطابور عند الاتصال. تمنع جلسات HTTP الأصلية البيانات الخلوية،
+  وتُربط مقابس التورنت بواجهة Wi-Fi المرصودة. إيقاف yt-dlp تعاوني وقد تنتقل
+  بيانات قبل توقفه؛ لا يشمل الخيار التصفح أو جميع طلبات التطبيق، وسلوك تبديل
+  الشبكات لم يُختبر على جهاز. حد السرعة تقريبي لكل تنزيل مباشر، وليس حدًا
+  إجماليًا للتطبيق؛ تفعيله أثناء النقل يتطلب إعادة تشغيل المهمة.
+- لا توجد جلسة تنزيل خلفية يديرها iOS حاليًا؛ يحاول التطبيق الاستمرار بوقت
+  خلفية مؤقت وصوت صامت، ولا يضمن التنزيل بعد إنهاء التطبيق أو تعليقه من النظام.
 - يدعم التورنت بيانات v1 وروابط magnet عبر متتبّعات HTTP(S) وBEP 9، لا DHT أو
   UDP أو v2. تُرفض البيانات التي تتجاوز 16 MiB للـ metadata أو القطعة، أو
   100,000 قطعة أو 4,096 ملفًا. يحدّ المحرك مساحة مخازن القطع المفتوحة لكل
-  مهمة؛ توافق المواقع والتورنت على الجهاز لا تثبته الاختبارات المحلية.
+  مهمة؛ توافق المواقع والتورنت على الجهاز لا تثبته الاختبارات المحلية. عند
+  استيراد ملف تورنت محلي تُحفظ نسخة خاصة لاستئناف المهمة، ولا يُحذف الأصل.
+
+## 🧪 إضافات الفرع التجريبي
+
+- زر الفيديو يفتح كشف الروابط ولا يبدأ التنزيل تلقائيًا؛ قد لا يظهر في كل موقع.
+  فحص الجودة والقوائم عبر yt-dlp لا يستورد كوكيز المتصفح. تعرض القوائم حتى
+  100 رابط فريد وتضيف المحدد فقط.
+- يحفظ المشغّل موضع الملفات المحلية والسرعة، ويستورد SRT/WebVTT. لم تُختبر
+  الواجهة أو المواقع أو تشغيل الترجمات على آيفون بعد.
+- يفحص مدير المساحة حتى 5,000 ملف وبميزانية بصمة 4 GiB، ولا يحذف تلقائيًا.
+  يمكن نقل ملف عادي إلى السلة واستعادته دون الكتابة فوق ملف موجود، لكن سجل
+  تنزيله المكتمل يُزال ولا يعود مع الاستعادة. حذف المجلدات وبعض مسارات الحذف
+  الأخرى نهائي، والسلة لا تُفرغ تلقائيًا وليست خزنة مشفّرة.
 
 ## 🔐 الخصوصية
 
@@ -177,6 +198,7 @@ python3 -m pip install Pillow
 python3 -m unittest discover -s tests -v
 bash scripts/http-policy-tests.sh  # Linux or macOS; requires a C compiler
 bash scripts/transfer-policy-tests.sh  # recovery, ranges, throttle, torrent limits
+node tests/video_button_test.js     # simulated DOM for the video shortcut
 python3 scripts/check-strings.py
 ```
 
@@ -192,6 +214,8 @@ Foundation tests need macOS and clang, but no device:
 bash scripts/privacy-tests.sh  # cookies, redirects, logs; local temporary server
 bash scripts/torrent-tests.sh  # torrent metadata, storage and peer protocol
 bash scripts/queue-tests.sh   # persisted queue recovery
+bash scripts/player-tests.sh  # playback history and subtitle models
+bash scripts/storage-tests.sh # scanner and trash in a disposable directory
 bash scripts/transfer-tests.sh # HLS/DASH manifests and local HTTP transfers
 ```
 
@@ -211,14 +235,36 @@ downloads, and clearing data while a download is active on an iPhone as well.
   shared or unsafe paths are conservatively left behind. This does not prevent
   every concurrent filesystem replacement, and final-name selection is not
   atomic when multiple publishers choose the same name simultaneously.
-- Wi-Fi-only controls admission of new tasks; it does not bind sockets or stop
-  transfers when the connection changes. The speed limit is an approximate
-  per-direct-transfer limit, not a global cap, and enabling it mid-transfer
-  requires restarting that task.
+- Wi-Fi-only holds new tasks until a suitable path is observed and attempts to
+  pause/requeue active work on a path change. Native HTTP sessions disallow
+  cellular and torrent sockets bind to the observed Wi-Fi interface. Python
+  stops cooperatively, so some bytes may still transfer before it pauses. This
+  does not restrict browsing or all app requests, and transitions need device
+  testing. The speed limit is approximate per direct transfer, not global, and
+  enabling it mid-transfer requires restarting that task.
+- There is currently no iOS-managed background download session. The app uses
+  limited background time and silent audio to try to keep work running; iOS may
+  suspend it, and a force-quit or suspension does not guarantee completion.
 - The torrent engine supports v1 metadata and tracker-backed BEP 9 magnets, not
   DHT, UDP trackers or v2. Metadata and individual pieces are capped at 16 MiB,
   with at most 100,000 pieces and 4,096 files; open piece buffers are also
   bounded per task. Local tests do not establish on-device swarm compatibility.
+  A locally imported torrent is copied privately so the task can resume; the
+  original selected file is never deleted.
+
+## 🧪 Experimental branch features
+
+- The on-video shortcut opens link detection rather than downloading immediately;
+  it may not appear on every site. yt-dlp quality/playlist inspection does not
+  import browser cookies. Playlist previews contain at most 100 unique links and
+  queue only the chosen entries.
+- The player saves local-file position and rate and imports SRT/WebVTT. The UI,
+  real sites and subtitle playback have not yet been verified on an iPhone.
+- Storage analysis scans up to 5,000 files with a 4 GiB hashing budget and never
+  deletes automatically. A regular file can be moved to Trash and restored
+  without overwriting an existing file; its completed download history is removed
+  and is not restored. Folder deletion and some other deletion paths are
+  permanent. Trash is not emptied automatically and is not an encrypted vault.
 
 ## 🔐 Privacy
 
