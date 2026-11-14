@@ -11,6 +11,9 @@
 #import "MVFileCardCell.h"
 #import "MVEmptyStateView.h"
 #import "MVThumbnailCache.h"
+#import "MVStorageViewController.h"
+#import "MVTrashStore.h"
+#import "MVFileProtection.h"
 
 typedef NS_ENUM(NSInteger, MVSortMode) {
     MVSortModeName = 0,
@@ -92,6 +95,7 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
 // (previous / 15s back / play-pause / 15s forward / next) plus a scrubber.
 @property (nonatomic, strong) UIView *playerCard;
 @property (nonatomic, strong) MVVideoSurfaceView *videoSurface;
+@property (nonatomic, strong) UILabel *inlineCaptionLabel;
 @property (nonatomic, strong) UILabel *nowTitleLabel;
 @property (nonatomic, strong) UIButton *prevButton;
 @property (nonatomic, strong) UIButton *backButton;
@@ -120,7 +124,11 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
     UIBarButtonItem *sort = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
                                                             style:UIBarButtonItemStylePlain
                                                            target:self action:@selector(showSortMenu)];
-    self.navigationItem.rightBarButtonItems = @[newFolder, sort];
+    UIBarButtonItem *storage = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"externaldrive"]
+                                                               style:UIBarButtonItemStylePlain
+                                                              target:self action:@selector(manageStorage)];
+    storage.accessibilityLabel = [MVLang t:@"Manage storage"];
+    self.navigationItem.rightBarButtonItems = @[newFolder, sort, storage];
 
     [self buildStorageCard];
 
@@ -199,7 +207,7 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
     self.playerCard.hidden = YES;
     [self sizeHeaderToFit];
 
-    for (NSString *name in @[MVDownloadStoreDidChangeNotification, MVLangDidChangeNotification, MVThemeDidChangeNotification]) {
+    for (NSString *name in @[MVDownloadStoreDidChangeNotification, MVLangDidChangeNotification, MVThemeDidChangeNotification, MVTrashDidChangeNotification]) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:name object:nil];
     }
     // Closing the mini bar stops playback; the inline card must not stay open
@@ -224,6 +232,8 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
         [MVPlayerCenter shared].inlinePlayerActive = YES;
     }
 }
+
+- (void)manageStorage { [MVStorageViewController presentFrom:self]; }
 
 - (NSString *)currentDirectory { return self.rootOverride ?: [MVPaths downloads]; }
 
@@ -388,6 +398,24 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
     self.videoSurface.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
     [self.playerCard addSubview:self.videoSurface];
 
+    self.inlineCaptionLabel = [UILabel new];
+    self.inlineCaptionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.inlineCaptionLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    self.inlineCaptionLabel.textColor = UIColor.whiteColor;
+    self.inlineCaptionLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    self.inlineCaptionLabel.textAlignment = NSTextAlignmentCenter;
+    self.inlineCaptionLabel.numberOfLines = 3;
+    self.inlineCaptionLabel.layer.cornerRadius = 4;
+    self.inlineCaptionLabel.layer.masksToBounds = YES;
+    self.inlineCaptionLabel.hidden = YES;
+    [self.videoSurface addSubview:self.inlineCaptionLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.inlineCaptionLabel.centerXAnchor constraintEqualToAnchor:self.videoSurface.centerXAnchor],
+        [self.inlineCaptionLabel.bottomAnchor constraintEqualToAnchor:self.videoSurface.bottomAnchor constant:-10],
+        [self.inlineCaptionLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.videoSurface.leadingAnchor constant:12],
+        [self.inlineCaptionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.videoSurface.trailingAnchor constant:-12],
+    ]];
+
     self.nowTitleLabel = [UILabel new];
     self.nowTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.nowTitleLabel.numberOfLines = 2;
@@ -532,6 +560,8 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
 - (void)cardStateChanged {
     if (!self.cardOpen) return;
     MVPlayerCenter *center = MVPlayerCenter.shared;
+    self.inlineCaptionLabel.text = center.currentSubtitle;
+    self.inlineCaptionLabel.hidden = !self.inlineCaptionLabel.text.length;
     self.nowTitleLabel.text = center.currentTitle.length ? center.currentTitle : [MVLang t:@"Now playing"];
     UIImage *img = center.isPlaying ? [self playPauseImageForState:YES] : [self playPauseImageForState:NO];
     [self.playPauseButton setImage:img forState:UIControlStateNormal];
@@ -968,20 +998,10 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSString *path = [self visibleEntries][indexPath.row];
-    NSString *name = path.lastPathComponent;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                      title:[MVLang t:@"Delete"]
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Delete this file?"]
-                                                                      message:[MVLang t:@"This cannot be undone."]
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-        [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a2) {
-            [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-            [self forgetRecordAtPath:path];
-            [self refresh];
-        }]];
-        [self presentViewController:alert animated:YES completion:nil];
+        [self confirmDeletePath:path];
         done(YES);
     }];
     del.backgroundColor = [MVTheme danger];
@@ -1207,13 +1227,34 @@ static BOOL MVExtensionIsAudio(NSString *ext) {
 }
 
 - (void)confirmDeletePath:(NSString *)path {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Delete this file?"]
-                                                                  message:[MVLang t:@"This cannot be undone."]
-                                                           preferredStyle:UIAlertControllerStyleAlert];
+    BOOL isDirectory = NO;
+    [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
+    NSString *title = isDirectory ? [MVLang t:@"Delete this folder?"] : [MVLang t:@"Move to Trash?"];
+    NSString *message = isDirectory ? [MVLang t:@"Folders are deleted permanently and cannot be restored."]
+                                    : [MVLang t:@"You can restore this file from Manage storage. Trash uses space until emptied."];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-        [self forgetRecordAtPath:path];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:(isDirectory ? @"Delete" : @"Move to Trash")]
+        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        NSArray *protected = [MVStorageProtection protectedPaths];
+        if (isDirectory) {
+            if ([MVFileProtection path:path conflictsWithPaths:protected]) {
+                [self alert:[MVLang t:@"Needed by a download"] message:[MVLang t:@"This file is needed by a saved download. Remove its task first, or leave it in place."]];
+                return;
+            }
+            NSError *error = nil;
+            if (![NSFileManager.defaultManager removeItemAtPath:path error:&error]) {
+                [self alert:[MVLang t:@"Failed"] message:error.localizedDescription];
+                return;
+            }
+            [self forgetRecordAtPath:path];
+        } else {
+            NSString *error = nil;
+            if (![MVTrashStore.shared moveToTrash:path protecting:protected error:&error]) {
+                [self alert:[MVLang t:@"Failed"] message:[MVLang t:error ?: @"Could not move the file to Trash."]];
+                return;
+            }
+        }
         [self refresh];
     }]];
     [self presentViewController:alert animated:YES completion:nil];

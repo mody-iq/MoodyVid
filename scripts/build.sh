@@ -143,6 +143,9 @@ xcrun --sdk iphoneos clang \
 
 echo "== Bundle"
 cp Resources/Info.plist "$APP_DIR/Info.plist"
+# The browser's isolated on-video shortcut is optional at runtime, but the
+# packaged build must include its JavaScript source.
+cp Resources/video-button.js "$APP_DIR/video-button.js"
 
 # The icon is drawn, not committed, so the repository carries no binary and the
 # icon stays sharp at any size. 1024 is the App Store size; iOS downsamples it.

@@ -35,7 +35,7 @@ static int failures = 0;
 @property (nonatomic) NSUInteger keyRequests;
 @end
 @implementation TestHLSDownloader
-- (NSData *)syncGet:(NSString *)url headers:(NSDictionary *)headers error:(NSError **)error {
+- (NSData *)syncGet:(NSString *)url headers:(NSDictionary *)headers error:(NSError **)error group:(id)group {
     self.keyRequests++;
     return [NSData dataWithBytes:"0123456789abcdef" length:16];
 }

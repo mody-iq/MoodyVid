@@ -46,6 +46,9 @@ jobs:
       - name: Run portable transfer and torrent policy tests
         run: bash scripts/transfer-policy-tests.sh
 
+      - name: Test the browser video button
+        run: node tests/video_button_test.js
+
       - name: Check translations
         run: python3 scripts/check-strings.py
 
@@ -82,6 +85,12 @@ jobs:
 
       - name: Run native privacy tests
         run: bash scripts/ci-checked.sh bash scripts/privacy-tests.sh
+
+      - name: Run player model tests
+        run: bash scripts/ci-checked.sh bash scripts/player-tests.sh
+
+      - name: Run storage safety tests
+        run: bash scripts/ci-checked.sh bash scripts/storage-tests.sh
 
       - name: Run native transfer tests
         if: ${{ !cancelled() }}

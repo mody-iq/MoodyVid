@@ -11,10 +11,13 @@ fi
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 SOURCES=(tests/transfer_test_stubs.m Sources/MVDownloadTask.m Sources/MVFileProtection.m Sources/MVFastDownloader.m
-         Sources/MVHLSDownloader.m Sources/MVMPDDownloader.m Sources/MVByteRange.c Sources/MVThrottle.c)
+         Sources/MVHLSDownloader.m Sources/MVMPDDownloader.m Sources/MVRequestGroup.m Sources/MVByteRange.c Sources/MVThrottle.c)
 for test in stream_manifest_test transfer_integration; do
   clang -fobjc-arc -fblocks -I Sources "tests/$test.m" "${SOURCES[@]}" \
     -framework Foundation -framework AVFoundation -o "$OUT/$test"
 done
+clang -fobjc-arc -fblocks -Wall -Werror -I Sources tests/request_group_test.m Sources/MVRequestGroup.m \
+  -framework Foundation -o "$OUT/request_group_test"
+"$OUT/request_group_test"
 "$OUT/stream_manifest_test"
 python3 tests/transfer_server.py "$OUT/transfer_integration"

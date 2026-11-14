@@ -7,6 +7,8 @@
 #import "MVBencode.h"
 #import "MVSHA1.h"
 #import "MVPaths.h"
+#import "MVRequestGroup.h"
+#import "MVNetworkPolicy.h"
 #import "MVTaskStore.h"
 #import "MVDownloadStore.h"
 #import <objc/runtime.h>
@@ -33,6 +35,7 @@ static int failures = 0;
 // These objects are private to the engine; expose only the seams exercised here.
 @interface MVTorrentJob : NSObject
 @property (nonatomic, strong) MVDownloadTask *task;
+@property (nonatomic, strong) MVRequestGroup *requests;
 @property (nonatomic, strong) MVTorrentMetadata *metadata;
 @property (nonatomic, strong) NSMutableArray *peers;
 @property (nonatomic, strong) NSMutableArray *pieces;
@@ -81,6 +84,15 @@ static int failures = 0;
 - (NSDictionary *)extendedHandshake { return @{@"m": @{@"ut_metadata": @1}}; }
 - (void)sendMetadataRequestForPiece:(NSInteger)piece { [self.requests addObject:@(piece)]; }
 - (void)stop { self.stopped = YES; }
+@end
+
+@interface FakeRequest : NSObject
+@property (nonatomic) BOOL started;
+@property (nonatomic) BOOL stopped;
+@end
+@implementation FakeRequest
+- (void)resume { self.started = YES; }
+- (void)cancel { self.stopped = YES; }
 @end
 
 static NSData *Message(NSDictionary *header, NSData *body) {
@@ -246,8 +258,31 @@ int main(void) {
         CHECK(next.index == 1 && [[stranded valueForKey:@"receivedBegins"] count] == 0 &&
               ![stranded valueForKey:@"buffer"] && [job.openPieces containsIndex:1],
               "stranded partial data is discarded to make forward progress");
+        // A policy pause goes through the ordinary pause API: all peer sockets
+        // and outstanding tracker/metadata requests must stop together.
+        job = Job(engine, @"network-pause", zeroHash);
+        FakePeer *livePeer = [FakePeer new];
+        AddPeer(job, livePeer);
+        FakeRequest *request = [FakeRequest new];
+        CHECK([job.requests startTask:(id)request], "tracker request started");
+        [engine pauseTask:job.task];
+        dispatch_sync((dispatch_queue_t)[engine valueForKey:@"queue"], ^{});
+        CHECK(livePeer.stopped && request.stopped && ![job.requests startTask:(id)[FakeRequest new]],
+              "pausing a torrent stops peers and network requests, including late requests");
+
+        // Without a known Wi-Fi interface, do not fall back to cellular sockets.
+        [MVNetworkPolicy.shared setValue:@YES forKey:@"wifiOnly"];
+        [MVNetworkPolicy.shared setValue:@0 forKey:@"wifiInterfaceIndex"];
+        __block BOOL rejected = NO;
+        MVDownloadTask *networkTask = [MVDownloadTask new];
+        networkTask.identifier = @"wifi-unknown";
+        [engine startTask:networkTask progress:nil finished:nil failed:^(MVDownloadTask *t, NSString *error) {
+            rejected = error.length > 0;
+        }];
+        CHECK(rejected, "unknown Wi-Fi interface fails closed");
+        [MVNetworkPolicy.shared setValue:@NO forKey:@"wifiOnly"];
         TestTorrentCleanup(engine);
-        if (!failures) puts("torrent metadata, scheduling and cleanup ownership: OK");
+        if (!failures) puts("torrent metadata, scheduling, network stop and cleanup ownership: OK");
     }
     return failures ? 1 : 0;
 }

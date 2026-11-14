@@ -4,6 +4,7 @@
 #import "MVHLSDownloader.h"
 #import "MVMPDDownloader.h"
 #import "MVFileProtection.h"
+#import "MVRequestGroup.h"
 #import "MVTaskStore.h"
 #import "MVDownloadStore.h"
 #include <stdio.h>
@@ -21,9 +22,11 @@ static int failures = 0;
 
 @interface MVHLSDownloader (TestNetworking)
 - (NSData *)syncGet:(NSString *)url headers:(NSDictionary *)headers error:(NSError **)error;
+- (NSData *)syncGet:(NSString *)url headers:(NSDictionary *)headers error:(NSError **)error group:(MVRequestGroup *)group;
 @end
 @interface MVMPDDownloader (TestNetworking)
 - (NSData *)syncGet:(NSString *)url headers:(NSDictionary *)headers error:(NSError **)error;
+- (NSData *)syncGet:(NSString *)url headers:(NSDictionary *)headers error:(NSError **)error group:(MVRequestGroup *)group;
 @end
 
 static NSData *expectedPayload(void) {
@@ -104,6 +107,24 @@ static void testStreams(NSString *base) {
         error = nil;
         data = [engine syncGet:[base stringByAppendingString:@"/stream-unsolicited"] headers:@{} error:&error];
         CHECK(!data && error, "stream rejects unsolicited partial response");
+
+        // Exercise the real HLS/DASH URL task rather than only the group model:
+        // an active request is cancelled, then a racing replacement cannot start.
+        MVRequestGroup *group = [MVRequestGroup new];
+        dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+        __block NSData *received = nil;
+        __block NSError *cancelError = nil;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            received = [engine syncGet:[base stringByAppendingString:@"/slow"] headers:@{} error:&cancelError group:group];
+            dispatch_semaphore_signal(finished);
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
+                       dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{ [group cancel]; });
+        long timeout = dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        CHECK(timeout == 0 && !received && cancelError, "paused stream cancels an in-flight request");
+        error = nil;
+        data = [engine syncGet:[base stringByAppendingString:@"/stream"] headers:@{} error:&error group:group];
+        CHECK(!data && error.code == NSURLErrorCancelled, "paused stream cannot start another request");
     }
 }
 

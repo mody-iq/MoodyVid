@@ -219,6 +219,9 @@ typedef NS_ENUM(NSInteger, MVSegmentState) {
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
         config.timeoutIntervalForRequest = 60;
         config.timeoutIntervalForResource = 24 * 3600;
+        // A per-session restriction protects even the brief interval before
+        // the default-path monitor reports a switch away from Wi-Fi.
+        config.allowsCellularAccess = ![NSUserDefaults.standardUserDefaults boolForKey:@"MVWifiOnly"];
         config.HTTPShouldSetCookies = NO;
         config.HTTPCookieStorage = nil;
         config.URLCredentialStorage = nil;
@@ -438,6 +441,9 @@ typedef NS_ENUM(NSInteger, MVSegmentState) {
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
         config.timeoutIntervalForRequest = 60;
         config.timeoutIntervalForResource = 24 * 3600;
+        // A per-session restriction protects even the brief interval before
+        // the default-path monitor reports a switch away from Wi-Fi.
+        config.allowsCellularAccess = ![NSUserDefaults.standardUserDefaults boolForKey:@"MVWifiOnly"];
         config.HTTPShouldSetCookies = NO;
         config.HTTPCookieStorage = nil;
         config.URLCredentialStorage = nil;

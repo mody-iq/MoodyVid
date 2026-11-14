@@ -13,6 +13,7 @@
 #import "MVSnifferItem.h"
 #import "MVSnifferScript.h"
 #import "MVSnifferSheet.h"
+#import "MVPlaylistViewController.h"
 #import "MVSnifferStore.h"
 #import "MVTabsViewController.h"
 #import "MVLog.h"
@@ -20,6 +21,7 @@
 #import <objc/runtime.h>
 
 static NSString *const kSnifferHandler = @"moodyvidSniff";
+static NSString *const kVideoButtonHandler = @"moodyvidVideoButton";
 /// Eight tabs is what the switcher grid stays readable with on a phone.
 static const NSUInteger kMaxTabs = 8;
 
@@ -439,6 +441,23 @@ static id gParkedObserver = nil;
                                                     injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                                  forMainFrameOnly:NO];
     [ucc addUserScript:script];
+
+    // Keep the on-video button in a separate content world. The site can see the
+    // DOM element, but cannot call its private native message handler directly.
+    NSString *buttonPath = [NSBundle.mainBundle pathForResource:@"video-button" ofType:@"js"];
+    NSString *buttonScript = buttonPath ? [NSString stringWithContentsOfFile:buttonPath encoding:NSUTF8StringEncoding error:NULL] : nil;
+    if (buttonScript.length) {
+        NSData *encoded = [NSJSONSerialization dataWithJSONObject:@[[MVLang t:@"Download this video"]] options:0 error:NULL];
+        NSString *json = encoded ? [[NSString alloc] initWithData:encoded encoding:NSUTF8StringEncoding] : nil;
+        NSString *label = json.length >= 2 ? [json substringWithRange:NSMakeRange(1, json.length - 2)] : @"\"Download\"";
+        buttonScript = [buttonScript stringByReplacingOccurrencesOfString:@"__MV_VIDEO_BUTTON_LABEL__" withString:label];
+        WKContentWorld *world = [WKContentWorld worldWithName:@"MoodyVidVideoButton"];
+        [ucc addScriptMessageHandler:[MVWeakScriptHandler handlerWithTarget:self] contentWorld:world name:kVideoButtonHandler];
+        WKUserScript *button = [[WKUserScript alloc] initWithSource:buttonScript
+                                                     injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                  forMainFrameOnly:NO inContentWorld:world];
+        [ucc addUserScript:button];
+    }
     config.userContentController = ucc;
 
     // The ad blocker compiles asynchronously; installing it when ready is enough.
@@ -840,6 +859,18 @@ static id gParkedObserver = nil;
 #pragma mark - Sniffer
 
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+    if ([message.name isEqualToString:kVideoButtonHandler]) {
+        // This shortcut only opens the existing choice sheet; it never queues a
+        // download itself. Ignore events from parked/inactive tabs or while a
+        // different controller is already being presented.
+        NSDictionary *buttonBody = [message.body isKindOfClass:NSDictionary.class] ? message.body : nil;
+        if ([buttonBody[@"type"] isEqual:@"videoButton"] && message.webView == self.activeTab.webView &&
+            self.view.window && !self.showingHome && !self.presentedViewController &&
+            !self.navigationController.presentedViewController) {
+            [self showSnifferSheet];
+        }
+        return;
+    }
     if (![message.name isEqualToString:kSnifferHandler]) return;
     NSDictionary *body = [message.body isKindOfClass:NSDictionary.class] ? message.body : nil;
     if (!body) return;
@@ -1071,8 +1102,16 @@ static id gParkedObserver = nil;
                                       identifier:nil handler:^(UIAction *a) {
         [weakSelf.activeTab.webView reload];
     }];
+    UIAction *playlist = [UIAction actionWithTitle:[MVLang t:@"Download playlist"]
+                                             image:[UIImage systemImageNamed:@"list.bullet.rectangle"]
+                                        identifier:nil handler:^(UIAction *a) {
+        typeof(self) self_ = weakSelf;
+        NSString *url = self_.activeTab.webView.URL.absoluteString ?: self_.activeTab.url;
+        if (url.length) [MVPlaylistViewController presentFrom:self_ url:url];
+    }];
+    if (self.showingHome || !tab.url.length) playlist.attributes = UIMenuElementAttributesDisabled;
 
-    return [UIMenu menuWithTitle:@"" children:@[bookmark, paste, reload, desktop, find, share]];
+    return [UIMenu menuWithTitle:@"" children:@[bookmark, paste, reload, desktop, find, playlist, share]];
 }
 
 - (void)toggleDesktopMode {

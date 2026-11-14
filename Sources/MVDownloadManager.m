@@ -24,6 +24,9 @@ static const NSUInteger kDefaultConcurrent = 3;
     UIBackgroundTaskIdentifier _backgroundTask;
     BOOL _awake;
     NSMutableDictionary<NSString *, NSString *> *_runTokens;
+    BOOL _holdingForPolicy;
+    BOOL _lastWifiOnly;
+    unsigned int _lastWifiInterfaceIndex;
 }
 
 + (instancetype)shared {
@@ -50,9 +53,11 @@ static const NSUInteger kDefaultConcurrent = 3;
 
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(pump)
                                                    name:MVTaskStoreDidChangeNotification object:nil];
-        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(pump)
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(networkPolicyChanged)
                                                    name:MVNetworkPolicyDidChangeNotification object:nil];
-        (void)MVNetworkPolicy.shared; // start observing the default path
+        MVNetworkPolicy *policy = MVNetworkPolicy.shared; // start observing the default path
+        _lastWifiOnly = policy.wifiOnly;
+        _lastWifiInterfaceIndex = policy.wifiInterfaceIndex;
     }
     return self;
 }
@@ -259,9 +264,35 @@ static const NSUInteger kDefaultConcurrent = 3;
     return count;
 }
 
+/// Stop existing native engines as soon as the observed path becomes forbidden.
+/// A policy hold remains Queued, so it resumes on Wi-Fi; a user pause remains
+/// Paused and is never automatically undone. Callbacks from the old run are
+/// invalidated before an engine is stopped.
+- (void)networkPolicyChanged {
+    MVNetworkPolicy *policy = MVNetworkPolicy.shared;
+    BOOL restrictionChanged = policy.wifiOnly &&
+        (!_lastWifiOnly || _lastWifiInterfaceIndex != policy.wifiInterfaceIndex);
+    _lastWifiOnly = policy.wifiOnly;
+    _lastWifiInterfaceIndex = policy.wifiInterfaceIndex;
+    if (!policy.allowsNewDownloads || restrictionChanged) {
+        _holdingForPolicy = YES;
+        for (MVDownloadTask *task in [MVTaskStore.shared.tasks copy]) {
+            if (task.state != MVTaskStateRunning) continue;
+            [self pauseTask:task];
+            if (task.state == MVTaskStatePaused) {
+                task.state = MVTaskStateQueued;
+                task.phase = [MVLang t:@"Waiting for Wi-Fi"];
+                [MVTaskStore.shared update:task];
+            }
+        }
+        _holdingForPolicy = NO;
+    }
+    [self pump];
+}
+
 /// Called on the main queue; a network change wakes a queue held for Wi-Fi.
 - (void)pump {
-    if (!MVNetworkPolicy.shared.allowsNewDownloads) {
+    if (_holdingForPolicy || !MVNetworkPolicy.shared.allowsNewDownloads) {
         [self updateBackgroundTask];
         return;
     }
@@ -429,6 +460,7 @@ static const NSUInteger kDefaultConcurrent = 3;
         task.state = MVTaskStatePaused;
         task.speed = 0;
         task.eta = 0;
+        task.phase = nil;
         [MVTaskStore.shared update:task];
     }
     [self updateBackgroundTask];

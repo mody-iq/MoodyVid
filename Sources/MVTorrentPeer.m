@@ -162,6 +162,17 @@ static const char kProtocol[] = "BitTorrent protocol";
         @synchronized (self) { if (_stopping) break; }
         fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
         if (fd < 0) continue;
+        if (self.boundInterfaceIndex) {
+            unsigned int index = self.boundInterfaceIndex;
+            int level = candidate->ai_family == AF_INET6 ? IPPROTO_IPV6 : IPPROTO_IP;
+            int option = candidate->ai_family == AF_INET6 ? IPV6_BOUND_IF : IP_BOUND_IF;
+            if ((candidate->ai_family != AF_INET && candidate->ai_family != AF_INET6) ||
+                setsockopt(fd, level, option, &index, sizeof(index)) != 0) {
+                close(fd);
+                fd = -1;
+                continue; // fail closed, never fall back to another interface
+            }
+        }
         // Short socket timeouts so a dead peer is noticed quickly: the read loop
         // wakes on these and the engine's idle/block timeouts drop the peer.
         struct timeval sendTimeout = {.tv_sec = 15, .tv_usec = 0};

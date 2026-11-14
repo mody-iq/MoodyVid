@@ -78,6 +78,16 @@ FOUNDATION_EXPORT NSNotificationName const MVPlayerDidStopNotification;
 @property (nonatomic, readonly) double duration;
 - (void)seekToSeconds:(double)seconds;
 
+/// Preferred playback speed; supported values are 0.5, 0.75, 1, 1.25, 1.5 and 2.
+@property (nonatomic) float playbackRate;
+
+/// A local SRT or WebVTT file applies to the current media item. Local files
+/// remember a private copy; stream captions are temporary. Import reads at most
+/// 5 MiB; playback never executes subtitle markup as HTML.
+- (void)loadSubtitleAtURL:(NSURL *)url completion:(void (^)(NSString *_Nullable error))completion;
+- (void)clearSubtitle;
+@property (nonatomic, readonly) NSString *currentSubtitle;
+
 @property (nonatomic, readonly, getter=isPlaying) BOOL playing;
 @property (nonatomic, readonly, nullable) AVPlayer *player;
 @property (nonatomic, readonly, nullable) NSString *currentTitle;

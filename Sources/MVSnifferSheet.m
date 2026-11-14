@@ -3,26 +3,27 @@
 #import "MVLang.h"
 #import "MVTheme.h"
 #import "MVPaths.h"
+#import "MVPython.h"
 
 static NSString *const kItemCell = @"MVSnifferItemCell";
 static NSString *const kQualityCell = @"MVSnifferQualityCell";
 
-/// The qualities the page itself can be fetched at, best first. "best" lets
-/// yt-dlp choose; 1080 and above is fetched as two streams and muxed on device.
-static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
-    static NSArray *options;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        options = @[
-            @[@"Best available", @"best"],
-            @[@"1080p HD", @"1080"],
-            @[@"Up to 720p", @"720p"],
-            @[@"Up to 480p", @"480p"],
-            @[@"Audio only (M4A)", @"audio"],
-            @[@"MP3 (audio)", @"mp3"],
-        ];
-    });
-    return options;
+/// These rows never move while the metadata request is in flight. Actual
+/// variants are appended below them; if probing fails, presets are appended.
+static NSArray<NSDictionary *> *MVBaseQualityOptions(void) {
+    return @[
+        @{@"title": [MVLang t:@"Best available"], @"quality": @"best", @"symbol": @"wand.and.stars"},
+        @{@"title": [MVLang t:@"Audio only (M4A)"], @"quality": @"audio", @"symbol": @"music.note"},
+        @{@"title": [MVLang t:@"MP3 (audio)"], @"quality": @"mp3", @"symbol": @"music.note"},
+    ];
+}
+
+static NSArray<NSDictionary *> *MVFallbackQualityOptions(void) {
+    return @[
+        @{@"title": [MVLang t:@"1080p HD"], @"quality": @"1080", @"symbol": @"film"},
+        @{@"title": [MVLang t:@"Up to 720p"], @"quality": @"720p", @"symbol": @"film"},
+        @{@"title": [MVLang t:@"Up to 480p"], @"quality": @"480p", @"symbol": @"film"},
+    ];
 }
 
 #pragma mark - Quality row
@@ -30,23 +31,26 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
 /// One quality choice. A plain row: the list itself is the answer to the
 /// question the sheet asked, so it needs no card around each line.
 @interface MVSnifferQualityCell : UITableViewCell
-- (void)configureWithTitle:(NSString *)title symbol:(NSString *)symbol;
+- (void)configureWithTitle:(NSString *)title detail:(nullable NSString *)detail symbol:(NSString *)symbol;
 @end
 
 @implementation MVSnifferQualityCell
 
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
+    if ((self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier])) {
         self.backgroundColor = [MVTheme card];
         self.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
         self.textLabel.textColor = [MVTheme text];
+        self.detailTextLabel.font = [UIFont systemFontOfSize:12];
+        self.detailTextLabel.textColor = [MVTheme secondaryText];
         self.imageView.tintColor = [MVTheme accent];
     }
     return self;
 }
 
-- (void)configureWithTitle:(NSString *)title symbol:(NSString *)symbol {
+- (void)configureWithTitle:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol {
     self.textLabel.text = title;
+    self.detailTextLabel.text = detail;
     self.imageView.image = [UIImage systemImageNamed:symbol];
     self.imageView.preferredSymbolConfiguration =
         [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIFontWeightRegular];
@@ -136,6 +140,8 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
 @property (nonatomic, strong) UILabel *emptyLabel;
 @property (nonatomic, strong) NSMutableArray<MVSnifferItem *> *items;
 @property (nonatomic) BOOL offersPage;
+@property (nonatomic) BOOL readingFormats;
+@property (nonatomic, copy) NSArray<NSDictionary *> *qualityChoices;
 @property (nonatomic, strong, nullable) id storeObserver;
 @end
 
@@ -149,6 +155,7 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
         _pageURL = [pageURL copy];
         _pageTitle = [pageTitle copy];
         _items = [NSMutableArray array];
+        _qualityChoices = MVBaseQualityOptions();
     }
     return self;
 }
@@ -218,6 +225,7 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
         ? UISemanticContentAttributeForceRightToLeft : UISemanticContentAttributeForceLeftToRight;
 
     [self reload];
+    if (self.offersPage) [self readFormats];
     __weak typeof(self) weakSelf = self;
     self.storeObserver = [NSNotificationCenter.defaultCenter addObserverForName:MVSnifferStoreDidChangeNotification
                                                                         object:nil queue:NSOperationQueue.mainQueue
@@ -246,6 +254,61 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
     [self.tableView reloadData];
 }
 
+/// Metadata is optional; a failed probe leaves the familiar presets available.
+/// Starting a download never waits for it. No browser cookies are passed to
+/// yt-dlp, just as with the existing page downloader.
+- (void)readFormats {
+    if (!self.pageURL.length) return;
+    self.readingFormats = YES;
+    [self.tableView reloadData];
+    __weak typeof(self) weakSelf = self;
+    [[MVPython shared] call:@"downloader" function:@"inspect_formats" args:@[self.pageURL]
+                 completion:^(NSDictionary *result, NSString *error) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        NSArray *formats = [result[@"formats"] isKindOfClass:NSArray.class] ? result[@"formats"] : @[];
+        NSMutableArray *choices = [MVBaseQualityOptions() mutableCopy];
+        for (id value in formats) {
+            if (![value isKindOfClass:NSDictionary.class]) continue;
+            NSDictionary *item = value;
+            NSString *quality = [item[@"quality"] isKindOfClass:NSString.class] ? item[@"quality"] : nil;
+            NSNumber *height = [item[@"height"] isKindOfClass:NSNumber.class] ? item[@"height"] : nil;
+            NSString *ext = [item[@"ext"] isKindOfClass:NSString.class] ? item[@"ext"] : nil;
+            if (!quality.length || !height || height.integerValue <= 0 || !ext.length) continue;
+            if (![quality hasPrefix:@"fmt:"] && ![quality hasPrefix:@"split:"]) continue;
+            NSMutableString *title = [NSMutableString stringWithFormat:@"%ldp · %@", (long)height.integerValue, ext.uppercaseString];
+            NSInteger fps = [item[@"fps"] isKindOfClass:NSNumber.class] ? [item[@"fps"] integerValue] : 0;
+            if (fps > 30) [title appendFormat:@" · %ld fps", (long)fps];
+            long long size = [item[@"size"] isKindOfClass:NSNumber.class] ? [item[@"size"] longLongValue] : 0;
+            BOOL videoOnly = [item[@"video_only"] boolValue];
+            NSMutableArray *details = [NSMutableArray array];
+            if (size > 0) {
+                NSString *prefix = [item[@"estimated"] boolValue] ? @"≈ " : @"";
+                [details addObject:[prefix stringByAppendingString:[MVPaths formatBytes:size]]];
+            }
+            if (videoOnly) [details addObject:[MVLang t:@"Video size only; audio is separate"]];
+            [choices addObject:@{@"title": title, @"quality": quality, @"symbol": @"film",
+                                 @"detail": [details componentsJoinedByString:@" · "]}];
+        }
+        if (choices.count == MVBaseQualityOptions().count) [choices addObjectsFromArray:MVFallbackQualityOptions()];
+        [self_ applyFormatChoicesWhenIdle:choices];
+    }];
+}
+
+- (void)applyFormatChoicesWhenIdle:(NSArray<NSDictionary *> *)choices {
+    // Do not replace rows under a finger while a user is choosing a file.
+    if (self.tableView.tracking || self.tableView.dragging || self.tableView.decelerating) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakSelf applyFormatChoicesWhenIdle:choices];
+        });
+        return;
+    }
+    self.readingFormats = NO;
+    self.qualityChoices = choices;
+    [self.tableView reloadData];
+}
+
 #pragma mark - Table
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
@@ -253,22 +316,22 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (self.offersPage && section == 0) return (NSInteger)MVQualityOptions().count;
+    if (self.offersPage && section == 0) return (NSInteger)self.qualityChoices.count;
     return (NSInteger)self.items.count;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (self.offersPage && section == 0) return [MVLang t:@"Video quality"];
+    if (self.offersPage && section == 0) {
+        return self.readingFormats ? [MVLang t:@"Reading link..."] : [MVLang t:@"Video quality"];
+    }
     return [MVLang t:@"Files on this page"];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (self.offersPage && indexPath.section == 0) {
         MVSnifferQualityCell *cell = [tableView dequeueReusableCellWithIdentifier:kQualityCell forIndexPath:indexPath];
-        NSArray<NSString *> *option = MVQualityOptions()[indexPath.row];
-        NSString *symbol = indexPath.row == 0 ? @"wand.and.stars"
-                         : (indexPath.row >= 4 ? @"music.note" : @"film");
-        [cell configureWithTitle:[MVLang t:option[0]] symbol:symbol];
+        NSDictionary *option = self.qualityChoices[indexPath.row];
+        [cell configureWithTitle:option[@"title"] detail:option[@"detail"] symbol:option[@"symbol"]];
         return cell;
     }
     MVSnifferItemCell *cell = [tableView dequeueReusableCellWithIdentifier:kItemCell forIndexPath:indexPath];
@@ -279,7 +342,7 @@ static NSArray<NSArray<NSString *> *> *MVQualityOptions(void) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.offersPage && indexPath.section == 0) {
-        [self chooseQuality:MVQualityOptions()[indexPath.row][1]];
+        [self chooseQuality:self.qualityChoices[indexPath.row][@"quality"]];
     } else {
         [self downloadItem:self.items[indexPath.row]];
     }

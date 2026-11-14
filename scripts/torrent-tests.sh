@@ -29,7 +29,7 @@ clang -fobjc-arc -fblocks -I Sources tests/torrent_peer_test.m \
   -framework Foundation -o "$OUT/torrent_peer_test"
 "$OUT/torrent_peer_test"
 
-clang -fobjc-arc -fblocks -I Sources tests/torrent_engine_test.m tests/torrent_engine_stubs.m \
-  Sources/MVTorrentDownloader.m Sources/MVTorrentPeer.m Sources/MVDownloadTask.m Sources/MVFileProtection.m $SOURCES \
+clang -fobjc-arc -fblocks -I Sources tests/torrent_engine_test.m tests/torrent_engine_stubs.m tests/network_policy_stub.m \
+  Sources/MVTorrentDownloader.m Sources/MVTorrentPeer.m Sources/MVDownloadTask.m Sources/MVFileProtection.m Sources/MVRequestGroup.m $SOURCES \
   -framework Foundation -o "$OUT/torrent_engine_test"
 "$OUT/torrent_engine_test"

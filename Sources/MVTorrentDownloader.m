@@ -13,6 +13,8 @@
 #import "MVFileProtection.h"
 #import "MVMediaProbe.h"
 #import "MVHTTPSession.h"
+#import "MVRequestGroup.h"
+#import "MVNetworkPolicy.h"
 #import "MVLang.h"
 #import "MVLog.h"
 
@@ -88,6 +90,8 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 @property (nonatomic, copy) NSArray<NSString *> *protectedPaths;
 @property (nonatomic, copy, nullable) NSString *displayTitle;
 @property (nonatomic, strong) MVTorrentMetadata *metadata;
+@property (nonatomic, strong) MVRequestGroup *requests;
+@property (nonatomic) unsigned int wifiInterfaceIndex;
 @property (nonatomic, strong) MVTorrentStorage *storage;
 @property (nonatomic, strong) NSMutableArray<MVTorrentPiece *> *pieces;
 /// Pieces whose buffer is allocated (being filled). Blocks are only handed out
@@ -132,6 +136,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 @implementation MVTorrentJob
 - (instancetype)init {
     if ((self = [super init])) {
+        _requests = [MVRequestGroup new];
         _pieces = [NSMutableArray array];
         _openPieces = [NSMutableIndexSet indexSet];
         _peers = [NSMutableArray array];
@@ -241,7 +246,13 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
          progress:(void (^)(MVDownloadTask *))progress
          finished:(void (^)(MVDownloadTask *))finished
            failed:(void (^)(MVDownloadTask *, NSString *))failed {
+    MVNetworkPolicy *policy = MVNetworkPolicy.shared;
+    if (policy.wifiOnly && !policy.wifiInterfaceIndex) {
+        if (failed) failed(task, [MVLang t:@"Could not secure the Wi-Fi connection"]);
+        return;
+    }
     MVTorrentJob *job = [MVTorrentJob new];
+    job.wifiInterfaceIndex = policy.wifiOnly ? policy.wifiInterfaceIndex : 0;
     job.task = task;
     job.priorPath = task.path;
     job.protectedPaths = [self pathsProtectedFromTask:task];
@@ -260,6 +271,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         MVTorrentJob *job = self->_jobs[task.identifier];
         if (!job) return;
         job.paused = YES;
+        [job.requests cancel];
         [self stopAllPeersForJob:job];
         [self->_jobs removeObjectForKey:task.identifier];
         MVLogInfo(@"torrent: paused %@ at %lld bytes", task.title, job.doneBytes);
@@ -278,6 +290,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
         NSString *jobRoot = [job.storage.root copy];
         if (job) {
             job.cancelled = YES;
+            [job.requests cancel];
             [self stopAllPeersForJob:job];
             [self->_jobs removeObjectForKey:identifier];
         }
@@ -520,7 +533,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
     dispatch_async(_networkQueue, ^{
         NSDictionary *headers = [MVMediaProbe headersForURL:url referer:job.task.referer];
         NSError *error = nil;
-        NSData *data = [self syncGet:url headers:headers error:&error];
+        NSData *data = [self syncGet:url headers:headers error:&error group:job.requests];
         if (!data.length) {
             NSString *message = error.localizedDescription ?: [MVLang t:@"Could not open the torrent"];
             dispatch_async(self->_queue, ^{ [self failJob:job message:message]; });
@@ -660,7 +673,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
                                                                 event:event];
             if (!announce) continue;
             NSError *error = nil;
-            NSData *response = [self syncGet:announce.absoluteString headers:nil error:&error];
+            NSData *response = [self syncGet:announce.absoluteString headers:nil error:&error group:currentJob.requests];
             if (!response.length) {
                 lastFailure = [self trackerFailureFor:tracker reason:[MVLang t:@"Could not be reached"]];
                 MVLogWarn(@"torrent: tracker %@ failed: %@", tracker, error.localizedDescription ?: @"no response");
@@ -739,6 +752,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
                                                       pieceCount:job.metadata.pieceCount
                                                         delegate:self];
         peer.maxInFlight = kBlocksInFlightPerPeer;
+        peer.boundInterfaceIndex = job.wifiInterfaceIndex;
         // Deliver callbacks here, on the engine queue, so all piece state is
         // touched from one thread.
         [peer setCallbackQueue:_queue];
@@ -1045,6 +1059,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 - (void)finishJob:(MVTorrentJob *)job {
     if (_jobs[job.task.identifier] != job || job.paused || job.cancelled || job.finishing) return;
     job.finishing = YES;
+    [job.requests cancel];
     [self stopAllPeersForJob:job];
     NSString *path = [job.storage.outputPath copy];
     NSString *title = [job.displayTitle copy];
@@ -1070,6 +1085,7 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 - (void)failJob:(MVTorrentJob *)job message:(NSString *)message {
     if (_jobs[job.task.identifier] != job || job.paused || job.cancelled || job.finishing) return;
     job.finishing = YES;
+    [job.requests cancel];
     [self stopAllPeersForJob:job];
     dispatch_async(dispatch_get_main_queue(), ^{
         __block BOOL current;
@@ -1087,7 +1103,8 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
 
 /// A blocking GET, matching the other engines: the work already runs on the
 /// network queue, and the torrent/tracker requests are few and one-shot.
-- (nullable NSData *)syncGet:(NSString *)url headers:(NSDictionary<NSString *, NSString *> *)headers error:(NSError **)error {
+- (nullable NSData *)syncGet:(NSString *)url headers:(NSDictionary<NSString *, NSString *> *)headers
+                        error:(NSError **)error group:(MVRequestGroup *)group {
     NSURL *target = [NSURL URLWithString:url];
     if (!target) {
         if (error) *error = [NSError errorWithDomain:@"MVTorrent" code:-1
@@ -1098,10 +1115,12 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                       timeoutInterval:30];
     request.HTTPShouldHandleCookies = NO;
+    request.allowsCellularAccess = ![NSUserDefaults.standardUserDefaults boolForKey:@"MVWifiOnly"];
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSData *result = nil;
     __block NSError *resultError = nil;
+    __block __weak NSURLSessionDataTask *weakTask = nil;
     NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
                                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
         NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
@@ -1111,9 +1130,14 @@ typedef NS_ENUM(NSInteger, MVPieceState) {
                                                                               userInfo:@{NSLocalizedDescriptionKey:
                                                                                              [NSString stringWithFormat:@"HTTP %ld", (long)http.statusCode]}];
         else result = data;
+        [group finishTask:weakTask];
         dispatch_semaphore_signal(sem);
     }];
-    [task resume];
+    weakTask = task;
+    if (![group startTask:task]) {
+        if (error) *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
+        return nil;
+    }
     long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kRequestTimeout * NSEC_PER_SEC)));
     if (timedOut) {
         [task cancel];

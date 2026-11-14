@@ -3,6 +3,12 @@
 #import <AVKit/AVKit.h>
 #import "MVTheme.h"
 #import "MVLang.h"
+#import "MVPlaybackHistory.h"
+#import "MVSubtitleTrack.h"
+#import "MVSubtitleStore.h"
+#import "MVPaths.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <math.h>
 
 /// The mini bar that stays above every screen while something is playing.
 static CGFloat const kMiniBarHeight = 80;
@@ -147,7 +153,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 /// AVPlayerViewController, which pauses its player on dismissal), so the audio
 /// simply keeps playing when the sheet closes and the mini bar takes over —
 /// no resume polling, no audible gap.
-@interface MVFullPlayerViewController : UIViewController <UIGestureRecognizerDelegate>
+@interface MVFullPlayerViewController : UIViewController <UIGestureRecognizerDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, strong, nullable) AVPlayer *player;
 @property (nonatomic, copy, nullable) void (^onClose)(void);
 /// Called whenever the player goes away, however it was dismissed, so the mini
@@ -157,6 +163,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 @property (nonatomic, copy, nullable) void (^onNext)(void);
 @property (nonatomic, copy, nullable) void (^onSeekBack)(void);
 @property (nonatomic, copy, nullable) void (^onSeekForward)(void);
+@property (nonatomic, copy, nullable) void (^onToggle)(void);
 @end
 
 @implementation MVFullPlayerViewController {
@@ -171,6 +178,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     UIButton *_backButton;
     UIButton *_forwardButton;
     UIButton *_closeButton;
+    UIButton *_rateButton;
+    UIButton *_subtitleButton;
+    UILabel *_captionLabel;
     UIView *_bar;
     UIStackView *_row;
     NSArray<UIView *> *_chrome;
@@ -215,6 +225,36 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     _closeButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_closeButton addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_closeButton];
+
+    _rateButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _rateButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _rateButton.tintColor = [MVTheme accent];
+    _rateButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _rateButton.accessibilityLabel = [MVLang t:@"Playback speed"];
+    _rateButton.showsMenuAsPrimaryAction = YES;
+    [self.view addSubview:_rateButton];
+    [self rebuildRateMenu];
+
+    _subtitleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _subtitleButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_subtitleButton setImage:[UIImage systemImageNamed:@"captions.bubble"] forState:UIControlStateNormal];
+    _subtitleButton.tintColor = [MVTheme accent];
+    _subtitleButton.accessibilityLabel = [MVLang t:@"Subtitles"];
+    _subtitleButton.showsMenuAsPrimaryAction = YES;
+    [self.view addSubview:_subtitleButton];
+    [self rebuildSubtitleMenu];
+
+    _captionLabel = [UILabel new];
+    _captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _captionLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _captionLabel.textColor = UIColor.whiteColor;
+    _captionLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    _captionLabel.textAlignment = NSTextAlignmentCenter;
+    _captionLabel.numberOfLines = 4;
+    _captionLabel.layer.cornerRadius = 6;
+    _captionLabel.layer.masksToBounds = YES;
+    _captionLabel.hidden = YES;
+    [self.view addSubview:_captionLabel];
 
     _timeLabel = [UILabel new];
     _timeLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
@@ -264,7 +304,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
     // Everything that hides on a tap, like every other video player: the title,
     // the close button, the scrubber, the times and the whole transport bar.
-    _chrome = @[_titleLabel, _closeButton, _timeLabel, _slider, bar, row];
+    _chrome = @[_titleLabel, _closeButton, _rateButton, _subtitleButton, _timeLabel, _slider, bar, row];
 
     // Tap anywhere on the picture to hide/show the controls. The gesture must not
     // swallow taps meant for the buttons, so it ignores touches on them.
@@ -276,12 +316,26 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     [NSLayoutConstraint activateConstraints:@[
         [_titleLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:18],
         [_titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:56],
-        [_titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-56],
+        [_titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-104],
 
         [_closeButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [_closeButton.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
         [_closeButton.widthAnchor constraintEqualToConstant:40],
         [_closeButton.heightAnchor constraintEqualToConstant:40],
+
+        [_rateButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [_rateButton.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_rateButton.widthAnchor constraintEqualToConstant:48],
+        [_rateButton.heightAnchor constraintEqualToConstant:40],
+        [_subtitleButton.trailingAnchor constraintEqualToAnchor:_rateButton.leadingAnchor],
+        [_subtitleButton.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_subtitleButton.widthAnchor constraintEqualToConstant:40],
+        [_subtitleButton.heightAnchor constraintEqualToConstant:40],
+
+        [_captionLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [_captionLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:24],
+        [_captionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-24],
+        [_captionLabel.bottomAnchor constraintEqualToAnchor:_slider.topAnchor constant:-28],
 
         [row.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [row.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-34],
@@ -382,6 +436,9 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)tick:(CMTime)time {
     if (!_player.currentItem) return;
+    NSString *caption = MVPlayerCenter.shared.currentSubtitle;
+    _captionLabel.text = caption;
+    _captionLabel.hidden = !caption.length;
     double total = CMTimeGetSeconds(_player.currentItem.duration);
     double pos = CMTimeGetSeconds(time);
     if (!isnan(total) && total > 0) {
@@ -420,9 +477,8 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    // Fires for every dismissal path (button, swipe, interrupted presentation),
-    // so the mini bar always comes back and never stays hidden forever.
-    if (self.onDismiss) self.onDismiss();
+    // Presenting the document picker is not dismissal of the player itself.
+    if ((self.isBeingDismissed || !self.presentingViewController) && self.onDismiss) self.onDismiss();
 }
 
 - (void)closeTapped {
@@ -480,12 +536,64 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     return YES;
 }
 
-- (void)playTapped {
-    if (_player.rate != 0 && !_player.error) {
-        [_player pause];
-    } else {
-        [_player play];
+- (void)rebuildSubtitleMenu {
+    __weak typeof(self) weakSelf = self;
+    UIAction *import = [UIAction actionWithTitle:[MVLang t:@"Import subtitles"]
+        image:[UIImage systemImageNamed:@"doc.badge.plus"] identifier:nil handler:^(UIAction *action) {
+        typeof(self) self_ = weakSelf;
+        if (!self_) return;
+        UTType *srt = [UTType typeWithFilenameExtension:@"srt"] ?: UTTypeData;
+        UTType *vtt = [UTType typeWithFilenameExtension:@"vtt"] ?: UTTypeData;
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+            initForOpeningContentTypes:@[srt, vtt, UTTypePlainText] asCopy:YES];
+        picker.delegate = self_;
+        [self_ presentViewController:picker animated:YES completion:nil];
+    }];
+    UIAction *clear = [UIAction actionWithTitle:[MVLang t:@"Remove subtitles"]
+        image:[UIImage systemImageNamed:@"xmark.circle"] identifier:nil handler:^(UIAction *action) {
+        [MVPlayerCenter.shared clearSubtitle];
+        typeof(self) self_ = weakSelf;
+        if (self_) self_->_captionLabel.hidden = YES;
+    }];
+    _subtitleButton.menu = [UIMenu menuWithTitle:[MVLang t:@"Subtitles"] children:@[import, clear]];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+    __weak typeof(self) weakSelf = self;
+    [controller dismissViewControllerAnimated:YES completion:^{
+        [MVPlayerCenter.shared loadSubtitleAtURL:url completion:^(NSString *error) {
+            typeof(self) self_ = weakSelf;
+            if (!self_ || !error.length || !self_.view.window) return;
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Subtitles"]
+                message:[MVLang t:error] preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"OK"] style:UIAlertActionStyleCancel handler:nil]];
+            [self_ presentViewController:alert animated:YES completion:nil];
+        }];
+    }];
+}
+
+- (void)rebuildRateMenu {
+    float current = MVPlayerCenter.shared.playbackRate;
+    [_rateButton setTitle:[NSString stringWithFormat:@"%g×", current] forState:UIControlStateNormal];
+    NSMutableArray *actions = [NSMutableArray array];
+    __weak typeof(self) weakSelf = self;
+    for (NSNumber *number in @[@0.5, @0.75, @1.0, @1.25, @1.5, @2.0]) {
+        float rate = number.floatValue;
+        UIAction *action = [UIAction actionWithTitle:[NSString stringWithFormat:@"%g×", rate]
+                                               image:nil identifier:nil handler:^(UIAction *a) {
+            MVPlayerCenter.shared.playbackRate = rate;
+            [weakSelf rebuildRateMenu];
+        }];
+        action.state = fabsf(current - rate) < 0.001f ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [actions addObject:action];
     }
+    _rateButton.menu = [UIMenu menuWithTitle:[MVLang t:@"Playback speed"] children:actions];
+}
+
+- (void)playTapped {
+    if (self.onToggle) self.onToggle();
     [self syncPlayIcon];
 }
 
@@ -540,6 +648,13 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 // Observers on the current item's status, so a file AVPlayer cannot decode
 // (AV1/VP9-in-mp4, a truncated download) is skipped instead of stalling.
 @property (nonatomic, strong, nullable) id itemStatusObserver;
+@property (nonatomic, strong, nullable) id itemEndObserver;
+@property (nonatomic, copy, nullable) NSURL *currentURL;
+@property (nonatomic, strong, nullable) MVSubtitleTrack *subtitleTrack;
+@property (nonatomic, strong) MVSubtitleStore *subtitleStore;
+@property (nonatomic, strong) dispatch_queue_t subtitleQueue;
+@property (nonatomic) NSUInteger subtitleRequest;
+@property (nonatomic) NSTimeInterval lastPositionSave;
 // Counts back-to-back auto-skips so a folder of undecodable files does not
 // cycle forever; reset whenever the user picks an item deliberately.
 @property (nonatomic) NSInteger consecutiveFailures;
@@ -556,6 +671,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 
 - (instancetype)init {
     if ((self = [super init])) {
+        float savedRate = [NSUserDefaults.standardUserDefaults floatForKey:@"MVPlaybackRate"];
+        _playbackRate = savedRate >= 0.5f && savedRate <= 2.0f ? savedRate : 1.0f;
+        _subtitleQueue = dispatch_queue_create("com.mody.moodyvid.subtitles", DISPATCH_QUEUE_SERIAL);
+        _subtitleStore = [[MVSubtitleStore alloc] initWithDirectory:[MVPaths.applicationSupport stringByAppendingPathComponent:@"Subtitles"]];
         _bar = [MVFloatingPlayerBar new];
         [_bar.pauseButton addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [_bar.closeButton addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
@@ -634,7 +753,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         info[MPMediaItemPropertyPlaybackDuration] = @(total);
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(pos);
     }
-    info[MPNowPlayingInfoPropertyPlaybackRate] = @(self.isPlaying ? 1.0 : 0.0);
+    info[MPNowPlayingInfoPropertyPlaybackRate] = @(self.isPlaying ? self.playbackRate : 0.0);
     MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo = info;
     MPNowPlayingInfoCenter.defaultCenter.playbackState = self.isPlaying
         ? MPNowPlayingPlaybackStatePlaying : MPNowPlayingPlaybackStatePaused;
@@ -651,6 +770,115 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
                                            error:&err];
     [[AVAudioSession sharedInstance] setMode:AVAudioSessionModeMoviePlayback error:nil];
     [[AVAudioSession sharedInstance] setActive:YES error:nil];
+}
+
+- (void)setPlaybackRate:(float)rate {
+    BOOL allowed = NO;
+    for (NSNumber *value in @[@0.5, @0.75, @1.0, @1.25, @1.5, @2.0]) {
+        if (fabsf(rate - value.floatValue) < 0.001f) { allowed = YES; break; }
+    }
+    if (!allowed) return;
+    _playbackRate = rate;
+    [NSUserDefaults.standardUserDefaults setFloat:rate forKey:@"MVPlaybackRate"];
+    if (self.isPlaying) self.internalPlayer.rate = rate;
+    [self updateNowPlayingInfo];
+}
+
+- (void)resumeAtPreferredRate {
+    [self.internalPlayer play];
+    self.internalPlayer.rate = self.playbackRate;
+}
+
+- (void)savePlaybackPosition {
+    if (!self.currentURL) return;
+    [MVPlaybackHistory.shared saveURL:self.currentURL position:self.currentTime duration:self.duration];
+    self.lastPositionSave = NSProcessInfo.processInfo.systemUptime;
+}
+
+- (NSString *)currentSubtitle {
+    return [self.subtitleTrack textAtSeconds:self.currentTime] ?: @"";
+}
+
+- (void)resetSubtitle {
+    self.subtitleRequest++;
+    self.subtitleTrack = nil;
+}
+
+- (void)clearSubtitle {
+    [self resetSubtitle];
+    NSURL *media = self.currentURL;
+    MVSubtitleStore *store = self.subtitleStore;
+    dispatch_async(self.subtitleQueue, ^{ [store removeForMediaURL:media]; });
+}
+
+- (void)restoreSubtitleForURL:(NSURL *)url {
+    NSUInteger request = self.subtitleRequest, generation = self.generation;
+    MVSubtitleStore *store = self.subtitleStore;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(self.subtitleQueue, ^{
+        NSData *data = [store dataForMediaURL:url];
+        MVSubtitleTrack *track = data ? [[MVSubtitleTrack alloc] initWithData:data error:NULL] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self_ = weakSelf;
+            if (self_ && self_.subtitleRequest == request && self_.generation == generation) self_.subtitleTrack = track;
+        });
+    });
+}
+
+- (void)loadSubtitleAtURL:(NSURL *)url completion:(void (^)(NSString *))completion {
+    if (!url.isFileURL || !self.internalPlayer.currentItem) {
+        if (completion) completion(@"Could not read subtitles");
+        return;
+    }
+    NSUInteger request = ++self.subtitleRequest;
+    NSUInteger generation = self.generation;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL scoped = [url startAccessingSecurityScopedResource];
+        NSInputStream *stream = [NSInputStream inputStreamWithURL:url];
+        [stream open];
+        NSMutableData *data = [NSMutableData data];
+        NSString *error = nil;
+        uint8_t buffer[32768];
+        while (stream) {
+            NSInteger n = [stream read:buffer maxLength:sizeof(buffer)];
+            if (n < 0) { error = @"Could not read subtitles"; break; }
+            if (n == 0) break;
+            if (data.length + (NSUInteger)n > 5 * 1024 * 1024) {
+                error = @"Subtitle file is empty or larger than 5 MB.";
+                break;
+            }
+            [data appendBytes:buffer length:(NSUInteger)n];
+        }
+        [stream close];
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        if (!stream) error = @"Could not read subtitles";
+        MVSubtitleTrack *track = error ? nil : [[MVSubtitleTrack alloc] initWithData:data error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self_ = weakSelf;
+            if (!self_) return;
+            if (self_.subtitleRequest != request || self_.generation != generation) {
+                if (completion) completion(@"The current video changed.");
+                return;
+            }
+            if (!track) { if (completion) completion(error); return; }
+            self_.subtitleTrack = track;
+            NSURL *media = self_.currentURL;
+            if (!media.isFileURL) {
+                if (completion) completion(@"Subtitles for streams are temporary.");
+                return;
+            }
+            MVSubtitleStore *store = self_.subtitleStore;
+            dispatch_async(self_.subtitleQueue, ^{
+                BOOL saved = [store saveData:data forMediaURL:media];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    typeof(self) owner = weakSelf;
+                    if (!owner || owner.subtitleRequest != request || owner.generation != generation) return;
+                    if (completion) completion(saved ? nil : @"Subtitles loaded, but could not be saved.");
+                });
+            });
+        });
+    });
 }
 
 - (void)playURL:(NSURL *)url title:(NSString *)title {
@@ -744,12 +972,19 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     // the player (and with it, the main thread), and rapid prev/next taps
     // would otherwise stack exactly that. `currentTitle` is told only after
     // the swap so playback of the new item picks it up.
+    [self savePlaybackPosition];
+    [self resetSubtitle];
     [self.internalPlayer pause];
     [self.internalPlayer.currentItem cancelPendingSeeks];
     self.currentTitle = title;
+    self.currentURL = url;
+    self.lastPositionSave = NSProcessInfo.processInfo.systemUptime;
     [self.internalPlayer replaceCurrentItemWithPlayerItem:item];
     [self watchItem:item forIndex:index];
-    [self.internalPlayer play];
+    [self restoreSubtitleForURL:url];
+    double savedPosition = [MVPlaybackHistory.shared positionForURL:url];
+    if (savedPosition > 0) [self safeSeek:savedPosition];
+    [self resumeAtPreferredRate];
     [self refreshMiniBar];
 }
 
@@ -760,8 +995,15 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)watchItem:(AVPlayerItem *)item forIndex:(NSInteger)index {
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     if (self.itemStatusObserver) [nc removeObserver:self.itemStatusObserver];
+    if (self.itemEndObserver) [nc removeObserver:self.itemEndObserver];
 
     __weak typeof(self) weakSelf = self;
+    self.itemEndObserver = [nc addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                                          object:item queue:NSOperationQueue.mainQueue
+                                      usingBlock:^(NSNotification *note) {
+        typeof(self) self_ = weakSelf;
+        if (self_.internalPlayer.currentItem == item) [MVPlaybackHistory.shared clearURL:self_.currentURL];
+    }];
     self.itemStatusObserver = [nc addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
                                               object:item queue:NSOperationQueue.mainQueue
                                           usingBlock:^(NSNotification *note) {
@@ -834,6 +1076,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 }
 
 - (void)pause {
+    [self savePlaybackPosition];
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = YES;
     [self updateNowPlayingInfo];
@@ -842,17 +1085,21 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 - (void)toggle {
     if (!self.internalPlayer) return;
     if (self.isPlaying) {
+        [self savePlaybackPosition];
         [self.internalPlayer pause];
         self.bar.pauseButton.selected = YES;
     } else {
         [self ensureAudioSession];
-        [self.internalPlayer play];
+        [self resumeAtPreferredRate];
         self.bar.pauseButton.selected = NO;
     }
     [self updateNowPlayingInfo];
 }
 
 - (void)stop {
+    [self savePlaybackPosition];
+    [self resetSubtitle];
+    self.currentURL = nil;
     self.generation++;
     // The user dismissed the bar. Remember it, or switching tabs would bring it
     // straight back through the inline-card hand-back.
@@ -860,6 +1107,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     if (self.itemStatusObserver) {
         [NSNotificationCenter.defaultCenter removeObserver:self.itemStatusObserver];
         self.itemStatusObserver = nil;
+    }
+    if (self.itemEndObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.itemEndObserver];
+        self.itemEndObserver = nil;
     }
     [self.internalPlayer pause];
     self.bar.pauseButton.selected = NO;
@@ -1036,6 +1287,8 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     double total = CMTimeGetSeconds(item.duration);
     double pos = CMTimeGetSeconds(self.internalPlayer.currentTime);
     self.bar.progress.progress = (total > 0 && !isnan(pos / total)) ? pos / total : 0;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (self.isPlaying && now - self.lastPositionSave >= 5.0) [self savePlaybackPosition];
     // selected == paused; if that disagrees with the player, refresh the labels.
     if (self.bar.pauseButton.selected == self.isPlaying) [self refreshMiniBar];
 }
@@ -1053,7 +1306,7 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
         if (self.wasInterruptedWhilePlaying) {
             self.wasInterruptedWhilePlaying = NO;
             [self ensureAudioSession];
-            [self.internalPlayer play];
+            [self resumeAtPreferredRate];
             self.bar.pauseButton.selected = NO;
             [self refreshMiniBar];
         }
@@ -1072,9 +1325,10 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
 /// running. iOS can deactivate the session as the app suspends; re-asserting it
 /// here is what keeps the audio going once the app is in the background.
 - (void)handleEnterBackground:(NSNotification *)note {
+    [self savePlaybackPosition];
     if (!self.isPlaying) return;
     [self ensureAudioSession];
-    [self.internalPlayer play];
+    [self resumeAtPreferredRate];
     [self updateNowPlayingInfo];
 }
 
@@ -1105,10 +1359,11 @@ static UIButton *MVBarButton(NSString *symbol, UIColor *tint) {
     full.onNext = ^{ [weakSelf playNext]; };
     full.onSeekBack = ^{ [weakSelf seekBack]; };
     full.onSeekForward = ^{ [weakSelf seekForward]; };
+    full.onToggle = ^{ [weakSelf toggle]; };
 
     // Hidden while the full player is up, so it never shows behind it.
     [self hideBar];
-    if (!self.isPlaying) [self.internalPlayer play];
+    // Expanding the controls must not restart a video the user paused.
     full.modalPresentationStyle = UIModalPresentationFullScreen;
     // Restore the mini bar when the player is dismissed, unless the tab we land
     // on shows its own inline card (then the card is the control, not the bar).

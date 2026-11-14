@@ -27,6 +27,9 @@
     if (!safe) { completion(nil); return; }
 
     NSURLRequest *original = task.originalRequest;
+    // Do not allow a redirect to loosen the originating download's cellular
+    // restriction, even though the session is also shared by browser probes.
+    safe.allowsCellularAccess = original.allowsCellularAccess;
     NSString *context = [original valueForHTTPHeaderField:@"Referer"];
     if (!context.length && [original valueForHTTPHeaderField:@"Cookie"].length) {
         // A user-entered URL may have no Referer. Keep its initial URL as the

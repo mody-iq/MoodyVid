@@ -673,8 +673,8 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
                 [cell configureIcon:@"safari.fill" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             } else {
-                cell.titleLabel.text = [MVLang t:@"Start downloads on Wi-Fi"];
-                cell.subtitleLabel.text = manager.wifiOnly ? [MVLang t:@"On · Starting only"] : [MVLang t:@"Off"];
+                cell.titleLabel.text = [MVLang t:@"Wi-Fi only"];
+                cell.subtitleLabel.text = manager.wifiOnly ? [MVLang t:@"On · Wait for Wi-Fi"] : [MVLang t:@"Off"];
                 [cell configureIcon:@"wifi" tint:[MVTheme iconTint]];
                 [cell setHasChevron:YES];
             }
@@ -787,8 +787,8 @@ typedef NS_ENUM(NSInteger, MVMoreSection) {
 
 - (void)toggleWifiOnly {
     BOOL enabled = MVDownloadManager.shared.wifiOnly;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Start downloads on Wi-Fi"]
-        message:[MVLang t:@"This checks the default network before starting downloads. It does not block cellular data: transfers and other requests may use cellular, including after a network change."]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Wi-Fi only"]
+        message:[MVLang t:@"Downloads wait for Wi-Fi and active transfers are stopped when the connection changes. Python downloads stop cooperatively, so some data may still transfer before they pause. Browsing and other requests are not restricted."]
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:(enabled ? @"Turn off" : @"Turn on")]

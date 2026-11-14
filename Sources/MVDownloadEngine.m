@@ -76,7 +76,7 @@ static NSString *const kPendingPythonDeletions = @"MVPendingPythonWorkDeletions"
             }
         }
         [self savePendingPythonDeletions];
-        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(pump)
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(networkPolicyChanged)
                                                    name:MVNetworkPolicyDidChangeNotification object:nil];
         (void)MVNetworkPolicy.shared;
     }
@@ -151,6 +151,33 @@ static NSString *const kPendingPythonDeletions = @"MVPendingPythonWorkDeletions"
     [self pump];
 }
 
+/// Python pause is cooperative. Keep the old worker's slot until it unwinds;
+/// a separate waiting job owns the completion and is retried only on Wi-Fi.
+/// Explicitly paused rows are not included and are never resumed by policy.
+- (void)networkPolicyChanged {
+    if (!MVNetworkPolicy.shared.allowsNewDownloads) {
+        for (MVDownloadJob *job in [_running.allValues copy]) {
+            MVDownloadRecord *record = [self recordFor:job.identifier];
+            if (!record || record.state != MVDownloadStateActive) continue;
+            [[MVPython shared] pauseTask:job.identifier];
+            MVDownloadJob *retry = [MVDownloadJob new];
+            retry.identifier = job.identifier;
+            retry.url = job.url;
+            retry.quality = job.quality;
+            retry.completion = job.completion;
+            job.completion = nil;
+            [_queue addObject:retry];
+            record.state = MVDownloadStateWaiting;
+            record.speed = 0;
+            record.eta = 0;
+            record.error = [MVLang t:@"Waiting for Wi-Fi"];
+            [MVDownloadStore.shared update:record];
+            [self stopPolling:job.identifier];
+        }
+    }
+    [self pump];
+}
+
 /// A resumed job must wait for its previous Python call to unwind. Jobs for the
 /// same URL also wait for each other, since yt-dlp's filenames can coincide.
 /// Called on the main queue, including after a network-path update.
@@ -187,7 +214,7 @@ static NSString *const kPendingPythonDeletions = @"MVPendingPythonWorkDeletions"
     if (!quality.length) return NO;
     if ([quality isEqualToString:@"mp3"]) return NO;
     if ([quality isEqualToString:@"audio"]) return NO;
-    if ([quality isEqualToString:@"best"]) return YES;
+    if ([quality isEqualToString:@"best"] || [quality hasPrefix:@"split:"]) return YES;
     NSInteger h = quality.integerValue;
     return h >= 1080;
 }

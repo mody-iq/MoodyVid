@@ -3,6 +3,7 @@
 #import "MVFileProtection.h"
 #import "MVMediaProbe.h"
 #import "MVHTTPSession.h"
+#import "MVRequestGroup.h"
 #import "MVByteRange.h"
 #import "MVMediaConverter.h"
 #import "MVLang.h"
@@ -82,6 +83,7 @@ static const NSInteger kMaxSegments = 100000;
 /// One running DASH download.
 @interface MVMPDJob : NSObject
 @property (nonatomic, strong) MVDownloadTask *task;
+@property (nonatomic, strong) MVRequestGroup *requests;
 @property (nonatomic, strong) NSMutableArray<MVMPDSegment *> *segments;
 @property (nonatomic, strong, nullable) MVMPDSegment *mapSegment;
 @property (nonatomic, strong, nullable) MVMPDSegment *audioMapSegment;
@@ -101,7 +103,7 @@ static const NSInteger kMaxSegments = 100000;
 @end
 @implementation MVMPDJob
 - (instancetype)init {
-    if ((self = [super init])) _segments = [NSMutableArray array];
+    if ((self = [super init])) { _segments = [NSMutableArray array]; _requests = [MVRequestGroup new]; }
     return self;
 }
 @end
@@ -589,14 +591,17 @@ didStartElement:(NSString *)elementName
         if (job) { job.paused = YES; [_jobs removeObjectForKey:task.identifier]; }
     }
     if (!job) return;
+    [job.requests cancel];
     MVLogInfo(@"dash: paused %@ at %lld bytes", task.title, job.doneBytes);
 }
 
 - (void)cancelTask:(MVDownloadTask *)task {
+    MVMPDJob *job;
     @synchronized (self) {
-        MVMPDJob *job = _jobs[task.identifier];
+        job = _jobs[task.identifier];
         if (job) { job.cancelled = YES; [_jobs removeObjectForKey:task.identifier]; }
     }
+    [job.requests cancel];
 }
 
 - (BOOL)isCurrentJob:(MVMPDJob *)job {
@@ -612,7 +617,7 @@ didStartElement:(NSString *)elementName
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSDictionary *headers = [MVMediaProbe headersForURL:url referer:job.task.referer];
         NSError *error = nil;
-        NSData *data = [self syncGet:url headers:headers error:&error];
+        NSData *data = [self syncGet:url headers:headers error:&error group:job.requests];
         if (!data.length) {
             [self failJob:job message:error.localizedDescription ?: [MVLang t:@"Could not open the stream"]];
             return;
@@ -688,7 +693,7 @@ didStartElement:(NSString *)elementName
                                          segment.byteStart + segment.byteLength - 1];
             }
             NSError *initError = nil;
-            NSData *initData = [self syncGet:segment.url headers:initHeaders error:&initError];
+            NSData *initData = [self syncGet:segment.url headers:initHeaders error:&initError group:job.requests];
             if (!initData.length) {
                 [self failJob:job message:initError.localizedDescription ?: [MVLang t:@"Could not open the stream"]];
                 return;
@@ -929,7 +934,7 @@ didStartElement:(NSString *)elementName
             headers = mutable;
         }
         NSError *error = nil;
-        NSData *data = [self syncGet:segment.url headers:headers error:&error];
+        NSData *data = [self syncGet:segment.url headers:headers error:&error group:job.requests];
         dispatch_async(dispatch_get_main_queue(), ^{
             job.inFlight--;
             segment.inFlight = NO;
@@ -1093,6 +1098,7 @@ didStartElement:(NSString *)elementName
     void (^finishFailure)(void) = ^{
         if (![self isCurrentJob:job]) return;
         @synchronized (self) { if (_jobs[job.task.identifier] == job) [_jobs removeObjectForKey:job.task.identifier]; }
+        [job.requests cancel];
         [self removeRunOutputsForJob:job];
         MVLogError(@"dash: failed %@: %@", job.task.title, message);
         if (job.failedBlock) job.failedBlock(job.task, message);
@@ -1106,6 +1112,11 @@ didStartElement:(NSString *)elementName
 /// A blocking GET on a background thread, matching the HLS engine: DASH is a
 /// sequence of small requests and the parallelism lives in the segment pump.
 - (NSData *)syncGet:(NSString *)url headers:(NSDictionary<NSString *, NSString *> *)headers error:(NSError **)error {
+    return [self syncGet:url headers:headers error:error group:nil];
+}
+
+- (NSData *)syncGet:(NSString *)url headers:(NSDictionary<NSString *, NSString *> *)headers
+              error:(NSError **)error group:(MVRequestGroup *)group {
     NSURL *target = [NSURL URLWithString:url];
     if (!target || ![@[@"http", @"https"] containsObject:target.scheme.lowercaseString]) {
         if (error) *error = [NSError errorWithDomain:@"MVMPD" code:-1
@@ -1116,6 +1127,7 @@ didStartElement:(NSString *)elementName
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:60];
     request.HTTPShouldHandleCookies = NO;
+    request.allowsCellularAccess = ![NSUserDefaults.standardUserDefaults boolForKey:@"MVWifiOnly"];
     for (NSString *key in headers) [request setValue:headers[key] forHTTPHeaderField:key];
     [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
     NSString *rangeHeader = [request valueForHTTPHeaderField:@"Range"];
@@ -1129,6 +1141,7 @@ didStartElement:(NSString *)elementName
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSData *result = nil;
     __block NSError *resultError = nil;
+    __block __weak NSURLSessionDataTask *weakTask = nil;
     NSURLSessionDataTask *task = [MVHTTPSession.sharedSession dataTaskWithRequest:request
                                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *err) {
         NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
@@ -1151,9 +1164,15 @@ didStartElement:(NSString *)elementName
         } else if (http.statusCode == 200) result = data;
         else resultError = [NSError errorWithDomain:@"MVMPD" code:http.statusCode
             userInfo:@{NSLocalizedDescriptionKey: [MVLang t:@"Download incomplete"]}];
+        [group finishTask:weakTask];
         dispatch_semaphore_signal(sem);
     }];
-    [task resume];
+    weakTask = task;
+    if (group ? ![group startTask:task] : NO) {
+        if (error) *error = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
+        return nil;
+    }
+    if (!group) [task resume];
     long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)));
     if (timedOut) {
         [task cancel];

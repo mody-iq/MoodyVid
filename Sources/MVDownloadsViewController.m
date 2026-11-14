@@ -17,6 +17,7 @@
 #import "MVTypeFilterSheet.h"
 #import "MVDetailsSheet.h"
 #import "MVSnifferItem.h"
+#import "MVPlaylistViewController.h"
 #import "MVPaths.h"
 #import "MVLang.h"
 #import "MVTheme.h"
@@ -198,6 +199,7 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
         @[[MVLang t:@"Add link"], @"link", ^{ [weakSelf promptAddLink]; }],
         @[[MVLang t:@"From clipboard"], @"doc.on.clipboard", ^{ [weakSelf addFromClipboard]; }],
         @[[MVLang t:@"Import links from text file"], @"doc.text", ^{ [weakSelf importLinksFromFile]; }],
+        @[[MVLang t:@"Download playlist"], @"list.bullet.rectangle", ^{ [weakSelf promptPlaylist]; }],
         @[[MVLang t:@"Add torrent or magnet"], @"arrow.up.arrow.down.circle", ^{ [weakSelf promptAddTorrent]; }],
     ]];
 }
@@ -952,6 +954,23 @@ typedef NS_ENUM(NSInteger, MVSortOrder) {
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Add"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [self enqueueURLString:alert.textFields.firstObject.text];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)promptPlaylist {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[MVLang t:@"Download playlist"]
+        message:[MVLang t:@"Paste a playlist link to choose videos."] preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = @"https://…";
+        field.keyboardType = UIKeyboardTypeURL;
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        field.semanticContentAttribute = UISemanticContentAttributeForceLeftToRight;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[MVLang t:@"Browse"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *url = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (url.length) [MVPlaylistViewController presentFrom:self url:url];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }

@@ -30,11 +30,25 @@ NSString *const MVNetworkPolicyDidChangeNotification = @"MVNetworkPolicyDidChang
                 typeof(self) self_ = weakSelf;
                 if (!self_) return;
                 BOOL before = self_.allowsNewDownloads;
+                unsigned int previousInterface = self_->_wifiInterfaceIndex;
                 self_->_pathKnown = YES;
                 self_->_satisfied = nw_path_get_status(path) == nw_path_status_satisfied;
                 self_->_usesWifi = nw_path_uses_interface_type(path, nw_interface_type_wifi);
                 self_->_usesCellular = nw_path_uses_interface_type(path, nw_interface_type_cellular);
-                if (before != self_.allowsNewDownloads) [self_ notifyChange];
+                __block unsigned int wifiInterface = 0;
+                if (self_->_usesWifi) {
+                    nw_path_enumerate_interfaces(path, ^bool(nw_interface_t interface) {
+                        if (nw_interface_get_type(interface) == nw_interface_type_wifi) {
+                            wifiInterface = nw_interface_get_index(interface);
+                            return false;
+                        }
+                        return true;
+                    });
+                }
+                self_->_wifiInterfaceIndex = wifiInterface;
+                if (before != self_.allowsNewDownloads || (self_->_wifiOnly && previousInterface != wifiInterface)) {
+                    [self_ notifyChange];
+                }
             });
             nw_path_monitor_start(_monitor);
         }

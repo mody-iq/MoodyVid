@@ -53,6 +53,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSIndexSet *availablePieces;
 /// How many blocks this peer may have in flight at once.
 @property (nonatomic) NSInteger maxInFlight;
+/// Nonzero binds the socket to this interface. Set before start; a failed bind
+/// closes the socket instead of falling back to cellular.
+@property (nonatomic) unsigned int boundInterfaceIndex;
 /// Filled in when the connection ends, for the log.
 @property (nonatomic, copy, nullable) NSString *failureReason;
 /// The engine's job key, so a delegate callback can find the job it belongs to.

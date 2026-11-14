@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import time
+from urllib.parse import urlsplit
 
 # iOS ships no ffmpeg, so yt-dlp cannot merge a separate video stream with a
 # separate audio stream. Every selector must therefore resolve to one file that
@@ -19,6 +20,17 @@ FORMATS = {
 }
 
 
+_FORMAT_ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$", re.ASCII)
+
+
+def _explicit_format(quality, prefix):
+    """Accept one extractor-supplied ID, never an arbitrary yt-dlp expression."""
+    if not isinstance(quality, str) or not quality.startswith(prefix):
+        return None
+    value = quality[len(prefix):]
+    return value if _FORMAT_ID.fullmatch(value) else None
+
+
 def _selector(quality):
     """The yt-dlp format string for a quality the UI asked for.
 
@@ -26,6 +38,9 @@ def _selector(quality):
     any number of pixels ("1080"), not just the named presets. Every branch still
     resolves to one combined file: there is no ffmpeg on iOS to merge two.
     """
+    explicit = _explicit_format(quality, "fmt:")
+    if explicit:
+        return explicit
     if quality in FORMATS:
         return FORMATS[quality]
     if isinstance(quality, str) and quality.isdigit():
@@ -219,6 +234,165 @@ def _client_order():
     return order
 
 
+_PREVIEW_LIMIT = 100
+
+
+def _safe_http_url(value):
+    """A playlist result is untrusted input: never queue local or custom URLs."""
+    if not isinstance(value, str) or not value or len(value) > 8192:
+        return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+            return None
+        _ = parsed.port  # reject malformed and out-of-range ports
+    except ValueError:
+        return None
+    return value
+
+
+def _preview_info(url, playlist):
+    """Extract metadata without downloading; bound playlist size and retries."""
+    if not _safe_http_url(url):
+        raise ValueError("enter an HTTP or HTTPS link")
+    import yt_dlp
+    _use_bundled_certificates()
+    last_error = None
+    for client in _client_order():
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "noplaylist": not playlist, "socket_timeout": 8, "retries": 1}
+        if playlist:
+            opts.update({"extract_flat": "in_playlist", "playlistend": _PREVIEW_LIMIT + 1,
+                         "ignoreerrors": True, "lazy_playlist": True})
+        if client:
+            opts["extractor_args"] = {"youtube": {"player_client": client}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                # Flat playlists can be lazy generators that require the still
+                # open YoutubeDL context; consume at most one beyond the limit.
+                if playlist and isinstance(info, dict) and info.get("entries") is not None:
+                    entries = []
+                    for entry in info["entries"]:
+                        entries.append(entry)
+                        if len(entries) > _PREVIEW_LIMIT:
+                            break
+                    info = dict(info, entries=entries)
+            if isinstance(info, dict):
+                _good_client[0], _good_client[1] = client, time.time()
+                return info
+            last_error = ValueError("the link did not return media details")
+        except Exception as exc:
+            last_error = exc
+    raise last_error or ValueError("could not read the link")
+
+
+def _number(value, maximum):
+    # bool is a subclass of int; NaN and infinite values must not reach JSON/UI.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if not (0 < value <= maximum):
+        return 0
+    return int(value)
+
+
+def _format_choices(info):
+    """Return actual MP4 video formats the app can try to play or mux.
+
+    Each choice carries a single, validated format ID, not a selector expression.
+    For separate video streams the reported size explicitly excludes audio.
+    """
+    formats = info.get("formats")
+    if not isinstance(formats, list):
+        formats = [info]
+    has_audio = any(isinstance(f, dict) and f.get("acodec") not in (None, "none")
+                    and f.get("vcodec") in (None, "none") for f in formats)
+    selected = {}
+    for f in formats[:2000]:
+        if not isinstance(f, dict):
+            continue
+        format_id = f.get("format_id")
+        height = _number(f.get("height"), 8640)
+        if not isinstance(format_id, str) or not _FORMAT_ID.fullmatch(format_id) or not height:
+            continue
+        if str(f.get("ext", "")).lower() not in ("mp4", "m4v", "mov"):
+            continue
+        codec = str(f.get("vcodec") or "").lower()
+        if not codec.startswith(("avc", "h264", "hev", "hvc", "h265")):
+            continue
+        separate = f.get("acodec") in (None, "none")
+        if separate and not has_audio:
+            continue
+        fps = _number(f.get("fps"), 240)
+        size = _number(f.get("filesize"), 1 << 50)
+        estimated = False
+        if not size:
+            size = _number(f.get("filesize_approx"), 1 << 50)
+            estimated = bool(size)
+        rate = _number(f.get("tbr"), 10000000)
+        choice = {"quality": ("split:" if separate else "fmt:") + format_id,
+                  "height": height, "fps": fps, "ext": str(f.get("ext")).lower(),
+                  "size": size, "estimated": estimated, "video_only": separate}
+        # One actual variant per height keeps the sheet short. Prefer higher fps,
+        # then a combined file, then bitrate; do not fabricate an exact total size.
+        score = (fps, not separate, rate)
+        if height not in selected or score > selected[height][0]:
+            selected[height] = (score, choice)
+    return [selected[h][1] for h in sorted(selected, reverse=True)[:20]]
+
+
+def inspect_formats(url):
+    """UI preview: actual usable video formats, with best-effort sizes."""
+    try:
+        info = _preview_info(url, False)
+        return json.dumps({"formats": _format_choices(info)}, ensure_ascii=False)
+    except Exception as exc:
+        return _error(exc)
+
+
+def _playlist_entry_url(entry):
+    for key in ("webpage_url", "original_url", "url"):
+        value = _safe_http_url(entry.get(key))
+        if value:
+            return value
+    # yt-dlp's flat YouTube extractor often supplies a bare ID rather than URL.
+    video_id = entry.get("id") or entry.get("url")
+    if (str(entry.get("ie_key") or "").lower() == "youtube" and
+            isinstance(video_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id)):
+        return "https://www.youtube.com/watch?v=" + video_id
+    return None
+
+
+def inspect_playlist(url):
+    """Return at most 100 selectable video URLs; never queue anything here."""
+    try:
+        info = _preview_info(url, True)
+        entries = info.get("entries")
+        if not isinstance(entries, list):
+            return _error("this link is not a supported playlist")
+        rows = []
+        seen = set()
+        for entry in entries[:_PREVIEW_LIMIT]:
+            if not isinstance(entry, dict) or entry.get("_type") in ("playlist", "multi_video"):
+                continue
+            address = _playlist_entry_url(entry)
+            if not address or address in seen:
+                continue
+            seen.add(address)
+            title = entry.get("title")
+            title = title[:300] if isinstance(title, str) and title.strip() else address
+            rows.append({"url": address, "title": title,
+                         "duration": _number(entry.get("duration"), 7 * 24 * 60 * 60)})
+        if not rows:
+            return _error("no selectable videos were found in this playlist")
+        title = info.get("title")
+        return json.dumps({"title": title[:300] if isinstance(title, str) else "",
+                           "entries": rows, "truncated": len(entries) > _PREVIEW_LIMIT},
+                          ensure_ascii=False)
+    except Exception as exc:
+        return _error(exc)
 
 
 def prewarm():
@@ -407,6 +581,9 @@ def _fragment_format(kind, quality):
     """
     if kind == "audio":
         return "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best[ext=m4a]/best"
+    explicit = _explicit_format(quality, "split:")
+    if explicit:
+        return explicit
     height = 2160
     if isinstance(quality, str):
         digits = quality[:-1] if quality.endswith("p") else quality
