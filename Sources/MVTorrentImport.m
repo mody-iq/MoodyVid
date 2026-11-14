@@ -67,7 +67,9 @@ static NSData *MVReadTorrentDescriptor(int fd) {
 
 - (NSString *)importFileURL:(NSURL *)url error:(NSString **)error {
     if (!url.isFileURL) { if (error) *error = @"This torrent file could not be read"; return nil; }
-    int input = open(url.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    // A document provider could return a non-regular object. O_NONBLOCK keeps
+    // opening a FIFO from hanging before fstat has a chance to reject it.
+    int input = open(url.fileSystemRepresentation, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     NSData *data = MVReadTorrentDescriptor(input);
     if (input >= 0) close(input);
     if (!data || ![MVTorrentMetadata metadataWithTorrentData:data error:NULL]) {
@@ -107,7 +109,7 @@ static NSData *MVReadTorrentDescriptor(int fd) {
     if (!name) return nil;
     int directory = [self openDirectoryCreating:NO];
     if (directory < 0) return nil;
-    int fd = openat(directory, name.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = openat(directory, name.fileSystemRepresentation, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     NSData *data = MVReadTorrentDescriptor(fd);
     if (fd >= 0) close(fd);
     close(directory);

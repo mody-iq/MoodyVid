@@ -14,6 +14,7 @@
 #import "MVPaths.h"
 #include <limits.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int failures = 0;
@@ -62,6 +63,9 @@ static void testTorrentImport(void) {
     NSString *linkPath = [temp stringByAppendingPathComponent:@"link.torrent"];
     CHECK(symlink(source.fileSystemRepresentation, linkPath.fileSystemRepresentation) == 0, "make selected symlink");
     CHECK(![store importFileURL:[NSURL fileURLWithPath:linkPath] error:&error], "selected symlink is rejected");
+    NSString *pipePath = [temp stringByAppendingPathComponent:@"pipe.torrent"];
+    CHECK(mkfifo(pipePath.fileSystemRepresentation, 0600) == 0, "make selected FIFO");
+    CHECK(![store importFileURL:[NSURL fileURLWithPath:pipePath] error:&error], "non-regular selected file is rejected without blocking");
     NSString *large = [temp stringByAppendingPathComponent:@"large.torrent"];
     int fd = open(large.fileSystemRepresentation, O_CREAT | O_WRONLY | O_EXCL, 0600);
     CHECK(fd >= 0 && ftruncate(fd, (off_t)(2 * MV_TORRENT_MAX_METADATA_BYTES + 1)) == 0, "create oversized sparse fixture");
@@ -79,6 +83,9 @@ static void testTorrentImport(void) {
     CHECK(![store dataForReference:reference], "cached symlink is not followed");
     [store removeReference:reference];
     CHECK([[NSData dataWithContentsOfFile:source] isEqualToData:B(@"changed")], "cleanup never follows cached symlink");
+    CHECK(unlink(payload.fileSystemRepresentation) == 0 && mkfifo(payload.fileSystemRepresentation, 0600) == 0,
+          "replace cached symlink with FIFO");
+    CHECK(![store dataForReference:reference], "non-regular cached file is rejected without blocking");
     [fm removeItemAtPath:temp error:nil];
 }
 

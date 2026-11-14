@@ -79,8 +79,10 @@ int main(void) {
         [MVDownloadStore setTestRecords:@[completedRecord, unfinishedRecord]];
         CHECK([store moveToTrash:a protecting:@[] error:&error] && ![fm fileExistsAtPath:a]);
         [MVStorageProtection forgetCompletedRecordsAtPath:a];
-        CHECK([MVTaskStore.shared.tasks isEqualToArray:@[unfinishedTask, otherTask]]);
-        CHECK([MVDownloadStore.shared.records isEqualToArray:@[unfinishedRecord]]);
+        NSArray *expectedTasks = @[unfinishedTask, otherTask];
+        NSArray *expectedRecords = @[unfinishedRecord];
+        CHECK([MVTaskStore.shared.tasks isEqualToArray:expectedTasks]);
+        CHECK([MVDownloadStore.shared.records isEqualToArray:expectedRecords]);
         [MVTaskStore setTestTasks:@[]];
         [MVDownloadStore setTestRecords:@[]];
         NSArray *entries = store.entries;
